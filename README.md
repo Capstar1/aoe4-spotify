@@ -5,6 +5,10 @@ and Spotify switches to your Feudal, Castle and Imperial playlists the moment **
 (it detects which player you are, so other players' age-ups don't count).
 Switches fade out/in smoothly, start on a random track, shuffle, and loop the playlist.
 
+**Boss intro:** when you reach Imperial Age, a civ-themed boss track from the OCTOPATH TRAVELER
+soundtrack plays first (e.g. *For Freedom* for Japanese, *For Light* for French), then your
+Imperial playlist continues. Each civ has 2-3 tracks and never repeats the previous pick.
+
 Windows only. Python standard library only. MIT licensed.
 
 ## Requirements
@@ -45,7 +49,9 @@ your original launch options are restored exactly.
 
 `config.json` next to the exe: `client_id`, `playlists` (`dark`, `feudal`, `castle`, `imperial`
 as `spotify:playlist:...` URIs), `fade_seconds` (0 = no fade), `shuffle`, `repeat`,
-`device_id` and `log_path` (optional).
+`device_id` and `log_path` (optional), and `boss_intro`: `enabled`, `ages` (default
+`["imperial"]`), `pools` (internal civ id such as `japanese`, `mongol_ha_gol`, `french_ha_01` ->
+list of `spotify:track:` URIs) and `default` (for civs not listed).
 
 ## Build from source
 

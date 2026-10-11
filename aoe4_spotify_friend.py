@@ -159,7 +159,8 @@ class Spotify:
             time.sleep(secs / steps)
         return True
 
-    def switch(self, uri, fade=2.0):
+    def switch(self, uri, fade=2.0, player=None):
+        player = player or self.play
         if not hasattr(self, "_glock"):
             self._glock = threading.Lock(); self._gen = 0; self._orig = None
         with self._glock:
@@ -174,12 +175,12 @@ class Spotify:
             self._orig = orig
         try:
             if orig is None or fade <= 0:
-                return self.play(uri)
+                return player(uri)
             if not self._ramp(orig, 0, fade, gen):
                 if gen != self._gen: return False
                 log("Spotify: volume control not allowed on this device, switching without fade")
-                self._set_vol(orig); return self.play(uri)
-            ok = self.play(uri)
+                self._set_vol(orig); return player(uri)
+            ok = player(uri)
             if not self._ramp(0, orig, fade, gen) and gen == self._gen: self._set_vol(orig)
             return ok
         finally:
@@ -187,6 +188,38 @@ class Spotify:
                 if gen == self._gen:
                     if self._orig is not None: self._set_vol(self._orig)
                     self._orig = None
+
+    # ---- boss intro: play one track, then the age playlist (runs in a background thread)
+    def boss_then(self, track, playlist, fade=2.0):
+        if not hasattr(self, "_glock"):
+            self._glock = threading.Lock(); self._gen = 0; self._orig = None
+        dq = "?device_id=" + self.device_id if self.device_id else ""
+        # intro must not loop: repeat off, then play it as a single-track list
+        self._api("PUT", "/me/player/repeat?state=off" + dq.replace("?", "&"))
+        ok = self.switch_uris(track, fade)
+        gen = self._gen
+        if not ok: return self.switch(playlist, fade)
+        _, tr = self._api("GET", "/tracks/" + track.split(":")[-1])
+        dur = (tr or {}).get("duration_ms", 240000) if isinstance(tr, dict) else 240000
+        t0 = time.time(); started = False
+        while time.time() - t0 < dur / 1000.0 + 15:
+            time.sleep(2)
+            if gen != self._gen: return                     # a newer switch took over
+            c, st = self._api("GET", "/me/player")
+            if c != 200 or not isinstance(st, dict): continue
+            item = (st.get("item") or {}).get("uri")
+            if item == track: started = True
+            if started and item != track: break             # ended or skipped by the user
+            if item == track and st.get("progress_ms", 0) >= dur - 2500: break   # about to end
+            if started and not st.get("is_playing") and st.get("progress_ms", 1) == 0: break
+        if gen != self._gen: return
+        log("Boss intro done -> playlist")
+        self.switch(playlist, fade)
+
+    def switch_uris(self, track, fade):
+        """Like switch(), but plays a single track (uris) instead of a playlist context."""
+        q = "?device_id=" + self.device_id if self.device_id else ""
+        return self.switch(track, fade, player=lambda _u: self._play(track, {"uris": [track]}, q))
 
 # ---------------------------------------------------------------- log parsing
 RE_HUMAN   = re.compile(r"GAME -- Human Player: (\d+) (.+) (\d+) (\d+) (\S+)$")
@@ -233,7 +266,7 @@ class Tracker:
             return
         m = RE_HUMAN.search(line)
         if m and (m.group(3) == self.me_profile or (not self.me_profile and m.group(2) == self.me_name)):
-            self.my_slot = int(m.group(1))
+            self.my_slot = int(m.group(1)); self.my_civ = m.group(5)
             log("You are lobby slot %s (%s), team %s" % (m.group(1), m.group(5), m.group(4)))
             return
         if RE_REPLAY.search(line) and self.in_match:
@@ -255,7 +288,7 @@ class Tracker:
                 if self.my_id is None: self.resolve_id()
                 if pid == self.my_id and new in KEY and self.ages.get(pid) != new:
                     self.ages[pid] = new
-                    log("YOU are aging up to %s -> %s playlist" % (new, KEY[new])); self.play(KEY[new])
+                    log("YOU are aging up to %s -> %s playlist" % (new, KEY[new])); self.play(KEY[new], getattr(self, "my_civ", None))
             return
         m = RE_UPDONE.search(line)
         if m and self.in_match and not self.replay:
@@ -267,7 +300,7 @@ class Tracker:
             if self.my_id is None:
                 log("Player %d reached %s - could not identify you, staying on current playlist" % (pid, new))
             elif pid == self.my_id and new in KEY:
-                log("YOU reached %s -> %s playlist" % (new, KEY[new])); self.play(KEY[new])
+                log("YOU reached %s -> %s playlist" % (new, KEY[new])); self.play(KEY[new], getattr(self, "my_civ", None))
 
     def resolve_id(self):
         """Map lobby slot -> sim player id via the playermap in LogFiles/DataCRC*.txt,
@@ -284,6 +317,28 @@ class Tracker:
         except Exception as e:
             log("Could not read DataCRC player map: %s" % e)
 
+# ---------------------------------------------------------------- boss intro
+# When YOU reach a configured age (default Imperial), first play one "boss intro" track picked
+# by your civ, then continue into that age's playlist. Pools live in config.json "boss_intro".
+BOSS_STATE = os.path.join(globals().get("DATA", HERE), "boss_state.json")   # last pick per civ
+
+def pick_boss_track(cfg, civ):
+    b = cfg.get("boss_intro") or {}
+    pool = [u for u in ((b.get("pools") or {}).get(civ) or b.get("default") or []) if u.startswith("spotify:track:")]
+    if not pool: return None
+    try: state = json.load(open(BOSS_STATE, encoding="utf-8"))
+    except Exception: state = {}
+    choices = [u for u in pool if u != state.get(civ)] or pool      # never the same as last time
+    uri = random.choice(choices)
+    state[civ] = uri
+    try: json.dump(state, open(BOSS_STATE, "w", encoding="utf-8"), indent=1)
+    except Exception as e: log("Could not save boss state: %r" % e)
+    return uri
+
+def boss_age(cfg, key):
+    b = cfg.get("boss_intro") or {}
+    return bool(b.get("enabled", True)) and key in (b.get("ages") or ["imperial"])
+
 def slot_to_id(path):
     with open(path, encoding="utf-8", errors="replace") as f: t = f.read()
     i = t.index("playermap:"); blk = t[i:t.index("}", i)]
@@ -296,7 +351,7 @@ def tail(path, tracker, stop=None):
     then follow new lines live. Handles the log being recreated or truncated."""
     pos, ino, last_check = 0, None, 0
     real_play = tracker.play
-    tracker.play = lambda k: None          # catch-up: no Spotify calls
+    tracker.play = lambda *a: None          # catch-up: no Spotify calls
     tracker.catching_up = True
     caught_up = False
     log("Watching %s" % path)
@@ -478,7 +533,7 @@ def main():
     if args[:1] == ["--remove-launch-option"]: remove_launch_option(); return
     cfg = load_config()
     if args[:1] == ["--dry-run"]:
-        t = Tracker(cfg, lambda k: log("   [dry-run] would play %s: %s" % (k, cfg["playlists"].get(k))))
+        t = Tracker(cfg, lambda k, civ=None: log("   [dry-run] would play %s%s: %s" % (k, (" (boss intro for %s: %s)" % (civ, pick_boss_track(cfg, civ))) if civ and boss_age(cfg, k) else "", cfg["playlists"].get(k))))
         crcs = args[2:]
         for line in open(args[1], encoding="utf-8", errors="replace"):
             if RE_BEGIN.search(line) and crcs:
@@ -508,10 +563,16 @@ def main():
         if time.time() - t0 > 300: log("AoE4 did not start within 5 minutes - exiting"); return
         time.sleep(3)
     log("AoE4 is running")
-    def play(k):
+    def play(k, civ=None):
         uri = cfg["playlists"].get(k, "")
         if not uri.startswith("spotify:") or "PASTE" in uri: log("No playlist set for %s" % k); return
-        threading.Thread(target=sp.switch, args=(uri, float(cfg.get("fade_seconds", 2))), daemon=True).start()
+        fade = float(cfg.get("fade_seconds", 2))
+        track = pick_boss_track(cfg, civ) if civ and boss_age(cfg, k) else None
+        if track:
+            log("Boss intro for %s: %s" % (civ, track))
+            threading.Thread(target=sp.boss_then, args=(track, uri, fade), daemon=True).start()
+        else:
+            threading.Thread(target=sp.switch, args=(uri, fade), daemon=True).start()
     path = os.path.expandvars(cfg.get("log_path") or DEFAULT_LOG)
     t = Tracker(cfg, play)
     t.crc_dir = os.path.join(os.path.dirname(path), "LogFiles")

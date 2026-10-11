@@ -10,5 +10,132 @@
   "log_path": "",
   "fade_seconds": 2,
   "shuffle": true,
-  "repeat": true
+  "repeat": true,
+  "boss_intro": {
+    "enabled": true,
+    "ages": [
+      "imperial"
+    ],
+    "pools": {
+      "french": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+      ],
+      "hre": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+      ],
+      "templar": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+      ],
+      "french_ha_01": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+      ],
+      "abbasid": [
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:7KIapIqUFMEvN3FraugpE7"
+      ],
+      "abbasid_ha_01": [
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:7KIapIqUFMEvN3FraugpE7"
+      ],
+      "byzantine": [
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:7KIapIqUFMEvN3FraugpE7"
+      ],
+      "malian": [
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+        "spotify:track:1NiVLozT1hFs8kTlZIVpbe",
+        "spotify:track:6rrYlL764Y64WDrXeqcJDJ"
+      ],
+      "sultanate": [
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+        "spotify:track:1NiVLozT1hFs8kTlZIVpbe",
+        "spotify:track:6rrYlL764Y64WDrXeqcJDJ"
+      ],
+      "ottoman": [
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+        "spotify:track:1NiVLozT1hFs8kTlZIVpbe",
+        "spotify:track:6rrYlL764Y64WDrXeqcJDJ"
+      ],
+      "english": [
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:7dvOs8YFcXJ0tqXzxTg0an"
+      ],
+      "hre_ha_01": [
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:7dvOs8YFcXJ0tqXzxTg0an"
+      ],
+      "lancaster": [
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:7dvOs8YFcXJ0tqXzxTg0an"
+      ],
+      "mongol": [
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:6rrYlL764Y64WDrXeqcJDJ",
+        "spotify:track:2aD8OyfNrAcuONAUiPYwtm"
+      ],
+      "mongol_ha_gol": [
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:6rrYlL764Y64WDrXeqcJDJ",
+        "spotify:track:2aD8OyfNrAcuONAUiPYwtm"
+      ],
+      "rus": [
+        "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:0RiwXmTRYvQgZY9H2d9mxH"
+      ],
+      "chinese_ha_01": [
+        "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:0RiwXmTRYvQgZY9H2d9mxH"
+      ],
+      "chinese": [
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:0eF9Z9vv4Fb1lwqSCaLHxd"
+      ],
+      "japanese": [
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:0eF9Z9vv4Fb1lwqSCaLHxd"
+      ],
+      "jin_dynasty": [
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
+        "spotify:track:3d80bouLhySElI9NYD1Ffh",
+        "spotify:track:0eF9Z9vv4Fb1lwqSCaLHxd"
+      ],
+      "japanese_ha_sen": [
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC",
+        "spotify:track:6WwQn6c45kIP9CjevshKaa",
+        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+      ],
+      "sultanate_ha_tug": [
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC",
+        "spotify:track:6WwQn6c45kIP9CjevshKaa",
+        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+      ],
+      "byzantine_ha_mac": [
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC",
+        "spotify:track:6WwQn6c45kIP9CjevshKaa",
+        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+      ]
+    },
+    "default": [
+      "spotify:track:3d80bouLhySElI9NYD1Ffh",
+      "spotify:track:6rrYlL764Y64WDrXeqcJDJ"
+    ]
+  }
 }
