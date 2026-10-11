@@ -1,6 +1,6 @@
 # AoE4 Spotify
 
-**Version 0.4.2 (early release).** Age-based music for **Age of Empires IV** on Windows.
+**Version 0.4.3 (early release).** Age-based music for **Age of Empires IV** on Windows.
 
 ## Features
 
