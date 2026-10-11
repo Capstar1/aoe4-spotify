@@ -1,7 +1,8 @@
-"""Builds the app icon: app.ico (exe, installer, shortcuts, title bars), app.png (panel header) and app_<size>.png.
+"""Builds the app icon: assets/app.ico (exe, installer, shortcuts, title bars and the panel header badge).
 Green circle with a dark "IV" (Age IV). Geometry in 1024 units; the glyph is centred optically (I/V centroid
 horizontally, bounding box vertically) and the I stroke is snapped to whole pixels at <= 48 px so it stays crisp.
 Usage: python make_icon.py"""
+import os
 from PIL import Image, ImageDraw
 G, D, W_ = "#1DB954", "#191414", 92
 SIZES = (16, 24, 32, 48, 64, 128, 256)
@@ -40,7 +41,6 @@ if __name__ == "__main__":
     ox, oy = 512 - cen[0], 512 - bc[1]
     print("glyph offset: %.3f, %.3f" % (ox, oy))
     ico = [render(s, W_, ox, oy, snapI=s <= 48) for s in SIZES]
-    ico[-1].save("app.ico", sizes=[(s, s) for s in SIZES], append_images=ico[:-1])
-    for s, i in zip(SIZES, ico): i.save("app_%d.png" % s)
-    ico[-1].save("app.png")
-    print("app.ico, app.png, app_<size>.png written")
+    os.makedirs("assets", exist_ok=True)
+    ico[-1].save(os.path.join("assets", "app.ico"), sizes=[(s, s) for s in SIZES], append_images=ico[:-1])
+    print("assets/app.ico written")

@@ -8,8 +8,8 @@ Requirements: Windows, Python 3.11+, Inno Setup 6 (`winget install JRSoftware.In
 1. Run it directly (optional): `python aoe4_spotify.py`
    Dry run against a saved log, no Spotify calls: `python aoe4_spotify.py --dry-run warnings.log`
 2. Build the app exe with PyInstaller:
-   `pyinstaller --noconfirm --onedir --windowed --name "AoE4 Spotify" --icon app.ico --add-data "app.ico;." --add-data "app.png;." --add-data "gtg_frames;gtg_frames" --add-data "assets;assets" aoe4_spotify.py`
-   (needs `pip install pyinstaller pillow`; `python make_icon.py` makes `app.ico` + `app.png` (green circle with a dark "IV"); Pillow draws the panel's round shapes)
+   `pyinstaller --noconfirm --onedir --windowed --name "AoE4 Spotify" --icon assets\app.ico --add-data "assets;assets" aoe4_spotify.py`
+   (needs `pip install pyinstaller pillow`; `python make_icon.py` makes `assets\app.ico` (green circle with a dark "IV"; the panel badge is read from it); Pillow draws the panel's round shapes)
    -> `dist\AoE4 Spotify.exe`
 3. Build the installer: `ISCC.exe setup.iss` -> `out\AoE4 Spotify Setup.exe`
    (it embeds `dist\AoE4 Spotify.exe`, `config.json` and this source folder).
@@ -37,7 +37,7 @@ Testing the Steam close/reopen without touching real Steam: run Setup with
 
 ## Good-to-go window art
 
-`gtg_frames\` holds the animation shown after login: every frame of the source GIF (cropped to the circle, watermark corner painted over, ~650 KB of JPEGs) plus `frames.json` with the original per-frame timing. It is bundled into the exe with `--add-data`. Regenerate with `python make_gtg_frames.py source.gif`.
+`assets\gtg_face.jpg` is the animation shown after login as one sprite sheet (10 frames per row, every frame of the source GIF cropped to the circle, watermark corner painted over); `assets\gtg_face.json` holds the frame size, count and the original per-frame timing. Regenerate with `python make_gtg_frames.py source.gif`.
 
 ## Test builds
 

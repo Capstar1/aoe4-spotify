@@ -1,6 +1,6 @@
 ; Inno Setup script for AoE4 Spotify. Build: ISCC.exe setup.iss (after building the dist\AoE4 Spotify\ folder)
 #ifndef AppVer
-#define AppVer "0.3.1"
+#define AppVer "0.3.2"
 #endif
 #ifdef TEST
 ; test build (ISCC /DTEST): separate AppId/name/folder so it never touches a real install
@@ -16,7 +16,7 @@ AppName={#AppName}
 AppVersion={#AppVer}
 AppPublisher=Capstar
 LicenseFile=LICENSE
-SetupIconFile=app.ico
+SetupIconFile=assets\app.ico
 DefaultDirName={localappdata}\Programs\{#AppName}
 DisableDirPage=yes
 DisableProgramGroupPage=yes
@@ -25,7 +25,7 @@ PrivilegesRequired=lowest
 OutputDir=out
 OutputBaseFilename={#AppName} Setup
 UninstallDisplayName={#AppName}
-UninstallDisplayIcon={app}\_internal\app.ico
+UninstallDisplayIcon={app}\_internal\assets\app.ico
 ; refresh Explorer's icon cache at the end (new icon shows on shortcuts / Installed apps right away)
 ChangesAssociations=yes
 Compression=lzma2
@@ -46,13 +46,12 @@ Source: "LICENSE"; DestDir: "{app}\source"
 Source: "make_icon.py"; DestDir: "{app}\source"
 Source: "make_gtg_frames.py"; DestDir: "{app}\source"
 Source: "make_editor_assets.py"; DestDir: "{app}\source"
-Source: "app.ico"; DestDir: "{app}\source"
-Source: "app.png"; DestDir: "{app}\source"
+Source: "assets\app.ico"; DestDir: "{app}\source\assets"
 
 [Icons]
 ; control panel (settings window)
-Name: "{userdesktop}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\app.ico"
-Name: "{userprograms}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\app.ico"
+Name: "{userdesktop}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\assets\app.ico"
+Name: "{userprograms}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\assets\app.ico"
 
 [InstallDelete]
 ; app is a PyInstaller folder build (exe + _internal); drop stale libraries from an older build first

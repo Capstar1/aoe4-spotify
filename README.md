@@ -9,11 +9,11 @@
   so other players' age-ups don't count).
 - **Fade:** switches fade out and back in smoothly (0-5 s, default 2 s, 0 = off).
 - **Shuffle / repeat:** each playlist starts on a random track, shuffles, and loops.
-- **Imperial Age Intro:** when you reach Imperial Age, one civ-themed theme from the OCTOPATH TRAVELER
+- **Age Intros:** when you reach Imperial Age, one civ-themed theme from the OCTOPATH TRAVELER
   soundtrack plays first (one of the 8 *For ...* themes, e.g. *For Light* for French, *For Master* for
   Japanese), then your Imperial playlist continues. A civ never gets the same theme twice in a row.
-- **Imperial Age Intro editor:** a tier-list style editor (opened from the Imperial Age Intro row in the
-  Control Panel) with every civ's flag. Drag character chips from the tray onto a civ to add a theme;
+- **Age Intros editor:** a tier-list style editor (opened from the Age Intros row in the Control Panel) with a tab and on/off switch per age (Dark = match start, Feudal, Castle, Imperial; only Imperial is on by default). Add your own Spotify songs with the + chip (right-click to remove). Ctrl+Z / Ctrl+Y undo and redo.
+  Every tab with every civ's flag. Drag character chips from the tray onto a civ to add a theme;
   drag out, right-click or click x to remove (every civ keeps at least one). Undo per civ or Reset all.
   Click a chip to hear that theme on Spotify (a green pulse marks it; click again to pause).
   Changes apply from the next match.
@@ -70,7 +70,7 @@ reopened the same way, and your original launch options are restored.
 
 `config.json` next to the exe holds the defaults: `client_id`, `playlists` / `default_playlists`
 (`dark`, `feudal`, `castle`, `imperial` as `spotify:playlist:...` URIs), `fade_seconds`, `shuffle`,
-`repeat`, optional `device_id` / `log_path`, and `boss_intro` (the Imperial Age Intro): `enabled`,
+`repeat`, optional `device_id` / `log_path`, and `boss_intro` (the Age Intros): `enabled`,
 `ages` (default `["imperial"]`), `pools` (internal civ id -> list of `spotify:track:` URIs) and
 `default` (for civs not listed). The Control Panel and editor settings are layered on top
 (`%APPDATA%\AoE4Spotify\config.json`, editor pools as `boss_pools`) and never change this file.
