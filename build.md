@@ -8,8 +8,8 @@ Requirements: Windows, Python 3.11+, Inno Setup 6 (`winget install JRSoftware.In
 1. Run it directly (optional): `python aoe4_spotify.py`
    Dry run against a saved log, no Spotify calls: `python aoe4_spotify.py --dry-run warnings.log`
 2. Build the app exe with PyInstaller:
-   `pyinstaller --noconfirm --onefile --windowed --name "AoE4 Spotify" --icon app.ico aoe4_spotify.py`
-   (needs `pip install pyinstaller pillow`; `python make_icon.py` makes `app.ico`; Pillow draws the panel's round shapes)
+   `pyinstaller --noconfirm --onedir --windowed --name "AoE4 Spotify" --icon app.ico --add-data "app.ico;." --add-data "app.png;." --add-data "gtg_frames;gtg_frames" --add-data "assets;assets" aoe4_spotify.py`
+   (needs `pip install pyinstaller pillow`; `python make_icon.py` makes `app.ico` + `app.png` (green circle with a dark "IV"); Pillow draws the panel's round shapes)
    -> `dist\AoE4 Spotify.exe`
 3. Build the installer: `ISCC.exe setup.iss` -> `out\AoE4 Spotify Setup.exe`
    (it embeds `dist\AoE4 Spotify.exe`, `config.json` and this source folder).
@@ -37,5 +37,17 @@ Testing the Steam close/reopen without touching real Steam: run Setup with
 
 ## Good-to-go window art
 
-`gtg_frames\` holds the animated face shown after login (9 small JPEGs, bundled into the exe with `--add-data`). They were made with `make_gtg_frames.py source.gif`: only the opening face frames are kept, the face is cropped and the watermark corner painted over.
+`gtg_frames\` holds the animation shown after login: every frame of the source GIF (cropped to the circle, watermark corner painted over, ~650 KB of JPEGs) plus `frames.json` with the original per-frame timing. It is bundled into the exe with `--add-data`. Regenerate with `python make_gtg_frames.py source.gif`.
 
+## Test builds
+
+`ISCC /DTEST setup.iss` builds *AoE4 Spotify TEST Setup.exe* with its own AppId, folder and shortcuts, so upgrade tests never touch a real install (it also skips deleting `%APPDATA%\AoE4Spotify` on uninstall).
+
+## Editor art
+
+`assets\portraits\` (8 OCTOPATH TRAVELER portraits, 96 px) and `assets\flags\` (23 AoE4 civ flags from aoe4world/overlay, 60x32 px, plus a neutral `_unknown.png`) are bundled into the exe with `--add-data "assets;assets"`. Regenerate with `python make_editor_assets.py <portrait dir> <flag dir>`.
+
+
+## Folder build
+
+The app is built with PyInstaller `--onedir` (`dist\AoE4 Spotify\AoE4 Spotify.exe` + `_internal\`), and the installer copies the whole folder. A one-file exe unpacks itself to `%TEMP%\_MEI*` on every start and can fail to clean it up when it starts other processes. Upgrading over an old one-file install replaces the exe and adds `_internal`. Child processes get a clean environment (`PYINSTALLER_RESET_ENVIRONMENT=1`, no `_MEI`/`_PYI` variables).

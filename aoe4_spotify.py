@@ -20,7 +20,14 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled files (app.ico, gtg_frames/) inside the exe
+VERSION = "0.3"
+ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled files (app.ico, gtg_frames/, assets/): _internal next to the exe
+
+def child_env():
+    """Environment for processes we start: never pass PyInstaller's bootloader variables on."""
+    env = {k: v for k, v in os.environ.items() if not (k.startswith("_PYI") or k.startswith("_MEI") or k in ("TCL_LIBRARY", "TK_LIBRARY"))}
+    if FROZEN: env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
 DATA = os.path.join(os.environ.get("APPDATA") or HERE, "AoE4Spotify")
 os.makedirs(DATA, exist_ok=True)
 TOKEN = os.path.join(DATA, "token.json")   # private Spotify login token; never shared or packaged
@@ -71,6 +78,12 @@ def apply_user(cfg, u):
     if isinstance(u.get("enabled"), bool): cfg["enabled"] = u["enabled"]
     if isinstance(u.get("fade_seconds"), (int, float)): cfg["fade_seconds"] = max(0.0, min(5.0, float(u["fade_seconds"])))
     if isinstance(u.get("boss_intro_enabled"), bool): cfg.setdefault("boss_intro", {})["enabled"] = u["boss_intro_enabled"]
+    bp = u.get("boss_pools")                                   # from the Imperial Age Intro editor
+    if isinstance(bp, dict):
+        pools = cfg.setdefault("boss_intro", {}).setdefault("pools", {})
+        for civ, lst in bp.items():
+            if isinstance(lst, list) and lst and all(isinstance(x, str) and x.startswith("spotify:track:") for x in lst):
+                pools[civ] = list(lst)
     return cfg
 
 # ---------------------------------------------------------------- Spotify desktop app launch
@@ -98,9 +111,9 @@ def launch_spotify():
     exe = os.path.join(os.environ.get("APPDATA", ""), "Spotify", "Spotify.exe")
     try:
         if os.path.isfile(exe):                                   # classic installer
-            subprocess.Popen([exe, "--minimized"], creationflags=0x08000000); log("Started Spotify (minimized)"); return True
+            subprocess.Popen([exe, "--minimized"], env=child_env(), creationflags=0x08000000); log("Started Spotify (minimized)"); return True
         if os.path.isdir(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", STORE_APP)):   # Microsoft Store
-            subprocess.Popen(["explorer.exe", r"shell:AppsFolder\%s!Spotify" % STORE_APP]); log("Started Spotify (Microsoft Store app)"); return True
+            subprocess.Popen(["explorer.exe", r"shell:AppsFolder\%s!Spotify" % STORE_APP], env=child_env()); log("Started Spotify (Microsoft Store app)"); return True
         if _spotify_protocol_registered():
             os.startfile("spotify:"); log("Started Spotify via spotify: link"); return True
     except Exception as e:
@@ -172,7 +185,8 @@ class Spotify:
         log("Spotify login OK, token cached in token.json")
 
     def access(self):
-        if not self.tok: self.login()
+        # Never opens the login page by itself: background calls (panel, game) just fail quietly.
+        if not self.tok: raise RuntimeError("not logged in to Spotify")
         if time.time() > self.tok.get("expires_at", 0):
             try:
                 self._save(self._token_req({"grant_type": "refresh_token",
@@ -507,6 +521,53 @@ def aoe_running():
     except Exception:
         return False
 
+_WINDOW_MUTEXES = {}
+def single_window(name, title):
+    """One window of each kind (panel, good-to-go, editor) per user. Returns True if this process may open it.
+    Otherwise brings the existing window to the front (restoring it if minimized) and returns False.
+    Separate from the switcher's single-instance guard."""
+    try:
+        import ctypes
+        k32, u32 = ctypes.windll.kernel32, ctypes.windll.user32
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        nm = "Local\\AoE4Spotify_window_%s%s" % (name, os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX", ""))  # suffix: tests only
+        h = k32.CreateMutexW(None, False, nm)
+        if k32.GetLastError() == 183:             # ERROR_ALREADY_EXISTS
+            if h: k32.CloseHandle(ctypes.c_void_p(h))
+            u32.FindWindowW.restype = ctypes.c_void_p
+            w = None
+            try:                                   # exact window recorded by the owner (titles can repeat)
+                w = int(open(_hwnd_file(name)).read()) or None
+                if not u32.IsWindow(ctypes.c_void_p(w)): w = None
+            except Exception: w = None
+            w = w or u32.FindWindowW(None, title)
+            if w:
+                if u32.IsIconic(ctypes.c_void_p(w)): u32.ShowWindow(ctypes.c_void_p(w), 9)   # SW_RESTORE
+                u32.SetForegroundWindow(ctypes.c_void_p(w))
+            log("%s is already open - brought it to the front" % title)
+            return False
+        _WINDOW_MUTEXES[name] = h
+        return True
+    except Exception:
+        return True                               # not Windows / no ctypes: no guard
+
+def _hwnd_file(name):
+    return os.path.join(os.environ.get("TEMP", HERE), "AoE4Spotify_window_%s%s.hwnd" % (name, os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX", "")))
+
+def note_window(name, win):
+    """Remember our top-level window handle so a second launch focuses exactly this window."""
+    try:
+        if sys.platform == "win32": open(_hwnd_file(name), "w").write(str(int(win.wm_frame(), 16)))
+    except Exception: pass
+
+def release_window(name):
+    try: os.remove(_hwnd_file(name))
+    except OSError: pass
+    h = _WINDOW_MUTEXES.pop(name, None)
+    if h:
+        try: import ctypes; ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(h))
+        except Exception: pass
+
 def single_instance():
     import ctypes
     ctypes.windll.kernel32.CreateMutexW(None, False, "AoE4SpotifySwitcherMutex")
@@ -656,12 +717,14 @@ def launch_option_is_set():
 def steam_running():
     import subprocess
     try:
-        out = subprocess.run(["tasklist", "/fi", "imagename eq steam.exe", "/nh"], capture_output=True,
+        name = os.environ.get("AOE4SPOTIFY_STEAM_PROC") or "steam.exe"     # env var: testing only (dummy Steam)
+        out = subprocess.run(["tasklist", "/fi", "imagename eq " + name, "/nh"], capture_output=True,
                              text=True, creationflags=0x08000000).stdout
-        return "steam.exe" in out.lower()
+        return name.lower() in out.lower()
     except Exception: return False
 
 def steam_exe():
+    if os.environ.get("AOE4SPOTIFY_STEAM_EXE"): return os.environ["AOE4SPOTIFY_STEAM_EXE"]   # testing only
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as k:
@@ -674,17 +737,17 @@ def with_steam_closed(fn):
     was = steam_running(); exe = steam_exe()
     if was:
         log("Closing Steam to edit the launch option")
-        if exe: subprocess.Popen([exe, "-shutdown"])
+        if exe: subprocess.Popen([exe, "-shutdown"], env=child_env())
         for _ in range(30):
             time.sleep(1)
             if not steam_running(): break
         else:
             log("Steam did not close in 30s - force closing")
-            subprocess.run(["taskkill", "/im", "steam.exe", "/f"], capture_output=True, creationflags=0x08000000)
+            subprocess.run(["taskkill", "/im", os.environ.get("AOE4SPOTIFY_STEAM_PROC") or "steam.exe", "/f"], capture_output=True, creationflags=0x08000000)
             time.sleep(2)
     try: fn()
     finally:
-        if was and exe: subprocess.Popen([exe, "-silent"]); log("Reopened Steam")
+        if was and exe: subprocess.Popen([exe, "-silent"], env=child_env()); log("Reopened Steam")
 
 def spotify_installed():
     return (os.path.isfile(os.path.join(os.environ.get("APPDATA", ""), "Spotify", "Spotify.exe"))
@@ -704,7 +767,7 @@ def setup_status(sp):
 def open_panel_process():
     import subprocess
     cmd = [sys.executable, "--panel"] if FROZEN else [sys.executable, os.path.abspath(__file__), "--panel"]
-    subprocess.Popen(cmd)
+    subprocess.Popen(cmd, env=child_env())
 
 # ---------------------------------------------------------------- "You're good to go" window
 def good_to_go(status, parent=None, on_open_panel=None, on_retry=None, fix=None):
@@ -715,7 +778,10 @@ def good_to_go(status, parent=None, on_open_panel=None, on_retry=None, fix=None)
     try: import ctypes; ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception: pass
     C = dict(bg="#121212", card="#1f1f1f", tx="#f2f2f2", mu="#9a9a9a", acc="#1DB954", red="#e5484d", warn="#f5a524")
+    if not single_window("gtg", "AoE4 Spotify"): return None
     win = tk.Toplevel(parent) if parent else tk.Tk()
+    dark_window(win, C["bg"])
+    win.bind("<Destroy>", lambda e: release_window("gtg") if e.widget is win else None, add="+")
     win.title("AoE4 Spotify"); win.configure(bg=C["bg"]); win.resizable(False, False)
     S = win.winfo_fpixels("1i") / 96.0
     W = 400
@@ -769,14 +835,16 @@ def good_to_go(status, parent=None, on_open_panel=None, on_retry=None, fix=None)
             except Exception as ex: log("Face frame %s: %r" % (p, ex)); continue
             im = Image.new("RGB", (D, D), C["bg"]); im.paste(f, (0, 0), mask)
             frames.append(ImageTk.PhotoImage(im, master=win))
-        return frames + frames[-2:0:-1]          # ping-pong loop
+        return frames                              # played straight through, then loops
     anim = {"i": 0}
-    def animate():
+    try: durs = json.load(open(os.path.join(ASSETS, "gtg_frames", "frames.json")))["durations_ms"]
+    except Exception: durs = []
+    def animate():                                 # original per-frame timing of the source GIF
         if not win.winfo_exists(): return
         it = cv.find_withtag("avatar")
         if it and faces:
             anim["i"] = (anim["i"] + 1) % len(faces); cv.itemconfig(it[0], image=faces[anim["i"]])
-        win.after(90, animate)
+        win.after(int(durs[anim["i"]]) if anim["i"] < len(durs) else 70, animate)
     def draw():
         cv.delete("all"); imgs.clear(); actions.clear()
         ok = status["ok"]
@@ -838,17 +906,85 @@ def good_to_go(status, parent=None, on_open_panel=None, on_retry=None, fix=None)
     def retry():
         close()
         if on_retry: on_retry()
-    def badge(d, k):                              # same app badge as app.ico / the panel
-        m = 32 * k; d.ellipse([0, 0, m - 1, m - 1], fill=C["acc"])
-        for o, hh in ((-0.2, 0.2), (0, 0.3), (0.2, 0.2)):
-            x = m * (0.5 + o); d.rounded_rectangle([x - m*.05, m*(.5-hh), x + m*.05, m*(.5+hh)], radius=m*.05, fill="#121212")
     set_app_icon(win)
     faces.extend(load_faces())
     draw(); animate()
     win._gtg = {"cv": cv, "status": status, "actions": actions, "draw": draw}   # for tests
-    win.lift(); win.attributes("-topmost", True); win.after(300, lambda: win.attributes("-topmost", False))
+    reveal(win, over=parent); note_window("gtg", win); win.lift(); win.attributes("-topmost", True); win.after(300, lambda: win.attributes("-topmost", False))
     if parent is None: win.mainloop()
     return win
+
+def dark_window(win, bg):
+    """Start hidden with the dark background, so a window never flashes white while it is built."""
+    try: win.withdraw()
+    except Exception: pass
+    win.configure(bg=bg)
+
+def place_centered(win, over=None):
+    """Centre on the monitor under the mouse (its work area), or over a visible parent window."""
+    try:
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        wa = None
+        if sys.platform == "win32":
+            import ctypes, ctypes.wintypes as wt
+            class MI(ctypes.Structure):
+                _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT), ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+            u32 = ctypes.windll.user32; pt = wt.POINT(); u32.GetCursorPos(ctypes.byref(pt))
+            if over is not None and over.winfo_viewable():
+                pt = wt.POINT(over.winfo_rootx() + over.winfo_width() // 2, over.winfo_rooty() + over.winfo_height() // 2)
+            u32.MonitorFromPoint.restype = ctypes.c_void_p
+            mon = u32.MonitorFromPoint(pt, 2)                       # MONITOR_DEFAULTTONEAREST
+            mi = MI(); mi.cbSize = ctypes.sizeof(MI)
+            if mon and u32.GetMonitorInfoW(ctypes.c_void_p(mon), ctypes.byref(mi)):
+                r = mi.rcWork; wa = (r.left, r.top, r.right, r.bottom)
+        if wa is None: wa = (0, 0, win.winfo_screenwidth(), win.winfo_screenheight())
+        if over is not None and over.winfo_viewable():
+            cx, cy = over.winfo_rootx() + over.winfo_width() // 2, over.winfo_rooty() + over.winfo_height() // 2
+        else:
+            cx, cy = (wa[0] + wa[2]) // 2, (wa[1] + wa[3]) // 2
+        tb = int(32 * win.winfo_fpixels("1i") / 96.0)                # title bar height
+        x = max(wa[0], min(cx - w // 2, wa[2] - w)); y = max(wa[1], min(cy - (h + tb) // 2, wa[3] - h - tb))
+        win.geometry("+%d+%d" % (x, y))
+    except Exception as e:
+        log("Window placement: %r" % e)
+
+def reveal(win, fade=True, over=None):
+    """Show a window built hidden: placed, dark title bar, first frame rendered, then a quick fade-in."""
+    try:
+        place_centered(win, over)
+        win.update_idletasks()
+        if sys.platform == "win32":
+            import ctypes
+            hwnd = ctypes.c_void_p(int(win.wm_frame(), 16)); on = ctypes.c_int(1)
+            for attr in (20, 19):                          # DWMWA_USE_IMMERSIVE_DARK_MODE (19 on older Win10)
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(on), 4) == 0: break
+        if fade: win.attributes("-alpha", 0.0)
+        win.deiconify(); win.update_idletasks()
+        if fade:
+            def step(a=0.25):
+                try: win.attributes("-alpha", min(1.0, a))
+                except Exception: return
+                if a < 1.0: win.after(16, lambda: step(a + 0.25))
+            step()
+    except Exception as e:
+        log("Window reveal: %r" % e)
+        try: win.deiconify(); win.attributes("-alpha", 1.0)
+        except Exception: pass
+
+def app_badge(px):
+    """The app icon (green circle, "IV") as a PIL image: from the bundled app.png, else drawn like make_icon.py."""
+    from PIL import Image, ImageDraw
+    try: return Image.open(os.path.join(ASSETS, "app.png")).convert("RGBA").resize((px, px), Image.LANCZOS)
+    except Exception: pass
+    ss = 8; N = px * ss; k = N / 1024; ox, oy, w = 0.409, -0.5, 92
+    im = Image.new("RGBA", (N, N), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+    d.ellipse([16 * k, 16 * k, N - 16 * k, N - 16 * k], fill="#1DB954")
+    for pts in ([(310, 320), (310, 704)], [(490, 320), (620, 704), (750, 320)]):
+        P = [((x + ox) * k, (y + oy) * k) for x, y in pts]; r = w * k / 2
+        for a, b in zip(P, P[1:]): d.line([a, b], fill="#191414", width=int(w * k))
+        for x, y in P: d.ellipse([x - r, y - r, x + r, y + r], fill="#191414")
+    return im.resize((px, px), Image.LANCZOS)
 
 def set_app_icon(win):
     """Title-bar icon = app.ico (bundled), so it matches the exe and shortcuts."""
@@ -880,7 +1016,7 @@ def main():
     args = sys.argv[1:]
     if args[:1] == ["--set-launch-option"]: with_steam_closed(set_launch_option); return   # no-op close if Setup already closed Steam
     if args[:1] == ["--remove-launch-option"]: remove_launch_option(); return
-    if args[:1] == ["--panel"]: panel(); return
+    if args[:1] == ["--panel"]: panel(); return        # (--panel --updated: just upgraded, shows "Updated to x.y")
     cfg = load_config()
     if args[:1] == ["--dry-run"]:
         t = Tracker(cfg, lambda k, civ=None: log("   [dry-run] would play %s%s: %s" % (k, (" (Age 4 Intro theme for %s: %s)" % (civ, pick_boss_track(cfg, civ))) if civ and boss_age(cfg, k) else "", cfg["playlists"].get(k))))
@@ -902,7 +1038,7 @@ def main():
     # Started by Steam with the game command (%command%) as args: start the game first.
     import subprocess
     game_dir = os.path.dirname(args[0]) if os.path.isfile(args[0]) else None
-    subprocess.Popen(args, cwd=game_dir)
+    subprocess.Popen(args, env=child_env(), cwd=game_dir)
     log("Started game: %s" % " ".join(args))
     if not cfg.get("enabled", True): log("Disabled in the control panel - game started, doing nothing else"); return
     if not single_instance(): log("Another switcher is already running - exiting"); return
@@ -917,7 +1053,7 @@ def main():
         uri = cfg["playlists"].get(k, "")
         if not uri.startswith("spotify:") or "PASTE" in uri: log("No playlist set for %s" % k); return
         fade = float(cfg.get("fade_seconds", 2))
-        track = pick_boss_track(cfg, civ) if civ and boss_age(cfg, k) else None
+        track = pick_boss_track(load_config(), civ) if civ and boss_age(cfg, k) else None   # editor changes apply next match
         if track:
             log("Age 4 Intro theme for %s: %s" % (civ, track))
             threading.Thread(target=sp.boss_then, args=(track, uri, fade), daemon=True).start()
@@ -938,6 +1074,327 @@ NAMES_CACHE = os.path.join(DATA, "playlist_names.json")
 AGES = [("dark", "Dark"), ("feudal", "Feudal"), ("castle", "Castle"), ("imperial", "Imperial")]
 RE_PLAYLIST = re.compile(r"(?:open\.spotify\.com/(?:intl-[a-z]+/)?playlist/|spotify:playlist:)([A-Za-z0-9]{22})")
 
+# ---------------------------------------------------------------- Imperial Age Intro editor
+# Which "For ..." theme each civ can get on reaching Imperial Age. Changes are saved as "boss_pools"
+# in the user settings overlay and used from the next match. A civ needs at least one song.
+SONGS = [  # key, song, character (portrait), Spotify track, ring colour
+    ("light", "For Light", "Ophilia", "spotify:track:5sEHThQpQWTZZVIbmFIx4k", "#e8d9a0"),
+    ("truth", "For Truth", "Cyrus", "spotify:track:0iBkJlkxLIZvw64YMJEhpY", "#6fa8dc"),
+    ("treasure", "For Treasure", "Tressa", "spotify:track:4RmbTKOJGdfKVEnwTUAobp", "#e0b040"),
+    ("redemption", "For Redemption", "Olberic", "spotify:track:6bZVraEtKL5lQ7TtUrhX8K", "#b0b0b0"),
+    ("revenge", "For Revenge", "Primrose", "spotify:track:6hdfIg76lNerf0bLt7ppAo", "#c0506a"),
+    ("succor", "For Succor", "Alfyn", "spotify:track:0JhmuCu4N8XT9nRVFsngS9", "#7cc47c"),
+    ("freedom", "For Freedom", "Therion", "spotify:track:3LxsqAQ0rXaLEHonDax63B", "#d9a066"),
+    ("master", "For Master", "H'aanit", "spotify:track:5X8te47Qx2kIeAqAicMrgC", "#8fbf6a"),
+]
+SONG_BY_URI = {s[3]: s for s in SONGS}
+CIV_LIST = [("french", "French"), ("hre", "HRE"), ("templar", "Templar"), ("french_ha_01", "Jeanne d'Arc"),
+            ("abbasid", "Abbasid"), ("abbasid_ha_01", "Ayyubids"), ("byzantine", "Byzantines"), ("malian", "Malians"),
+            ("sultanate", "Delhi"), ("ottoman", "Ottomans"), ("english", "English"), ("hre_ha_01", "Dragon"),
+            ("lancaster", "Lancaster"), ("mongol", "Mongols"), ("mongol_ha_gol", "Golden Horde"), ("rus", "Rus"),
+            ("chinese_ha_01", "Zhu Xi"), ("chinese", "Chinese"), ("japanese", "Japanese"), ("jin_dynasty", "Jin"),
+            ("japanese_ha_sen", "Sengoku"), ("sultanate_ha_tug", "Tughlaq"), ("byzantine_ha_mac", "Macedonian")]
+
+class Art:
+    """Anti-aliased portrait chips and flag icons (Pillow, cached PhotoImages)."""
+    def __init__(self, master, S):
+        self.m, self.S, self.cache = master, S, {}
+    def chip(self, key, r, dim=False):
+        k = ("chip", key, r, dim)
+        if k in self.cache: return self.cache[k]
+        from PIL import Image, ImageDraw, ImageTk
+        song = next(s for s in SONGS if s[0] == key)
+        D = int(round((2 * r + 4) * self.S)); Q = 4; big = D * Q
+        im = Image.new("RGBA", (big, big), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+        d.ellipse([0, 0, big - 1, big - 1], fill=song[4])
+        inner = big - int(4 * self.S * Q)
+        try: p = Image.open(os.path.join(ASSETS, "assets", "portraits", key + ".jpg")).convert("RGB").resize((inner, inner), Image.LANCZOS)
+        except Exception: p = Image.new("RGB", (inner, inner), "#333333")
+        if dim: p = Image.blend(p, Image.new("RGB", p.size, "#121212"), 0.6)
+        m = Image.new("L", (inner, inner), 0); ImageDraw.Draw(m).ellipse([0, 0, inner - 1, inner - 1], fill=255)
+        off = (big - inner) // 2; im.paste(p, (off, off), m)
+        ph = ImageTk.PhotoImage(im.resize((D, D), Image.LANCZOS), master=self.m); self.cache[k] = ph; return ph
+    def flag(self, civ, h=16):
+        k = ("flag", civ, h)
+        if k in self.cache: return self.cache[k]
+        from PIL import Image, ImageTk, ImageDraw
+        H = int(round(h * self.S)); W = int(round(H * 60 / 32))
+        p = os.path.join(ASSETS, "assets", "flags", civ + ".png")
+        if not os.path.exists(p): p = os.path.join(ASSETS, "assets", "flags", "_unknown.png")
+        try: im = Image.open(p).convert("RGBA").resize((W, H), Image.LANCZOS)
+        except Exception:
+            im = Image.new("RGBA", (W, H), (0, 0, 0, 0)); ImageDraw.Draw(im).rounded_rectangle([0, 0, W - 1, H - 1], 3, fill="#555555")
+        ph = ImageTk.PhotoImage(im, master=self.m); self.cache[k] = ph; return ph
+
+def default_pool(base_cfg, civ):
+    bi = base_cfg.get("boss_intro") or {}
+    return list((bi.get("pools") or {}).get(civ) or bi.get("default") or [])
+
+def pool_editor(parent, user, save):
+    """Tier-list style editor. user: the panel's settings dict (shared); save(): persist + refresh panel."""
+    if not single_window("editor", "Imperial Age Intro"): return None
+    import tkinter as tk
+    C = dict(bg="#121212", card="#1f1f1f", tx="#f2f2f2", mu="#9a9a9a", acc="#1DB954", line="#2e2e2e", dis="#4a4a4a")
+    win = tk.Toplevel(parent); dark_window(win, C["bg"]); win.title("Imperial Age Intro"); win.resizable(False, False)
+    win.bind("<Destroy>", lambda e: release_window("editor") if e.widget is win else None, add="+")
+    S = win.winfo_fpixels("1i") / 96.0
+    W, H, LT, RH, GAP = 600, 720, 178, 42, 4
+    BOT = H - 12; STEP = RH + GAP
+    cv = tk.Canvas(win, width=int(W * S), height=int(H * S), bg=C["bg"], highlightthickness=0); cv.pack()
+    art = Art(win, S)
+    from PIL import Image, ImageDraw, ImageTk
+    imgs = {}
+    def rr_img(w, h, r, fill, outline=None, width=1.5):
+        k = (w, h, r, fill, outline, width)
+        if k not in imgs:
+            Q = 4; Wp, Hp = max(1, int(round(w * S))), max(1, int(round(h * S)))
+            im = Image.new("RGBA", (Wp * Q, Hp * Q), (0, 0, 0, 0))
+            ImageDraw.Draw(im).rounded_rectangle([0, 0, Wp * Q - 1, Hp * Q - 1], r * S * Q, fill=fill, outline=outline,
+                                                 width=int(width * S * Q) if outline else 0)
+            imgs[k] = ImageTk.PhotoImage(im.resize((Wp, Hp), Image.LANCZOS), master=win)
+        return imgs[k]
+    def rr(x0, y0, x1, y1, r, fill, outline=None, width=1.5):
+        cv.create_image(x0 * S, y0 * S, anchor="nw", image=rr_img(x1 - x0, y1 - y0, r, fill, outline, width))
+    def text(x, y, s, sz, c=None, b=False, anchor="w"):
+        cv.create_text(x * S, y * S, text=s, fill=c or C["tx"], anchor=anchor, font=("Segoe UI", -int(sz * S), "bold" if b else "normal"))
+    def undo_glyph(cx, cy, c):
+        k = ("undo", c)
+        if k not in imgs:
+            Q = 4; Z = int(18 * S); im = Image.new("RGBA", (Z * Q, Z * Q), (0, 0, 0, 0)); d = ImageDraw.Draw(im); m = Z * Q
+            lw = max(2, int(2 * S * Q)); d.arc([m*.2, m*.2, m*.86, m*.86], 200, 470, fill=c, width=lw)
+            d.polygon([(m*.06, m*.4), (m*.38, m*.4), (m*.2, m*.64)], fill=c)
+            imgs[k] = ImageTk.PhotoImage(im.resize((Z, Z), Image.LANCZOS), master=win)
+        cv.create_image(cx * S, cy * S, image=imgs[k])
+    base = load_config(user=False)
+    def pools():
+        bp = user.get("boss_pools") if isinstance(user.get("boss_pools"), dict) else {}
+        return {c: list(bp.get(c) or default_pool(base, c)) for c, _ in CIV_LIST}
+    st = {"sc": 0, "hov": None, "drag": None, "ghost": None, "drop": None, "press": None, "msg": None}
+    max_sc = lambda: max(0, len(CIV_LIST) * STEP - GAP - (BOT - LT))
+    def row_y(i): return LT + i * STEP - st["sc"]
+    def tray_xy(i): return 55 + i * 70, 110
+    def chip_xy(i, j): return 200 + j * 42, row_y(i) + RH / 2
+    def commit(p):
+        bp = {c: v for c, v in p.items() if v != default_pool(base, c)}
+        if bp: user["boss_pools"] = bp
+        else: user.pop("boss_pools", None)
+        save()
+    # ---- hit testing (logical coords)
+    def hit(x, y):
+        for i in range(len(SONGS)):
+            cx, cy = tray_xy(i)
+            if (x - cx) ** 2 + (y - cy) ** 2 <= 22 ** 2: return ("tray", i)
+        if 488 <= x <= 580 and 40 <= y <= 66: return ("reset",)
+        if LT <= y <= BOT and 20 <= x <= 566:
+            i = int((y - LT + st["sc"]) // STEP)
+            if 0 <= i < len(CIV_LIST) and row_y(i) <= y <= row_y(i) + RH:
+                p = pools()[CIV_LIST[i][0]]
+                for j in range(len(p)):
+                    cx, cy = chip_xy(i, j)
+                    if len(p) > 1 and (x - cx - 12) ** 2 + (y - cy + 12) ** 2 <= 7 ** 2 and st["hov"] in (("chip", i, j), ("x", i, j)):
+                        return ("x", i, j)
+                    if (x - cx) ** 2 + (y - cy) ** 2 <= 17 ** 2: return ("chip", i, j)
+                if 532 <= x <= 562: return ("undo", i)
+                return ("row", i)
+        return None
+    def draw():
+        cv.delete("all"); p = pools(); hov = st["hov"]; drag = st["drag"]
+        # list (drawn first; header/tray cover what scrolls above)
+        for i, (civ, name) in enumerate(CIV_LIST):
+            y = row_y(i)
+            if y > BOT or y + RH < LT - 60: continue
+            drop = st["drop"] == i
+            rr(20, y, 566, y + RH, 10, "#1c2a20" if drop else C["card"], C["acc"] if drop else None)
+            cv.create_image(34 * S, (y + RH / 2) * S, anchor="w", image=art.flag(civ))
+            text(74, y + RH / 2, name, 12.5, b=True)
+            for j, uri in enumerate(p[civ]):
+                s = SONG_BY_URI.get(uri)
+                if not s: continue
+                cx, cy = chip_xy(i, j)
+                moving = drag and drag["src"] == ("row", i, j)
+                cv.create_image(cx * S, cy * S, image=art.chip(s[0], 15, dim=bool(moving)))
+            if drop:
+                x = 200 + len(p[civ]) * 42; cy = y + RH / 2
+                cv.create_oval((x - 16) * S, (cy - 16) * S, (x + 16) * S, (cy + 16) * S, outline=C["acc"], width=max(1, int(1.5 * S)))
+                text(x, cy, "+", 14, C["acc"], True, "center")
+            isdef = p[civ] == default_pool(base, civ)
+            undo_glyph(547, y + RH / 2, C["dis"] if isdef else C["mu"])
+        # scrollbar
+        ms = max_sc()
+        if ms:
+            th = (BOT - LT) * (BOT - LT) / (BOT - LT + ms); ty = LT + (BOT - LT - th) * st["sc"] / ms
+            rr(572, LT, 576, BOT, 2, "#2a2a2a"); rr(572, ty, 576, ty + th, 2, "#5a5a5a")
+        # header + tray (opaque, on top of the scrolled list)
+        cv.create_rectangle(0, 0, W * S, (LT - 4) * S, fill=C["bg"], outline="")
+        cv.create_rectangle(0, BOT * S, W * S, H * S, fill=C["bg"], outline="")
+        cv.create_polygon(*[v * S for v in (20, 62, 20, 46, 27, 53, 32, 42, 37, 53, 44, 46, 44, 62)], fill=C["acc"])
+        text(54, 53, "Imperial Age Intro", 17, b=True)
+        anyc = bool(user.get("boss_pools"))
+        rr(488, 40, 580, 66, 13, C["card"], "#3a3a3a")
+        undo_glyph(504, 53, C["tx"] if anyc else C["dis"]); text(516, 53, "Reset all", 11, C["tx"] if anyc else C["dis"])
+        rr(20, 78, 580, 166, 12, "#181818", C["line"])
+        for i, s in enumerate(SONGS):
+            cx, cy = tray_xy(i)
+            if drag and drag["src"] == ("tray", i):
+                cv.create_oval((cx - 23) * S, (cy - 23) * S, (cx + 23) * S, (cy + 23) * S, outline=C["acc"], width=max(1, int(1.5 * S)))
+            cv.create_image(cx * S, cy * S, image=art.chip(s[0], 20))
+            text(cx, 148, s[1].replace("For ", ""), 9.5, C["mu"], anchor="center")
+        # drag ghost
+        if drag and drag.get("xy"):
+            gx, gy = drag["xy"]; s = SONGS[drag["song"]]
+            cv.create_image(gx * S, gy * S, image=art.chip(s[0], 19), tags="ghost")
+        overlay()
+    def overlay():
+        """Hover-only layer (highlights, x badge, tooltip): redrawn alone, so hovering never re-renders the list."""
+        cv.delete("ovl"); mark = max(cv.find_all() or (0,)); hov = st["hov"]; drag = st["drag"]
+        if hov and not drag:
+            p = pools()
+            if hov[0] in ("chip", "x") and len(p[CIV_LIST[hov[1]][0]]) > 1:
+                cx, cy = chip_xy(hov[1], hov[2]); xc = C["acc"] if hov[0] == "x" else "#3a3a3a"
+                cv.create_oval((cx + 6) * S, (cy - 18) * S, (cx + 18) * S, (cy - 6) * S, fill=xc, outline=C["bg"], width=max(1, int(1.5 * S)))
+                text(cx + 12, cy - 12.5, "\u00d7", 10, C["tx"], True, "center")
+            elif hov[0] == "undo" and p[CIV_LIST[hov[1]][0]] != default_pool(base, CIV_LIST[hov[1]][0]):
+                y = row_y(hov[1]) + RH / 2
+                if LT <= y <= BOT: undo_glyph(547, y, C["tx"])
+            elif hov[0] == "reset" and user.get("boss_pools"):
+                rr(488, 40, 580, 66, 13, "#2a2a2a", "#3a3a3a"); undo_glyph(504, 53, C["tx"]); text(516, 53, "Reset all", 11, C["tx"])
+            elif hov[0] == "tray":
+                cx, cy = tray_xy(hov[1])
+                cv.create_oval((cx - 23) * S, (cy - 23) * S, (cx + 23) * S, (cy + 23) * S, outline=C["acc"], width=max(1, int(1.5 * S)))
+        hov = hov if st.get("tipok") else None
+        p = pools()
+        tip = None
+        if not drag and hov and hov[0] in ("tray", "chip"):
+            s = SONGS[hov[1]] if hov[0] == "tray" else SONG_BY_URI.get(p[CIV_LIST[hov[1]][0]][hov[2]])
+            if s:
+                cx, cy = tray_xy(hov[1]) if hov[0] == "tray" else chip_xy(hov[1], hov[2])
+                tip = ("%s \u2014 %s" % (s[1], s[2]), cx, cy + 26)
+                if hov[0] == "chip" and len(p[CIV_LIST[hov[1]][0]]) == 1: tip = (tip[0] + "  (at least one song)", tip[1], tip[2])
+        if st["msg"]: tip = st["msg"]
+        if tip:
+            tw = len(tip[0]) * 6.3 + 16; x0 = min(max(8, tip[1] - tw / 2), W - 8 - tw)
+            rr(x0, tip[2], x0 + tw, tip[2] + 22, 6, "#2c2c2c", "#444444", 1)
+            text(x0 + tw / 2, tip[2] + 11, tip[0], 10, C["tx"], anchor="center")
+        for it in cv.find_all():
+            if it > mark: cv.addtag_withtag("ovl", it)
+    tipjob = {"id": None}
+    def set_hover(h):
+        """Hover changed: update the overlay now, show the tooltip after a short delay."""
+        st["hov"] = h; st["msg"] = None; st["tipok"] = False
+        if tipjob["id"]: win.after_cancel(tipjob["id"]); tipjob["id"] = None
+        if h and h[0] in ("tray", "chip"):
+            tipjob["id"] = win.after(300, lambda: (st.update(tipok=True), tipjob.update(id=None), overlay()))
+        overlay()
+        cur = "hand2" if h and h[0] in ("tray", "chip", "x", "undo", "reset") else ""
+        if cv.cget("cursor") != cur: cv.config(cursor=cur)
+    def L(e): return e.x / S, e.y / S
+    def on_motion(e):
+        t0 = time.perf_counter(); h = hit(*L(e))
+        if h != st["hov"]: set_hover(h)
+        st["mt"] = max(st.get("mt", 0), time.perf_counter() - t0)     # slowest motion handler (tests)
+    def on_press(e):
+        x, y = L(e); h = hit(x, y); st["press"] = (x, y, h)
+        if h and h[0] == "tray": st["drag"] = {"src": h, "song": h[1], "xy": None}
+        elif h and h[0] == "chip":
+            uri = pools()[CIV_LIST[h[1]][0]][h[2]]
+            st["drag"] = {"src": ("row", h[1], h[2]), "song": [s[3] for s in SONGS].index(uri), "xy": None}
+    def on_drag(e):
+        d = st["drag"]
+        if not d: return
+        x, y = L(e); px, py, _ = st["press"]
+        if d["xy"] is None and abs(x - px) + abs(y - py) < 5: return
+        d["xy"] = (x, y)
+        if y > BOT - 24 and st["sc"] < max_sc(): st["sc"] = min(max_sc(), st["sc"] + 8)     # auto-scroll while dragging
+        elif LT < y < LT + 24 and st["sc"] > 0: st["sc"] = max(0, st["sc"] - 8)
+        sc0, drop0 = st["sc"], st["drop"]
+        h = hit(x, y); st["drop"] = h[1] if h and h[0] in ("row", "chip", "x", "undo") else None
+        if st["drop"] is not None and d["src"][0] == "row" and d["src"][1] == st["drop"]: st["drop"] = None
+        if st["drop"] is not None and SONGS[d["song"]][3] in pools()[CIV_LIST[st["drop"]][0]]: st["drop"] = None   # no duplicates
+        if st["sc"] == sc0 and st["drop"] == drop0 and cv.find_withtag("ghost"): cv.coords("ghost", x * S, y * S)
+        else: draw()
+    def on_release(e):
+        d, st["drag"] = st["drag"], None; drop, st["drop"] = st["drop"], None
+        x, y = L(e); h = hit(x, y); p = pools()
+        if d and d["xy"] is not None:
+            uri = SONGS[d["song"]][3]
+            if drop is not None:
+                civ = CIV_LIST[drop][0]
+                if uri not in p[civ]: p[civ].append(uri)
+                if d["src"][0] == "row" and len(p[CIV_LIST[d["src"][1]][0]]) > 1: p[CIV_LIST[d["src"][1]][0]].remove(uri)   # move
+                commit(p)
+            elif d["src"][0] == "row" and not (h and h[0] in ("row", "chip", "x", "undo") and h[1] == d["src"][1]):
+                remove(d["src"][1], d["src"][2])        # dragged out of its row
+            st["hov"] = hit(x, y); draw(); return
+        if h and h[0] == "x": remove(h[1], h[2])
+        elif h and h[0] == "undo": user.get("boss_pools", {}).pop(CIV_LIST[h[1]][0], None); commit(pools())
+        elif h and h[0] == "reset": user.pop("boss_pools", None); commit(pools())
+        st["hov"] = hit(x, y); draw()
+    def remove(i, j):
+        p = pools(); civ = CIV_LIST[i][0]
+        if len(p[civ]) <= 1: st["msg"] = ("Each civ needs at least one song", *chip_xy(i, j)[:1], chip_xy(i, j)[1] + 26); draw(); return
+        p[civ].pop(j); commit(p)
+    def on_right(e):
+        h = hit(*L(e))
+        if h and h[0] in ("chip", "x"): remove(h[1], h[2]); st["hov"] = hit(*L(e)); draw()
+    def on_wheel(e):
+        st["sc"] = max(0, min(max_sc(), st["sc"] - (e.delta / 120) * 46)); st["hov"] = hit(*L(e)); draw()
+    cv.bind("<Motion>", on_motion); cv.bind("<ButtonPress-1>", on_press); cv.bind("<B1-Motion>", on_drag)
+    cv.bind("<ButtonRelease-1>", on_release); cv.bind("<Button-3>", on_right); cv.bind("<MouseWheel>", on_wheel)
+    cv.bind("<Leave>", lambda e: set_hover(None) if not st["drag"] else None)
+    set_app_icon(win)
+    draw()
+    win._ed = {"cv": cv, "st": st, "pools": pools, "tray_xy": tray_xy, "chip_xy": chip_xy, "row_y": row_y, "S": S, "draw": draw}  # tests
+    reveal(win, over=parent); note_window("editor", win); win.lift(); win.focus_force()
+    return win
+
+LATEST_API = "https://api.github.com/repos/Capstar1/aoe4-spotify/releases/latest"
+
+def parse_ver(v):
+    nums = re.findall(r"\d+", v or "")
+    return tuple(int(n) for n in nums[:3]) + (0,) * (3 - len(nums[:3])) if nums else (0, 0, 0)
+
+def check_update(timeout=6):
+    """{version, url, size, sha256} if GitHub has a newer release (with a Setup .exe) than VERSION, else None.
+    Offline or any error -> None (silently)."""
+    try:
+        api = os.environ.get("AOE4SPOTIFY_UPDATE_API") or LATEST_API     # env var: testing only (fake release)
+        req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json", "User-Agent": "AoE4-Spotify"})
+        with urllib.request.urlopen(req, timeout=timeout) as r: rel = json.loads(r.read())
+        tag = rel.get("tag_name", "")
+        if parse_ver(tag) <= parse_ver(VERSION): return None
+        asset = next((a_ for a_ in rel.get("assets", []) if a_.get("name", "").lower().endswith(".exe")), None)
+        if not asset: return None
+        return {"version": tag.lstrip("vV"), "url": asset["browser_download_url"], "size": int(asset.get("size") or 0),
+                "sha256": (asset.get("digest") or "").split("sha256:")[-1] if "sha256:" in (asset.get("digest") or "") else ""}
+    except Exception:
+        return None
+
+def download_update(info, dest, progress=lambda f: None):
+    """Download the Setup and verify it against the GitHub asset size (and SHA-256 when GitHub gives one).
+    Raises on any problem; never leaves a partial file at dest."""
+    req = urllib.request.Request(info["url"], headers={"User-Agent": "AoE4-Spotify"})
+    h = hashlib.sha256(); got = 0
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r, open(dest + ".part", "wb") as f:
+            total = info.get("size") or int(r.headers.get("Content-Length") or 0)
+            while True:
+                b = r.read(65536)
+                if not b: break
+                f.write(b); h.update(b); got += len(b)
+                if total: progress(min(1.0, got / total))
+        if info.get("size") and got != info["size"]: raise ValueError("size mismatch (%d of %d bytes)" % (got, info["size"]))
+        if info.get("sha256") and h.hexdigest().lower() != info["sha256"].lower(): raise ValueError("checksum mismatch")
+        os.replace(dest + ".part", dest)
+    finally:
+        if os.path.exists(dest + ".part"): os.remove(dest + ".part")
+    return dest
+
+def run_update(setup):
+    """Silent in-place upgrade. Setup keeps token/settings/shortcuts/launch option and relaunches the panel."""
+    import subprocess
+    subprocess.Popen([setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RELAUNCH=1",
+                      "/LOG=" + os.path.join(DATA, "update_setup.log")], env=child_env(), close_fds=True)
+
 def load_user(): return load_user_settings()
 
 def save_user(u):
@@ -946,14 +1403,16 @@ def save_user(u):
     os.replace(tmp, USER_CONFIG)
 
 def panel():
+    if not single_window("panel", "AoE4 Spotify Control Panel"): return
     import tkinter as tk, subprocess, webbrowser as wb
     try: import ctypes; ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception: pass
     C = dict(bg="#121212", card="#1f1f1f", tx="#f2f2f2", mu="#9a9a9a", off="#3a3a3a", line="#2a2a2a",
-             ib="#2a2a2a", idle="#8a8a8a", red="#e5484d", acc="#1DB954", dis="#555555")
-    root = tk.Tk(); root.title("AoE4 Spotify"); root.configure(bg=C["bg"]); root.resizable(False, False)
+             ib="#2a2a2a", idle="#8a8a8a", red="#e5484d", acc="#1DB954", dis="#555555", org="#f0a030")
+    root = tk.Tk(); dark_window(root, C["bg"]); root.title("AoE4 Spotify Control Panel"); root.resizable(False, False)
     S = root.winfo_fpixels("1i") / 96.0
-    W, H = 520, 650
+    W, H = 430, 420
+    M = 16; R_ = W - M                              # content left / right edge
     cv = tk.Canvas(root, width=int(W * S), height=int(H * S), bg=C["bg"], highlightthickness=0); cv.pack()
     FONT = "Segoe UI"
     def F(sz, b=False): return (FONT, -int(sz * S), "bold" if b else "normal")
@@ -988,12 +1447,7 @@ def panel():
             d.arc([m*0.18, m*0.2, m*0.86, m*0.88], start=200, end=470, fill=c, width=lw)
             d.polygon([(m*0.04, m*0.42), (m*0.36, m*0.42), (m*0.18, m*0.66)], fill=c)
         return cv.create_image(int(cx * S), int(cy * S), image=_img(("undo", c), sz, sz, paint), anchor="center", tags=tag)
-    def badge(px):
-        im = Image.new("RGBA", (px * 4, px * 4), (0, 0, 0, 0)); d = ImageDraw.Draw(im); m = px * 4
-        d.ellipse([0, 0, m - 1, m - 1], fill=C["acc"])
-        for k, hh in ((-0.2, 0.2), (0, 0.3), (0.2, 0.2)):
-            x = m * (0.5 + k); d.rounded_rectangle([x - m*0.05, m*(0.5-hh), x + m*0.05, m*(0.5+hh)], radius=m*0.05, fill=C["bg"])
-        return im.resize((px, px), Image.LANCZOS)
+    badge = app_badge
     logo = ImageTk.PhotoImage(badge(int(32 * S)))
     def _icon(px, paint):
         Q = 4; im = Image.new("RGBA", (px * Q, px * Q), (0, 0, 0, 0)); paint(ImageDraw.Draw(im), px * Q, Q)
@@ -1003,7 +1457,8 @@ def panel():
         d.rounded_rectangle([m/2 - lw/2, m*0.04, m/2 + lw/2, m*0.5], radius=lw/2, fill=C["acc"])
     def _fade(d, m, Q):
         lw = int(2 * S * Q)
-        for k in range(3): d.arc([m*(0.0+k*0.18), m*0.12, m*(0.6+k*0.18), m*0.88], start=-60, end=60, fill=C["acc"], width=lw)
+        for k in range(3):     # ink spans x 0.25..0.76 of the box, i.e. centred like the other row icons
+            d.arc([m*(-0.2+k*0.18), m*0.12, m*(0.4+k*0.18), m*0.88], start=-60, end=60, fill=C["acc"], width=lw)
     def _chev(up):
         def p(d, m, Q):
             lw = int(2.4 * S * Q); a, b = (0.62, 0.36) if up else (0.38, 0.64)
@@ -1011,8 +1466,31 @@ def panel():
             for x, yy in ((0.22, a), (0.5, b), (0.78, a)): d.ellipse([m*x - lw/2, m*yy - lw/2, m*x + lw/2, m*yy + lw/2], fill=C["mu"])
         return p
     chev_up = _icon(int(18 * S), _chev(True)); chev_down = _icon(int(18 * S), _chev(False))
+    _chevr = {}
+    def chev_right(cx, cy, col, tag, size=14):
+        """Anti-aliased '>' centred exactly on (cx, cy) - no font baseline involved."""
+        k = (col, size)
+        if k not in _chevr:
+            def p(d, m, Q):
+                lw = int(2.2 * S * Q)
+                pts = [(m*0.38, m*0.2), (m*0.64, m*0.5), (m*0.38, m*0.8)]
+                d.line(pts, fill=col, width=lw, joint="curve")
+                for x, yy in pts: d.ellipse([x - lw/2, yy - lw/2, x + lw/2, yy + lw/2], fill=col)
+            _chevr[k] = _icon(int(size * S), p)
+        cv.create_image(*P(cx, cy), image=_chevr[k], anchor="center", tags=tag)
     ui = {"open": os.environ.get("AOE4SPOTIFY_PANEL_OPEN") == "1"}   # env var: screenshots/testing only
     power_img = _icon(int(30 * S), _power); fade_img = _icon(int(24 * S), _fade)
+    def _gear(col):
+        def p(d, m, Q):
+            import math
+            c = m / 2
+            for k in range(8):
+                a = k * math.pi / 4; d.line([(c, c), (c + m*0.42*math.cos(a), c + m*0.42*math.sin(a))], fill=col, width=int(m * 0.18))
+            d.ellipse([c - m*0.32, c - m*0.32, c + m*0.32, c + m*0.32], fill=col)
+            d.ellipse([c - m*0.13, c - m*0.13, c + m*0.13, c + m*0.13], fill="#2a2a2a")
+        return p
+    gear_img = {False: _icon(int(20 * S), _gear(C["tx"])), True: _icon(int(20 * S), _gear(C["acc"]))}
+    import tkinter.font as tkfont
     root.iconphoto(True, ImageTk.PhotoImage(badge(64)), ImageTk.PhotoImage(badge(32)))
     set_app_icon(root)
     def text(x, y, s, sz, c=None, b=False, anchor="w", tag=None):
@@ -1033,6 +1511,9 @@ def panel():
     try: names = json.load(open(NAMES_CACHE, encoding="utf-8"))
     except Exception: names = {}
     state = {"spotify": None, "game": None}
+    upd = {"info": None, "phase": "idle", "pct": 0, "msg": ""}   # update pill state
+    if "--updated" in sys.argv:                                  # just relaunched by the silent upgrade
+        upd.update(phase="done", msg="Updated to %s" % VERSION)
     ui_q = []
     def post(fn): ui_q.append(fn)                 # called from worker threads
 
@@ -1059,93 +1540,147 @@ def panel():
         pid = uri.split(":")[-1]
         return names.get(pid) or "Playlist"
 
-    tipw, tips, tipbound = {}, {}, set()
+    tips, tipbound = {}, set()
+    tipw = tk.Toplevel(root); tipw.withdraw(); tipw.overrideredirect(True); tipw.configure(bg=C["line"])
+    tipl = tk.Label(tipw, text="", bg=C["line"], fg=C["tx"], font=F(10), padx=6, pady=2); tipl.pack()
+    tipst = {"tag": None, "job": None, "shown": False}
     def hide_tip(_=None):
-        w = tipw.pop("w", None)
-        if w: w.destroy()
+        if tipst["job"]: root.after_cancel(tipst["job"]); tipst["job"] = None
+        tipst["tag"] = None
+        if tipst["shown"]:
+            tipst["shown"] = False
+            try: tipw.withdraw()
+            except tk.TclError: pass
     def tip(tag, msg):
         tips[tag] = msg
         if tag in tipbound: return
         tipbound.add(tag)
-        def show(e, tag=tag):
-            hide_tip(); t = tk.Toplevel(root); t.overrideredirect(True); t.configure(bg=C["line"])
-            tk.Label(t, text=tips.get(tag, ""), bg=C["line"], fg=C["tx"], font=F(10), padx=6, pady=2).pack()
-            t.geometry("+%d+%d" % (e.x_root + 10, e.y_root + 14)); tipw["w"] = t
-        cv.tag_bind(tag, "<Enter>", show, add="+"); cv.tag_bind(tag, "<Leave>", hide_tip, add="+")
+        def enter(e, tag=tag):
+            if tipst["tag"] == tag: return                       # moved between items of the same control
+            hide_tip(); tipst["tag"] = tag
+            def show():
+                tipst["job"] = None
+                if tipst["tag"] != tag or not tips.get(tag): return
+                if not tipw.winfo_exists(): return
+                tipl.config(text=tips[tag]); x, y = root.winfo_pointerxy()
+                tipw.geometry("+%d+%d" % (x + 10, y + 14)); tipw.deiconify(); tipw.lift(); tipst["shown"] = True
+            tipst["job"] = root.after(300, show)
+        def leave(e, tag=tag):
+            def check():                                         # still over another item with this tag? keep it
+                cur = cv.find_withtag("current")
+                if not (cur and tag in cv.gettags(cur[0])): hide_tip() if tipst["tag"] == tag else None
+            root.after_idle(check)
+        cv.tag_bind(tag, "<Enter>", enter, add="+"); cv.tag_bind(tag, "<Leave>", leave, add="+")
 
     def draw():
-        cv.delete("all"); handlers.clear(); hide_tip(); cfg = cur(); en = bool(cfg.get("enabled", True))
-        # header
-        cv.create_image(*P(20, 16), image=logo, anchor="nw")
-        text(64, 32, "AoE4 Spotify", 22, b=True)
-        rr(238, 22, 284, 42, 10, C["card"]); text(261, 32, "v0.2", 10, C["mu"], anchor="center")
-        cv.create_line(*P(20, 62, 500, 62), fill=C["line"])
-        # enabled
-        rr(20, 74, 500, 128, 12, C["card"])
-        cv.create_image(*P(48, 96), image=power_img, anchor="center")
-        text(72, 101, "Enabled", 17, b=True); toggle(424, 88, en, "en", 52, 28)
+        cv.delete("all"); handlers.clear(); cfg = cur(); en = bool(cfg.get("enabled", True))
+        # header: logo, title + subtitle, version pill, update pill, gear
+        cv.create_image(*P(M, 14), image=logo, anchor="nw")
+        text(M + 44, 26, "AoE4 Spotify", 19, b=True); text(M + 44, 47, "Control Panel", 11, C["mu"])
+        tw = tkfont.Font(font=F(19, True)).measure("AoE4 Spotify") / S
+        px = M + 44 + tw + 8
+        rr(px, 17, px + 40, 35, 9, C["card"]); text(px + 20, 26, "v" + VERSION, 10, C["mu"], anchor="center")
+        px += 48
+        ph = upd["phase"]
+        if ph != "idle":
+            col = C["red"] if ph == "error" else C["acc"]
+            lab = {"avail": "\u2193 Update %s" % (upd["info"] or {}).get("version", ""), "dl": "Downloading %d%%" % upd["pct"],
+                   "run": "Installing…", "error": upd["msg"] or "Update failed", "done": upd["msg"]}[ph]
+            pw = tkfont.Font(font=F(10, True)).measure(lab) / S + 20
+            rr(px, 17, px + pw, 35, 9, "#183d26" if col == C["acc"] else "#3d1a1a", col, "upd")
+            text(px + pw / 2, 26, lab, 10, col, True, "center", "upd")
+            if ph in ("avail", "error") and upd["info"]: click("upd", start_update)
+        gx = R_ - 32
+        rr(gx, 14, R_, 46, 10, "#2a2a2a", tag="gear"); cv.create_image(*P(gx + 16, 30), image=gear_img[ui.get("menu", False)], anchor="center", tags="gear")
+        if upd["info"] and ph in ("avail", "error"): oval_(P(R_ - 8, 10, R_ + 2, 20), fill=C["acc"], outline=C["bg"], width=2 * S, tags="gear")
+        click("gear", lambda: (ui.update(menu=not ui.get("menu")), draw()))
+        cv.create_line(*P(M, 62, R_, 62), fill=C["line"])
+        # enabled (power icon vertically centered on the card)
+        rr(M, 72, R_, 120, 12, C["card"]); cy = 96
+        cv.create_image(*P(M + 24, cy), image=power_img, anchor="center")
+        text(M + 50, cy, "Enabled", 16, b=True); toggle(R_ - 12 - 52, cy - 14, en, "en", 52, 28)
         click("en", lambda: set_user("enabled", not en))
-        # status lights
-        for i, (lab, key, okt, offt) in enumerate((("Spotify", "spotify", "Logged in", "Logged out"), ("Game", "game", "Running", "Not running"))):
-            x = 20 + i * 245; v = state[key]
-            c = C["acc"] if v else C["idle"]
-            rr(x, 140, x + 235, 176, 18, C["card"])
-            oval_(P(x+16, 152, x+28, 164), fill=c, outline=""); text(x+38, 158, lab, 13, C["mu"])
-            text(x+218, 158, "..." if v is None else (okt if v else offt), 13, c, True, "e")
+        # status chips: Spotify (clickable -> log in) and Game
+        cw = (W - 2 * M - 10) / 2; x = M; sp_ok = state["spotify"]
+        rr(x, 130, x + cw, 162, 16, "#242424", "#3a3a3a", "spot")
+        oval_(P(x+14, 141, x+24, 151), fill=C["acc"] if sp_ok else (C["org"] if sp_ok is False else C["idle"]), outline="", tags="spot")
+        text(x + 32, 146, "Spotify", 12, C["mu"], tag="spot")
+        if sp_ok:
+            text(x + cw - 26, 146, "Connected", 12, C["acc"], True, "e", "spot"); chev_right(x + cw - 16, 146, C["mu"], "spot", 12)
+        elif sp_ok is False:
+            rr(x + cw - 86, 136, x + cw - 8, 156, 10, "#4a3216", C["org"], "spot"); text(x + cw - 52, 146, "Log in", 11, C["org"], True, "center", "spot"); chev_right(x + cw - 22, 146, C["org"], "spot", 11)
+        else: text(x + cw - 14, 146, "...", 12, C["mu"], True, "e", "spot")
+        click("spot", login); tip("spot", "Log in to Spotify" if not sp_ok else "Log in again")
+        x = M + cw + 10; gv = state["game"]; gc = C["acc"] if gv else C["idle"]
+        rr(x, 130, x + cw, 162, 16, C["card"])
+        oval_(P(x+14, 141, x+24, 151), fill=gc, outline=""); text(x + 32, 146, "Game", 12, C["mu"])
+        text(x + cw - 14, 146, "..." if gv is None else ("Running" if gv else "Not running"), 12, gc, True, "e")
         # collapsible Playlists section (collapsed by default)
-        rr(20, 188, 500, 224, 10, C["card"], tag="plh")
-        text(36, 206, "Playlists", 14, b=True, tag="plh")
+        rr(M, 172, R_, 208, 10, C["card"], tag="plh")
+        text(M + 16, 190, "Playlists", 13, b=True, tag="plh")
         if not ui["open"]:
             changed = sum(1 for k, _ in AGES if cfg["playlists"].get(k) != defaults.get(k))
-            text(150, 206, "4 ages" + (" · %d changed" % changed if changed else ""), 12, C["mu"], tag="plh")
-        cv.create_image(*P(484, 206), image=chev_up if ui["open"] else chev_down, anchor="center", tags="plh")
+            text(M + 110, 190, "4 ages" + (" · %d changed" % changed if changed else ""), 11, C["mu"], tag="plh")
+        cv.create_image(*P(R_ - 18, 190), image=chev_up if ui["open"] else chev_down, anchor="center", tags="plh")
         click("plh", lambda: (ui.update(open=not ui["open"]), draw()))
         for i, (k, lab) in enumerate(AGES if ui["open"] else []):
-            y = 232 + i * 50; uri = cfg["playlists"].get(k, ""); is_def = uri == defaults.get(k)
-            rr(20, y, 500, y + 42, 10, C["card"]); rr(28, y + 6, 58, y + 36, 6, C["ib"]); icon(i, 43, y + 21, C["acc"])
-            text(70, y + 21, lab, 14, b=True)
-            oval_(P(160, y+17, 168, y+25), fill=C["acc"] if uri else C["idle"], outline="")
-            nm = pl_name(uri); nm = nm if len(nm) <= 22 else nm[:21] + "…"
-            text(176, y + 21, nm, 13, C["mu"])
-            rr(388, y + 9, 450, y + 33, 12, C["card"], C["acc"], "chg%d" % i); text(419, y + 21, "Change", 10, C["acc"], True, "center", "chg%d" % i)
+            y = 216 + i * 50; uri = cfg["playlists"].get(k, ""); is_def = uri == defaults.get(k)
+            rr(M, y, R_, y + 42, 10, C["card"]); rr(M + 9, y + 6, M + 39, y + 36, 6, C["ib"]); icon(i, M + 24, y + 21, C["acc"])
+            text(M + 48, y + 21, lab, 13, b=True)
+            oval_(P(M+118, y+17, M+126, y+25), fill=C["acc"] if uri else C["idle"], outline="")
+            nm = pl_name(uri); nm = nm if len(nm) <= 17 else nm[:16] + "…"
+            text(M + 132, y + 21, nm, 12, C["mu"])
+            rx = R_ - 12 - 30
+            rr(rx - 70, y + 9, rx - 8, y + 33, 12, C["card"], C["acc"], "chg%d" % i); text(rx - 39, y + 21, "Change", 10, C["acc"], True, "center", "chg%d" % i)
             rc = C["dis"] if is_def else C["mu"]
-            rr(458, y + 9, 488, y + 33, 12, C["card"], rc, "rev%d" % i); undo_icon(473, y + 21, rc, "rev%d" % i)
+            rr(rx, y + 9, rx + 30, y + 33, 12, C["card"], rc, "rev%d" % i); undo_icon(rx + 15, y + 21, rc, "rev%d" % i)
             click("chg%d" % i, lambda k=k, lab=lab: change(k, lab))
             if not is_def: click("rev%d" % i, lambda k=k: revert(k))
             tip("rev%d" % i, "Revert" if not is_def else "Revert (already default)")
         # Age 4 Intro theme
-        base = 440 if ui["open"] else 236
-        Hn = base + 230
+        base = 418 if ui["open"] else 218
+        Hn = base + 56 + 46 + M
         if int(cv.cget("height")) != int(Hn * S): cv.config(height=int(Hn * S))
         y = base; bon = bool((cfg.get("boss_intro") or {}).get("enabled", True))
-        rr(20, y, 500, y + 46, 10, C["card"]); icon(3, 45, y + 23, C["acc"])
-        text(66, y + 23, "Age 4 Intro theme", 14, b=True); toggle(452, y + 11, bon, "boss")
+        rr(M, y, R_, y + 46, 10, C["card"], tag="intro"); icon(3, M + 24, y + 23, C["acc"])
+        text(M + 46, y + 23, "Imperial Age Intro", 13, b=True, tag="intro")
+        sx = M + 46 + tkfont.Font(font=F(13, True)).measure("Imperial Age Intro") / S + 12
+        for j, sg in enumerate(SONGS):                     # portrait strip
+            cv.create_image(*P(sx + 9 + j * 12, y + 23), image=art.chip(sg[0], 8), anchor="center", tags="intro")
+        toggle(R_ - 30 - 44, y + 11, bon, "boss")
+        chev_right(R_ - 15, y + 23, C["mu"], "intro", 16)
+        click("intro", open_editor); tip("intro", "Choose the songs per civ")
         click("boss", lambda: set_user("boss_intro_enabled", not bon))
         # fade
         y = base + 56; fv = float(cfg.get("fade_seconds", 2))
-        rr(20, y, 500, y + 46, 10, C["card"])
-        cv.create_image(*P(44, y + 23), image=fade_img, anchor="center")
-        text(66, y + 23, "Fade", 14, b=True)
+        rr(M, y, R_, y + 46, 10, C["card"])
+        cv.create_image(*P(M + 24, y + 23), image=fade_img, anchor="center")
+        text(M + 46, y + 23, "Fade", 13, b=True)
         x0, x1 = FX0, FX1; xv = x0 + (x1 - x0) * fv / 5
         rr(x0, y + 20, x1, y + 26, 3, C["off"], tag="fade"); rr(x0, y + 20, max(xv, x0 + 6), y + 26, 3, C["acc"], tag="fade")
         oval_(P(xv-9, y+14, xv+9, y+32), fill="white", outline=C["acc"], width=2*S, tags="fade")
-        text(446, y + 23, ("%.1fs" % fv) if fv else "Off", 13, C["acc"], True, "e")
+        text(R_ - 12 - 30 - 10, y + 23, ("%.1fs" % fv) if fv else "Off", 12, C["acc"], True, "e")
         fdef = float(base_cfg.get("fade_seconds", 2)); f_is_def = abs(fv - fdef) < 1e-6
         rc = C["dis"] if f_is_def else C["mu"]          # revert to default fade, right-aligned like playlist rows
-        rr(458, y + 11, 488, y + 35, 12, C["card"], rc, "revf"); undo_icon(473, y + 23, rc, "revf")
+        rx = R_ - 12 - 30
+        rr(rx, y + 11, rx + 30, y + 35, 12, C["card"], rc, "revf"); undo_icon(rx + 15, y + 23, rc, "revf")
         if not f_is_def: click("revf", lambda: (user.pop("fade_seconds", None), save_user(user), draw()))
         tip("revf", "Revert" if not f_is_def else "Revert (already default)")
-        # buttons
-        b1, b2 = base + 118, base + 170
-        btns = (("Log in", "\u21bb", login, 20, b1), ("Updates", "\u2193", lambda: wb.open(RELEASES_URL), 265, b1),
-                ("Open log", "\u2630", open_log, 20, b2), ("Uninstall", "\u2715", uninstall, 265, b2))
-        for lab, ic, fn, x, y in btns:
-            red = lab == "Uninstall"; tg = "b_" + lab.replace(" ", "_")   # Tk tags must not contain spaces
-            rr(x, y, x + 235, y + 44, 10, C["card"], C["red"] if red else "", tg)
-            text(x + 117, y + 22, ic + "  " + lab, 14, C["red"] if red else C["tx"], True, "center", tg)
-            click(tg, fn)
+        # gear menu (drawn on top, with a dim layer that closes it)
+        if ui.get("menu"):
+            cv.create_image(0, 0, anchor="nw", tags="menubg", image=_img(("dim", Hn), int(W * S), int(Hn * S),
+                            lambda d, Q: d.rectangle([0, 0, W * S * Q, Hn * S * Q], fill=(0, 0, 0, 90))))
+            click("menubg", lambda: (ui.update(menu=False), draw()))
+            rr(gx, 14, R_, 46, 10, "#2a2a2a", tag="gear"); cv.create_image(*P(gx + 16, 30), image=gear_img[True], anchor="center", tags="gear")
+            mx0, my0 = R_ - 158, 52
+            rr(mx0, my0, R_, my0 + 84, 10, "#262626", "#3a3a3a")
+            rr(mx0 + 6, my0 + 6, R_ - 6, my0 + 38, 7, "#323232", tag="m_log"); text(mx0 + 20, my0 + 22, "\u2630  Open log", 12, C["tx"], tag="m_log")
+            cv.create_line(*P(mx0 + 10, my0 + 44, R_ - 10, my0 + 44), fill="#3a3a3a")
+            rr(mx0 + 6, my0 + 48, R_ - 6, my0 + 78, 7, "#262626", tag="m_un"); text(mx0 + 20, my0 + 63, "\u2715  Uninstall", 12, C["red"], True, tag="m_un")
+            click("m_log", lambda: (ui.update(menu=False), draw(), open_log()))
+            click("m_un", lambda: (ui.update(menu=False), draw(), uninstall()))
 
-    FX0, FX1 = 130, 360                              # fade slider track (shortened for the revert button)
+    FX0, FX1 = M + 94, W - M - 12 - 30 - 62          # fade slider track (leaves room for value + revert)
     base_cfg = load_config(user=False)
     drag = {"on": False}
     def slide(e, save=False):
@@ -1158,7 +1693,7 @@ def panel():
     cv.bind("<ButtonRelease-1>", lambda e: root.after_idle(lambda: slide(e, True)))
 
     def dialog(title, prompt):
-        d = tk.Toplevel(root); d.title(title); d.configure(bg=C["card"]); d.transient(root); d.resizable(False, False); d.grab_set()
+        d = tk.Toplevel(root); dark_window(d, C["card"]); d.title(title); d.transient(root); d.resizable(False, False)
         tk.Label(d, text=prompt, bg=C["card"], fg=C["tx"], font=F(12, True), justify="left").pack(padx=16, pady=(14, 6), anchor="w")
         e = tk.Entry(d, width=52, bg=C["ib"], fg=C["tx"], insertbackground=C["tx"], relief="flat", font=F(12)); e.pack(padx=16, ipady=5)
         err = tk.Label(d, text="", bg=C["card"], fg=C["red"], font=F(10)); err.pack(padx=16, anchor="w")
@@ -1170,7 +1705,7 @@ def panel():
         row = tk.Frame(d, bg=C["card"]); row.pack(padx=16, pady=(4, 14), anchor="e")
         tk.Button(row, text="Cancel", command=d.destroy, bg=C["ib"], fg=C["tx"], relief="flat", font=F(11), padx=12).pack(side="left", padx=6)
         tk.Button(row, text="Save", command=ok, bg=C["acc"], fg="black", relief="flat", font=F(11, True), padx=14).pack(side="left")
-        e.bind("<Return>", ok); e.focus_set(); root.wait_window(d)
+        reveal(d, fade=False, over=root); d.grab_set(); e.bind("<Return>", ok); e.focus_set(); root.wait_window(d)
         return res.get("id")
 
     def change(k, lab):
@@ -1193,6 +1728,31 @@ def panel():
                                     fix=lambda: with_steam_closed(set_launch_option)))
         threading.Thread(target=go, daemon=True).start()
 
+    art = Art(root, S)
+    def open_editor(): pool_editor(root, user, lambda: (save_user(user), draw()))
+
+    def start_update():
+        info = upd["info"]
+        if not info or upd["phase"] in ("dl", "run"): return
+        upd.update(phase="dl", pct=0); draw()
+        dest = os.path.join(os.environ.get("TEMP") or DATA, "AoE4 Spotify Setup %s.exe" % info["version"])
+        def go():
+            try:
+                download_update(info, dest, lambda f: (upd.update(pct=int(f * 100)), post(draw)) if int(f * 100) != upd["pct"] else None)
+                upd.update(phase="run"); post(draw)
+                post(lambda: (run_update(dest), root.after(400, root.destroy)))   # Setup closes us anyway
+            except Exception as e:
+                log("Update failed: %r" % e); upd.update(phase="error", msg="Update failed \u2013 retry"); post(draw)
+        threading.Thread(target=go, daemon=True).start()
+
+    def check_updates():
+        def go():
+            info = check_update()
+            if info and upd["phase"] in ("idle", "done"):
+                upd.update(info=info, phase="avail"); post(draw)
+                if os.environ.get("AOE4SPOTIFY_TEST_AUTOUPDATE") == "1": post(start_update)   # testing only
+        threading.Thread(target=go, daemon=True).start()
+
     def open_log():
         if not os.path.exists(LOGFILE): open(LOGFILE, "a").close()
         os.startfile(LOGFILE)
@@ -1202,7 +1762,7 @@ def panel():
         un = os.path.join(HERE, "unins000.exe")
         if not os.path.exists(un): messagebox.showinfo("Uninstall", "Uninstaller not found (not installed?)."); return
         if messagebox.askyesno("Uninstall AoE4 Spotify", "Remove AoE4 Spotify from this PC?\nYour Steam launch option is restored."):
-            subprocess.Popen([un]); root.destroy()
+            subprocess.Popen([un], env=child_env()); root.destroy()
 
     def fetch_names():
         def go():
@@ -1221,6 +1781,12 @@ def panel():
             except Exception as e: log("Playlist names: %r" % e)
         threading.Thread(target=go, daemon=True).start()
 
+    _draw = draw
+    def draw():                                    # full redraw (state changes only, never on hover)
+        t0 = time.perf_counter(); _draw(); ui["dt"] = time.perf_counter() - t0
+        if tipst["tag"]:                           # the hovered control may be gone after a redraw
+            cur = cv.find_withtag("current")
+            if not (cur and tipst["tag"] in cv.gettags(cur[0])): hide_tip()
     def refresh_now():
         def go():
             s = {"spotify": os.path.exists(TOKEN), "game": aoe_running()}
@@ -1233,7 +1799,8 @@ def panel():
             except Exception as e: log("Panel update failed: %r" % e)
         root.after(150, pump)
 
-    draw(); pump(); tick(); fetch_names(); root.mainloop()
+    if upd["phase"] == "done": root.after(6000, lambda: (upd.update(phase="idle") if upd["phase"] == "done" else None, draw()))
+    draw(); reveal(root); note_window("panel", root); pump(); tick(); fetch_names(); check_updates(); root.mainloop()
 
 if __name__ == "__main__":
     try: main()

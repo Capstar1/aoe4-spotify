@@ -1,9 +1,19 @@
-; Inno Setup script for AoE4 Spotify. Build: ISCC.exe setup.iss (after building dist\AoE4 Spotify.exe)
+; Inno Setup script for AoE4 Spotify. Build: ISCC.exe setup.iss (after building the dist\AoE4 Spotify\ folder)
+#ifndef AppVer
+#define AppVer "0.3"
+#endif
+#ifdef TEST
+; test build (ISCC /DTEST): separate AppId/name/folder so it never touches a real install
+#define AppName "AoE4 Spotify TEST"
+#define AppGuid "{{0C1D7A52-93E4-4B6F-A1D2-7E55C0FFEE01}"
+#else
 #define AppName "AoE4 Spotify"
+#define AppGuid "{{6F2B8C1E-4A7D-4E0B-9C33-A0E4F5B71D42}"
+#endif
 [Setup]
-AppId={{6F2B8C1E-4A7D-4E0B-9C33-A0E4F5B71D42}
+AppId={#AppGuid}
 AppName={#AppName}
-AppVersion=0.2
+AppVersion={#AppVer}
 AppPublisher=Capstar
 LicenseFile=LICENSE
 SetupIconFile=app.ico
@@ -13,7 +23,7 @@ DisableProgramGroupPage=yes
 DisableReadyPage=yes
 PrivilegesRequired=lowest
 OutputDir=out
-OutputBaseFilename=AoE4 Spotify Setup
+OutputBaseFilename={#AppName} Setup
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\AoE4 Spotify.exe
 Compression=lzma2
@@ -22,7 +32,7 @@ WizardStyle=modern
 CloseApplications=no
 
 [Files]
-Source: "dist\AoE4 Spotify.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\AoE4 Spotify\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "config.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"
 Source: "aoe4_spotify.py"; DestDir: "{app}\source"
@@ -32,37 +42,84 @@ Source: "build.md"; DestDir: "{app}\source"
 Source: "build.bat"; DestDir: "{app}\source"
 Source: "LICENSE"; DestDir: "{app}\source"
 Source: "make_icon.py"; DestDir: "{app}\source"
+Source: "make_gtg_frames.py"; DestDir: "{app}\source"
+Source: "make_editor_assets.py"; DestDir: "{app}\source"
 Source: "app.ico"; DestDir: "{app}\source"
+Source: "app.png"; DestDir: "{app}\source"
 
 [Icons]
 ; control panel (settings window)
-Name: "{userdesktop}\AoE4 Spotify"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"
-Name: "{userprograms}\AoE4 Spotify"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"
+Name: "{userdesktop}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"
+Name: "{userprograms}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"
 
 [InstallDelete]
+; app is a PyInstaller folder build (exe + _internal); drop stale libraries from an older build first
+Type: filesandordirs; Name: "{app}\_internal"
 ; older versions used a Windows Startup shortcut
-Type: files; Name: "{userstartup}\AoE4 Spotify.lnk"
+Type: files; Name: "{userstartup}\{#AppName}.lnk"
+; 0.1/0.2 shortcuts were called just "AoE4 Spotify"
+Type: files; Name: "{userdesktop}\{#AppName}.lnk"
+Type: files; Name: "{userprograms}\{#AppName}.lnk"
 
 [Run]
 ; no arguments = Spotify login only, then it exits
 Filename: "{app}\AoE4 Spotify.exe"; WorkingDir: "{app}"; Description: "Log in to Spotify now"; Flags: postinstall nowait skipifsilent
+; in-app update (silent, /RELAUNCH=1): reopen the Control Panel, which shows "Updated to x.y"
+Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel --updated"; WorkingDir: "{app}"; Flags: nowait; Check: Relaunch
 
 [UninstallDelete]
+#ifndef TEST
 Type: filesandordirs; Name: "{userappdata}\AoE4Spotify"
+#endif
 Type: files; Name: "{app}\launch_option_backup.json"
 
 [Code]
 { Steam rewrites localconfig.vdf while running, so Steam is closed (gracefully) before we edit
   AoE4's launch option and reopened afterwards if it was running.
-  Test-only switches: /STEAMPROC=<process name> /STEAMEXE=<path> to use a dummy process. }
-var SteamWasRunning: Boolean;
+  Test-only switches: /STEAMPROC=<process name> /STEAMEXE=<path> /STEAMPATH=<dir> (or the matching
+  AOE4SPOTIFY_STEAM_* environment variables) to use a dummy Steam. }
+var SteamWasRunning, LaunchOptionAlreadySet: Boolean;
+
+function Relaunch(): Boolean;
+begin Result := ExpandConstant('{param:RELAUNCH|0}') = '1'; end;
+
+{ True if AoE4's launch option in some Steam user's localconfig.vdf already starts this install's exe.
+  Then nothing needs changing and Steam is left alone (typical for upgrades). /STEAMPATH= is for tests. }
+function LaunchOptionOK(): Boolean;
+var SP, P, Want: String; FR: TFindRec; Body: AnsiString;
+begin
+  Result := False;
+  SP := ExpandConstant('{param:STEAMPATH|}');
+  if SP = '' then SP := GetEnv('AOE4SPOTIFY_STEAM_PATH');
+  if SP = '' then
+    if not RegQueryStringValue(HKCU, 'Software\Valve\Steam', 'SteamPath', SP) then Exit;
+  StringChangeEx(SP, '/', '\', True);
+  P := ExpandConstant('{app}\AoE4 Spotify.exe');
+  StringChangeEx(P, '\', '\\', True);                 { VDF escapes backslashes and quotes }
+  Want := Lowercase('\"' + P + '\" %command%');
+  if FindFirst(SP + '\userdata\*', FR) then
+    try
+      repeat
+        if (FR.Name <> '.') and (FR.Name <> '..') and
+           LoadStringFromFile(SP + '\userdata\' + FR.Name + '\config\localconfig.vdf', Body) then
+          if Pos(Want, Lowercase(String(Body))) > 0 then Result := True;
+      until Result or not FindNext(FR);
+    finally
+      FindClose(FR);
+    end;
+end;
 
 function SteamProc(): String;
-begin Result := ExpandConstant('{param:STEAMPROC|steam.exe}'); end;
+begin
+  Result := ExpandConstant('{param:STEAMPROC|}');
+  if Result = '' then Result := GetEnv('AOE4SPOTIFY_STEAM_PROC');   { test runs (dummy Steam) }
+  if Result = '' then Result := 'steam.exe';
+end;
 
 function SteamExe(): String;
 begin
   Result := ExpandConstant('{param:STEAMEXE|}');
+  if Result = '' then Result := GetEnv('AOE4SPOTIFY_STEAM_EXE');
   if Result = '' then
     if not RegQueryStringValue(HKCU, 'Software\Valve\Steam', 'SteamExe', Result) then Result := '';
 end;
@@ -80,11 +137,21 @@ begin
   end;
 end;
 
+{ Stop running copies of THIS install's exe only (by full path). }
 procedure KillApp();
-var R: Integer;
+var Loc, Svc, Res: Variant; P: String; I: Integer;
 begin
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM "AoE4 Spotify.exe"', '', SW_HIDE, ewWaitUntilTerminated, R);
-  Sleep(500);
+  P := ExpandConstant('{app}\AoE4 Spotify.exe');
+  StringChangeEx(P, '\', '\\', True);
+  try
+    Loc := CreateOleObject('WbemScripting.SWbemLocator');
+    Svc := Loc.ConnectServer('.', 'root\CIMV2');
+    Res := Svc.ExecQuery('SELECT * FROM Win32_Process WHERE ExecutablePath=''' + P + '''');
+    for I := 0 to Res.Count - 1 do Res.ItemIndex(I).Terminate();
+  except
+    Log('KillApp: ' + GetExceptionMessage);
+  end;
+  Sleep(700);
 end;
 
 function IsSilentRun(): Boolean;
@@ -129,13 +196,15 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   KillApp();
+  LaunchOptionAlreadySet := LaunchOptionOK();
+  if LaunchOptionAlreadySet then begin Log('Launch option already set - Steam left alone'); Result := ''; Exit; end;
   if CloseSteam() then Result := '' else Result := 'Setup was cancelled because Steam must be closed while it finishes.';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var R: Integer;
 begin
-  if CurStep = ssPostInstall then begin
+  if (CurStep = ssPostInstall) and not LaunchOptionAlreadySet then begin
     Exec(ExpandConstant('{app}\AoE4 Spotify.exe'), '--set-launch-option', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, R);
     ReopenSteam();
   end;
