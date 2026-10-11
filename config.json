@@ -128,5 +128,12 @@
       "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
       "spotify:track:5X8te47Qx2kIeAqAicMrgC"
     ]
-  }
+  },
+  "default_playlists": {
+    "dark": "spotify:playlist:3suhOyH8k2za0LbWbwJdaM",
+    "feudal": "spotify:playlist:5nKpTJWyJbiLHsu5eaRvG9",
+    "castle": "spotify:playlist:6W8iwAy9LVOiZHc95F0N0J",
+    "imperial": "spotify:playlist:3IofYhHHJJ10WyvSFnXDjb"
+  },
+  "enabled": true
 }

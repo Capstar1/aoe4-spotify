@@ -3,9 +3,10 @@
 [Setup]
 AppId={{6F2B8C1E-4A7D-4E0B-9C33-A0E4F5B71D42}
 AppName={#AppName}
-AppVersion=1.5
+AppVersion=0.1
 AppPublisher=Capstar
 LicenseFile=LICENSE
+SetupIconFile=app.ico
 DefaultDirName={localappdata}\Programs\{#AppName}
 DisableDirPage=yes
 DisableProgramGroupPage=yes
@@ -24,12 +25,19 @@ CloseApplications=no
 Source: "dist\AoE4 Spotify.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "config.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"
-Source: "aoe4_spotify_friend.py"; DestDir: "{app}\source"
+Source: "aoe4_spotify.py"; DestDir: "{app}\source"
 Source: "config.json"; DestDir: "{app}\source"
 Source: "setup.iss"; DestDir: "{app}\source"
 Source: "build.md"; DestDir: "{app}\source"
 Source: "build.bat"; DestDir: "{app}\source"
 Source: "LICENSE"; DestDir: "{app}\source"
+Source: "make_icon.py"; DestDir: "{app}\source"
+Source: "app.ico"; DestDir: "{app}\source"
+
+[Icons]
+; control panel (settings window)
+Name: "{userdesktop}\AoE4 Spotify"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"
+Name: "{userprograms}\AoE4 Spotify"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"
 
 [InstallDelete]
 ; older versions used a Windows Startup shortcut

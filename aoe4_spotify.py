@@ -26,18 +26,86 @@ TOKEN = os.path.join(DATA, "token.json")   # private Spotify login token; never 
 LOGFILE = os.path.join(DATA, "aoe4_spotify.log")
 REDIRECT = "http://127.0.0.1:8888/callback"
 SCOPES = "user-modify-playback-state user-read-playback-state"
-DEFAULT_LOG = os.path.join(os.path.expanduser("~"), "Documents", "My Games", "Age of Empires IV", "warnings.log")
+def documents_dir():
+    """The real Documents folder (handles OneDrive / moved Documents)."""
+    try:
+        import ctypes, ctypes.wintypes as wt
+        buf = ctypes.create_unicode_buffer(wt.MAX_PATH)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf) == 0 and buf.value: return buf.value  # CSIDL_PERSONAL
+    except Exception: pass
+    return os.path.join(os.path.expanduser("~"), "Documents")
+DEFAULT_LOG = os.path.join(documents_dir(), "My Games", "Age of Empires IV", "warnings.log")
 
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
     try: print(line, flush=True)
     except Exception: pass  # pythonw has no console
     try:
+        if os.path.exists(LOGFILE) and os.path.getsize(LOGFILE) > 1_000_000:   # keep the log small
+            os.replace(LOGFILE, LOGFILE + ".old")
         with open(LOGFILE, "a", encoding="utf-8") as f: f.write(line + "\n")
     except Exception: pass
 
-def load_config():
-    with open(CONFIG, encoding="utf-8") as f: return json.load(f)
+USER_CONFIG = os.path.join(DATA, "config.json")   # settings from the control panel (overlay)
+
+def load_config(user=True):
+    """Install config.json, with the user's panel settings from %APPDATA%/AoE4Spotify laid on top."""
+    with open(CONFIG, encoding="utf-8") as f: cfg = json.load(f)
+    cfg.setdefault("default_playlists", dict(cfg.get("playlists", {})))
+    if not user: return cfg
+    return apply_user(cfg, load_user_settings())
+
+def load_user_settings():
+    """Panel settings; a missing or damaged file just means 'no changes'."""
+    try:
+        with open(USER_CONFIG, encoding="utf-8") as f: u = json.load(f)
+        return u if isinstance(u, dict) else {}
+    except FileNotFoundError: return {}
+    except Exception as e: log("Settings file damaged, using defaults: %r" % e); return {}
+
+def apply_user(cfg, u):
+    pls = u.get("playlists") if isinstance(u.get("playlists"), dict) else {}
+    cfg["playlists"] = {**cfg.get("playlists", {}),
+                        **{k: v for k, v in pls.items() if isinstance(v, str) and v.startswith("spotify:playlist:")}}
+    if isinstance(u.get("enabled"), bool): cfg["enabled"] = u["enabled"]
+    if isinstance(u.get("fade_seconds"), (int, float)): cfg["fade_seconds"] = max(0.0, min(5.0, float(u["fade_seconds"])))
+    if isinstance(u.get("boss_intro_enabled"), bool): cfg.setdefault("boss_intro", {})["enabled"] = u["boss_intro_enabled"]
+    return cfg
+
+# ---------------------------------------------------------------- Spotify desktop app launch
+STORE_APP = r"SpotifyAB.SpotifyMusic_zpdnekdrzrea0"
+
+def spotify_running():
+    import subprocess
+    try:
+        out = subprocess.run(["tasklist", "/fi", "imagename eq Spotify.exe", "/nh"], capture_output=True,
+                             text=True, creationflags=0x08000000).stdout
+        return "spotify.exe" in out.lower()
+    except Exception:
+        return False
+
+def _spotify_protocol_registered():
+    try:
+        import winreg
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "spotify")); return True
+    except Exception:
+        return False
+
+def launch_spotify():
+    """Start the Spotify desktop app minimized. Returns False if it isn't installed."""
+    import subprocess
+    exe = os.path.join(os.environ.get("APPDATA", ""), "Spotify", "Spotify.exe")
+    try:
+        if os.path.isfile(exe):                                   # classic installer
+            subprocess.Popen([exe, "--minimized"], creationflags=0x08000000); log("Started Spotify (minimized)"); return True
+        if os.path.isdir(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", STORE_APP)):   # Microsoft Store
+            subprocess.Popen(["explorer.exe", r"shell:AppsFolder\%s!Spotify" % STORE_APP]); log("Started Spotify (Microsoft Store app)"); return True
+        if _spotify_protocol_registered():
+            os.startfile("spotify:"); log("Started Spotify via spotify: link"); return True
+    except Exception as e:
+        log("Could not start Spotify: %r" % e); return False
+    log("Spotify desktop app is NOT INSTALLED on this PC - install it from spotify.com to get music.")
+    return False
 
 # ---------------------------------------------------------------- Spotify
 class Spotify:
@@ -47,8 +115,13 @@ class Spotify:
         self.tok = None
         self.shuffle = bool(cfg.get("shuffle", True))
         self.repeat = bool(cfg.get("repeat", True))
+        self._glock = threading.Lock(); self._gen = 0; self._orig = None   # fade/switch state
         if os.path.exists(TOKEN):
-            with open(TOKEN, encoding="utf-8") as f: self.tok = json.load(f)
+            try:
+                with open(TOKEN, encoding="utf-8") as f: self.tok = json.load(f)
+                if "refresh_token" not in self.tok: raise ValueError("no refresh_token")
+            except Exception as e:
+                log("Spotify login data is damaged (%r) - please log in again" % e); self.tok = None
 
     def _save(self, tok):
         if "refresh_token" not in tok and self.tok: tok["refresh_token"] = self.tok.get("refresh_token")
@@ -76,16 +149,21 @@ class Spotify:
                 self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers()
                 self.wfile.write(b"<h2>Spotify login done. You can close this tab.</h2>")
             def log_message(self, *a): pass
-        srv = http.server.HTTPServer(("127.0.0.1", 8888), H)
+        try: srv = http.server.HTTPServer(("127.0.0.1", 8888), H)
+        except OSError:
+            log("Login: port 8888 is busy (another login window open?) - try again in a minute"); raise SystemExit("port busy")
+        srv.timeout = 2
         url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode({
             "client_id": self.cid, "response_type": "code", "redirect_uri": REDIRECT,
             "code_challenge_method": "S256", "code_challenge": challenge,
             "scope": SCOPES, "state": state})
         log("Opening browser for Spotify login...")
         webbrowser.open(url)
-        while "code" not in result and "error" not in result:
+        deadline = time.time() + 300                 # give up after 5 minutes
+        while "code" not in result and "error" not in result and time.time() < deadline:
             srv.handle_request()
         srv.server_close()
+        if not result: log("Login timed out"); raise SystemExit("Spotify login timed out")
         if result.get("error") or result.get("state") != state:
             raise SystemExit("Spotify login failed: %s" % result)
         self._save(self._token_req({"grant_type": "authorization_code", "code": result["code"],
@@ -95,21 +173,39 @@ class Spotify:
     def access(self):
         if not self.tok: self.login()
         if time.time() > self.tok.get("expires_at", 0):
-            self._save(self._token_req({"grant_type": "refresh_token",
-                "refresh_token": self.tok["refresh_token"], "client_id": self.cid}))
+            try:
+                self._save(self._token_req({"grant_type": "refresh_token",
+                    "refresh_token": self.tok["refresh_token"], "client_id": self.cid}))
+            except urllib.error.HTTPError as e:
+                if e.code in (400, 401):      # refresh token revoked/expired: forget it, user must log in again
+                    log("Spotify login expired - open AoE4 Spotify and click Log in")
+                    self.tok = None
+                    try: os.remove(TOKEN)
+                    except OSError: pass
+                raise
         return self.tok["access_token"]
 
-    def _api(self, method, path, body=None):
-        req = urllib.request.Request("https://api.spotify.com/v1" + path, method=method,
-            data=json.dumps(body).encode() if body is not None else None,
-            headers={"Authorization": "Bearer " + self.access(), "Content-Type": "application/json"})
+    def _api(self, method, path, body=None, _retry=True):
+        """Call the Spotify Web API. Never raises: returns (status, body); status 0 = offline/not logged in."""
         try:
+            req = urllib.request.Request("https://api.spotify.com/v1" + path, method=method,
+                data=json.dumps(body).encode() if body is not None else None,
+                headers={"Authorization": "Bearer " + self.access(), "Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=15) as r:
-                raw = r.read(); return r.status, (json.loads(raw) if raw else None)
+                raw = r.read()
+                try: return r.status, (json.loads(raw) if raw else None)
+                except ValueError: return r.status, None
         except urllib.error.HTTPError as e:
+            if e.code == 401 and _retry and self.tok:          # access token rejected: refresh once
+                self.tok["expires_at"] = 0
+                return self._api(method, path, body, False)
             raw = e.read()
             try: return e.code, json.loads(raw)
             except Exception: return e.code, raw.decode(errors="replace")
+        except (urllib.error.URLError, OSError) as e:
+            log("Spotify unreachable (offline?): %s" % getattr(e, "reason", e)); return 0, None
+        except BaseException as e:
+            log("Spotify request failed: %r" % e); return 0, None
 
     def play(self, uri):
         q = "?device_id=" + self.device_id if self.device_id else ""
@@ -128,16 +224,32 @@ class Spotify:
             self._api("PUT", "/me/player/repeat?state=context" + dq)
         return ok
 
+    def ensure_device(self, wait=20):
+        """Find this PC's Spotify device (type Computer); start Spotify if needed and wait for it."""
+        def find():
+            c, d = self._api("GET", "/me/player/devices")
+            devs = (d or {}).get("devices", []) if isinstance(d, dict) else []
+            comp = [x for x in devs if (x.get("type") or "").lower() == "computer"]
+            me = os.environ.get("COMPUTERNAME", "").lower()
+            comp.sort(key=lambda x: (x.get("name", "").lower() != me, not x.get("is_active")))
+            return comp[0] if comp else None
+        dev = find()
+        if not dev:
+            if not spotify_running() and not launch_spotify(): return False
+            t0 = time.time()
+            while not dev and time.time() - t0 < wait:
+                time.sleep(2); dev = find()
+        if not dev:
+            log("Spotify: NO DEVICE after %ds. Is the Spotify app logged in on this PC?" % wait); return False
+        if dev["id"] != self.device_id: log("Spotify: using device '%s'" % dev.get("name"))
+        self.device_id = dev["id"]
+        return True
+
     def _play(self, uri, payload, q):
         code, body = self._api("PUT", "/me/player/play" + q, payload)
-        if code == 404:  # no active device: pick the first available one
-            _, devs = self._api("GET", "/me/player/devices")
-            devs = (devs or {}).get("devices", []) if isinstance(devs, dict) else []
-            if not devs:
-                log("Spotify: NO ACTIVE DEVICE. Open Spotify (desktop app) and play anything once, then it will work.")
-                return False
-            self.device_id = devs[0]["id"]
-            log("Spotify: no active device, using '%s'" % devs[0]["name"])
+        if code == 404:  # no active device (Spotify closed/idle): start it and target this PC by device_id
+            self.device_id = None
+            if not self.ensure_device(): return False
             code, body = self._api("PUT", "/me/player/play?device_id=" + self.device_id, payload)
         if code == 403:
             log("Spotify 403: playback control needs Spotify Premium (%s)" % body); return False
@@ -189,7 +301,7 @@ class Spotify:
                     if self._orig is not None: self._set_vol(self._orig)
                     self._orig = None
 
-    # ---- boss intro: play one track, then the age playlist (runs in a background thread)
+    # ---- Age 4 Intro theme (config key boss_intro): play one track, then the age playlist (runs in a background thread)
     def boss_then(self, track, playlist, fade=2.0):
         if not hasattr(self, "_glock"):
             self._glock = threading.Lock(); self._gen = 0; self._orig = None
@@ -213,7 +325,7 @@ class Spotify:
             if item == track and st.get("progress_ms", 0) >= dur - 2500: break   # about to end
             if started and not st.get("is_playing") and st.get("progress_ms", 1) == 0: break
         if gen != self._gen: return
-        log("Boss intro done -> playlist")
+        log("Age 4 Intro theme done -> playlist")
         self.switch(playlist, fade)
 
     def switch_uris(self, track, fade):
@@ -317,8 +429,8 @@ class Tracker:
         except Exception as e:
             log("Could not read DataCRC player map: %s" % e)
 
-# ---------------------------------------------------------------- boss intro
-# When YOU reach a configured age (default Imperial), first play one "boss intro" track picked
+# ---------------------------------------------------------------- Age 4 Intro theme (config key boss_intro)
+# When YOU reach a configured age (default Imperial), first play one "Age 4 Intro theme" track picked
 # by your civ, then continue into that age's playlist. Pools live in config.json "boss_intro".
 BOSS_STATE = os.path.join(globals().get("DATA", HERE), "boss_state.json")   # last pick per civ
 
@@ -458,7 +570,11 @@ def our_prefix():
     return '"%s" ' % os.path.join(HERE, "AoE4 Spotify.exe")
 
 def localconfigs():
-    return sorted(glob.glob(os.path.join(steam_path(), "userdata", "*", "config", "localconfig.vdf")))
+    try: root = steam_path()
+    except OSError: log("Steam is not installed (no SteamPath in the registry) - launch option not changed"); return []
+    files = sorted(glob.glob(os.path.join(root, "userdata", "*", "config", "localconfig.vdf")))
+    if not files: log("No Steam user configs found under %s" % root)
+    return files
 
 def set_launch_option():
     state = {}
@@ -531,9 +647,10 @@ def main():
     args = sys.argv[1:]
     if args[:1] == ["--set-launch-option"]: set_launch_option(); return
     if args[:1] == ["--remove-launch-option"]: remove_launch_option(); return
+    if args[:1] == ["--panel"]: panel(); return
     cfg = load_config()
     if args[:1] == ["--dry-run"]:
-        t = Tracker(cfg, lambda k, civ=None: log("   [dry-run] would play %s%s: %s" % (k, (" (boss intro for %s: %s)" % (civ, pick_boss_track(cfg, civ))) if civ and boss_age(cfg, k) else "", cfg["playlists"].get(k))))
+        t = Tracker(cfg, lambda k, civ=None: log("   [dry-run] would play %s%s: %s" % (k, (" (Age 4 Intro theme for %s: %s)" % (civ, pick_boss_track(cfg, civ))) if civ and boss_age(cfg, k) else "", cfg["playlists"].get(k))))
         crcs = args[2:]
         for line in open(args[1], encoding="utf-8", errors="replace"):
             if RE_BEGIN.search(line) and crcs:
@@ -556,6 +673,7 @@ def main():
     game_dir = os.path.dirname(args[0]) if os.path.isfile(args[0]) else None
     subprocess.Popen(args, cwd=game_dir)
     log("Started game: %s" % " ".join(args))
+    if not cfg.get("enabled", True): log("Disabled in the control panel - game started, doing nothing else"); return
     if not single_instance(): log("Another switcher is already running - exiting"); return
     if not sp.tok: sp.login()
     t0 = time.time()
@@ -563,13 +681,14 @@ def main():
         if time.time() - t0 > 300: log("AoE4 did not start within 5 minutes - exiting"); return
         time.sleep(3)
     log("AoE4 is running")
+    threading.Thread(target=sp.ensure_device, daemon=True).start()   # start Spotify now if closed
     def play(k, civ=None):
         uri = cfg["playlists"].get(k, "")
         if not uri.startswith("spotify:") or "PASTE" in uri: log("No playlist set for %s" % k); return
         fade = float(cfg.get("fade_seconds", 2))
         track = pick_boss_track(cfg, civ) if civ and boss_age(cfg, k) else None
         if track:
-            log("Boss intro for %s: %s" % (civ, track))
+            log("Age 4 Intro theme for %s: %s" % (civ, track))
             threading.Thread(target=sp.boss_then, args=(track, uri, fade), daemon=True).start()
         else:
             threading.Thread(target=sp.switch, args=(uri, fade), daemon=True).start()
@@ -579,6 +698,306 @@ def main():
     tail(path, t, stop=lambda: not aoe_running())   # returns ~10s after the game closes
     log("AoE4 closed - exiting")
     time.sleep(3)                                     # let a running fade finish
+
+# ---------------------------------------------------------------- control panel (--panel)
+# A small settings window. Settings are saved to %APPDATA%/AoE4Spotify/config.json and
+# overlay the install config (which is never edited).
+RELEASES_URL = "https://github.com/Capstar1/aoe4-spotify/releases"
+NAMES_CACHE = os.path.join(DATA, "playlist_names.json")
+AGES = [("dark", "Dark"), ("feudal", "Feudal"), ("castle", "Castle"), ("imperial", "Imperial")]
+RE_PLAYLIST = re.compile(r"(?:open\.spotify\.com/(?:intl-[a-z]+/)?playlist/|spotify:playlist:)([A-Za-z0-9]{22})")
+
+def load_user(): return load_user_settings()
+
+def save_user(u):
+    tmp = USER_CONFIG + ".tmp"                      # write-then-rename: never leaves a half-written file
+    with open(tmp, "w", encoding="utf-8") as f: json.dump(u, f, indent=2)
+    os.replace(tmp, USER_CONFIG)
+
+def panel():
+    import tkinter as tk, subprocess, webbrowser as wb
+    try: import ctypes; ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception: pass
+    C = dict(bg="#121212", card="#1f1f1f", tx="#f2f2f2", mu="#9a9a9a", off="#3a3a3a", line="#2a2a2a",
+             ib="#2a2a2a", idle="#8a8a8a", red="#e5484d", acc="#1DB954", dis="#555555")
+    root = tk.Tk(); root.title("AoE4 Spotify"); root.configure(bg=C["bg"]); root.resizable(False, False)
+    S = root.winfo_fpixels("1i") / 96.0
+    W, H = 520, 650
+    cv = tk.Canvas(root, width=int(W * S), height=int(H * S), bg=C["bg"], highlightthickness=0); cv.pack()
+    FONT = "Segoe UI"
+    def F(sz, b=False): return (FONT, -int(sz * S), "bold" if b else "normal")
+    def P(*v): return [x * S for x in v]
+    # Shapes are drawn with Pillow at 4x and downscaled, so corners and circles are anti-aliased.
+    from PIL import Image, ImageDraw, ImageTk
+    imgs = {}
+    def _img(key, w, h, paint):
+        k = (key, w, h)
+        if k not in imgs:
+            Q = 4; im = Image.new("RGBA", (max(1, w) * Q, max(1, h) * Q), (0, 0, 0, 0))
+            paint(ImageDraw.Draw(im), Q)
+            imgs[k] = ImageTk.PhotoImage(im.resize((max(1, w), max(1, h)), Image.LANCZOS))
+        return imgs[k]
+    def rr(x0, y0, x1, y1, r, fill, outline="", tag=None, width=1):
+        X0, Y0, X1, Y1 = [int(round(v)) for v in P(x0, y0, x1, y1)]
+        w, h = X1 - X0, Y1 - Y0; rad = min(r * S, w / 2, h / 2)
+        def paint(d, Q):
+            d.rounded_rectangle([0, 0, w * Q - 1, h * Q - 1], radius=rad * Q, fill=fill or None,
+                                outline=outline or None, width=int(width * S * Q) if outline else 0)
+        return cv.create_image(X0, Y0, image=_img(("rr", r, fill, outline, width), w, h, paint), anchor="nw", tags=tag)
+    def oval_(box, fill="", outline="", width=0, tags=None):
+        X0, Y0, X1, Y1 = [int(round(v)) for v in box]
+        w, h = X1 - X0, Y1 - Y0
+        def paint(d, Q):
+            d.ellipse([0, 0, w * Q - 1, h * Q - 1], fill=fill or None, outline=outline or None, width=int(width * Q) if outline else 0)
+        return cv.create_image(X0, Y0, image=_img(("ov", fill, outline, width), w, h, paint), anchor="nw", tags=tags)
+    def undo_icon(cx, cy, c, tag):
+        sz = int(18 * S)
+        def paint(d, Q):
+            m = sz * Q; lw = max(2, int(2.2 * S * Q))
+            d.arc([m*0.18, m*0.2, m*0.86, m*0.88], start=200, end=470, fill=c, width=lw)
+            d.polygon([(m*0.04, m*0.42), (m*0.36, m*0.42), (m*0.18, m*0.66)], fill=c)
+        return cv.create_image(int(cx * S), int(cy * S), image=_img(("undo", c), sz, sz, paint), anchor="center", tags=tag)
+    def badge(px):
+        im = Image.new("RGBA", (px * 4, px * 4), (0, 0, 0, 0)); d = ImageDraw.Draw(im); m = px * 4
+        d.ellipse([0, 0, m - 1, m - 1], fill=C["acc"])
+        for k, hh in ((-0.2, 0.2), (0, 0.3), (0.2, 0.2)):
+            x = m * (0.5 + k); d.rounded_rectangle([x - m*0.05, m*(0.5-hh), x + m*0.05, m*(0.5+hh)], radius=m*0.05, fill=C["bg"])
+        return im.resize((px, px), Image.LANCZOS)
+    logo = ImageTk.PhotoImage(badge(int(32 * S)))
+    def _icon(px, paint):
+        Q = 4; im = Image.new("RGBA", (px * Q, px * Q), (0, 0, 0, 0)); paint(ImageDraw.Draw(im), px * Q, Q)
+        return ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+    def _power(d, m, Q):
+        lw = int(3 * S * Q); d.arc([m*0.12, m*0.16, m*0.88, m*0.92], start=-60, end=240, fill=C["acc"], width=lw)
+        d.rounded_rectangle([m/2 - lw/2, m*0.04, m/2 + lw/2, m*0.5], radius=lw/2, fill=C["acc"])
+    def _fade(d, m, Q):
+        lw = int(2 * S * Q)
+        for k in range(3): d.arc([m*(0.0+k*0.18), m*0.12, m*(0.6+k*0.18), m*0.88], start=-60, end=60, fill=C["acc"], width=lw)
+    def _chev(up):
+        def p(d, m, Q):
+            lw = int(2.4 * S * Q); a, b = (0.62, 0.36) if up else (0.38, 0.64)
+            d.line([(m*0.22, m*a), (m*0.5, m*b), (m*0.78, m*a)], fill=C["mu"], width=lw, joint="curve")
+            for x, yy in ((0.22, a), (0.5, b), (0.78, a)): d.ellipse([m*x - lw/2, m*yy - lw/2, m*x + lw/2, m*yy + lw/2], fill=C["mu"])
+        return p
+    chev_up = _icon(int(18 * S), _chev(True)); chev_down = _icon(int(18 * S), _chev(False))
+    ui = {"open": os.environ.get("AOE4SPOTIFY_PANEL_OPEN") == "1"}   # env var: screenshots/testing only
+    power_img = _icon(int(30 * S), _power); fade_img = _icon(int(24 * S), _fade)
+    root.iconphoto(True, ImageTk.PhotoImage(badge(64)), ImageTk.PhotoImage(badge(32)))
+    def text(x, y, s, sz, c=None, b=False, anchor="w", tag=None):
+        return cv.create_text(*P(x, y), text=s, font=F(sz, b), fill=c or C["tx"], anchor=anchor, tags=tag)
+    # Each tag is bound once; draw() only updates the handler table. (Re-binding inside a click
+    # would free the running Tcl callback and crash Tk.) Handlers run after the event finishes.
+    handlers, bound = {}, set()
+    def click(tag, fn):
+        handlers[tag] = fn
+        if tag in bound: return
+        bound.add(tag)
+        cv.tag_bind(tag, "<Button-1>", lambda e, t=tag: root.after_idle(lambda: handlers[t]() if t in handlers else None), add="+")
+        cv.tag_bind(tag, "<Enter>", lambda e, t=tag: cv.config(cursor="hand2" if t in handlers else ""), add="+")
+        cv.tag_bind(tag, "<Leave>", lambda e: cv.config(cursor=""), add="+")
+
+    base = load_config(user=False); user = load_user()
+    defaults = base.get("default_playlists") or base.get("playlists", {})
+    try: names = json.load(open(NAMES_CACHE, encoding="utf-8"))
+    except Exception: names = {}
+    state = {"spotify": None, "game": None}
+    ui_q = []
+    def post(fn): ui_q.append(fn)                 # called from worker threads
+
+    def cur(): return apply_user(load_config(user=False), user)
+    def set_user(k, v): user[k] = v; save_user(user); draw()
+
+    def toggle(x, y, on, tag, w=44, h=24):
+        rr(x, y, x + w, y + h, h / 2, C["acc"] if on else C["off"], tag=tag)
+        cx = x + w - h / 2 if on else x + h / 2
+        oval_(P(cx - h/2 + 3, y + 3, cx + h/2 - 3, y + h - 3), fill="white", outline="", tags=tag)
+
+    def icon(i, cx, cy, c):
+        if i == 0:
+            oval_(P(cx-8, cy-8, cx+8, cy+8), fill=c, outline=""); oval_(P(cx-3, cy-11, cx+11, cy+3), fill=C["ib"], outline="")
+        elif i == 1:
+            cv.create_polygon(P(cx-9, cy-1, cx, cy-9, cx+9, cy-1), fill=c); cv.create_rectangle(*P(cx-6, cy-1, cx+6, cy+8), fill=c, outline="")
+        elif i == 2:
+            cv.create_rectangle(*P(cx-8, cy-3, cx+8, cy+9), fill=c, outline="")
+            for k in (-8, -2, 4): cv.create_rectangle(*P(cx+k, cy-8, cx+k+4, cy-3), fill=c, outline="")
+        else:
+            cv.create_polygon(P(cx-9, cy+6, cx-9, cy-6, cx-4, cy, cx, cy-9, cx+4, cy, cx+9, cy-6, cx+9, cy+6), fill=c)
+
+    def pl_name(uri):
+        pid = uri.split(":")[-1]
+        return names.get(pid) or "Playlist"
+
+    tipw, tips, tipbound = {}, {}, set()
+    def hide_tip(_=None):
+        w = tipw.pop("w", None)
+        if w: w.destroy()
+    def tip(tag, msg):
+        tips[tag] = msg
+        if tag in tipbound: return
+        tipbound.add(tag)
+        def show(e, tag=tag):
+            hide_tip(); t = tk.Toplevel(root); t.overrideredirect(True); t.configure(bg=C["line"])
+            tk.Label(t, text=tips.get(tag, ""), bg=C["line"], fg=C["tx"], font=F(10), padx=6, pady=2).pack()
+            t.geometry("+%d+%d" % (e.x_root + 10, e.y_root + 14)); tipw["w"] = t
+        cv.tag_bind(tag, "<Enter>", show, add="+"); cv.tag_bind(tag, "<Leave>", hide_tip, add="+")
+
+    def draw():
+        cv.delete("all"); handlers.clear(); hide_tip(); cfg = cur(); en = bool(cfg.get("enabled", True))
+        # header
+        cv.create_image(*P(20, 16), image=logo, anchor="nw")
+        text(64, 32, "AoE4 Spotify", 22, b=True)
+        rr(238, 22, 284, 42, 10, C["card"]); text(261, 32, "v0.1", 10, C["mu"], anchor="center")
+        cv.create_line(*P(20, 62, 500, 62), fill=C["line"])
+        # enabled
+        rr(20, 74, 500, 128, 12, C["card"])
+        cv.create_image(*P(48, 96), image=power_img, anchor="center")
+        text(72, 101, "Enabled", 17, b=True); toggle(424, 88, en, "en", 52, 28)
+        click("en", lambda: set_user("enabled", not en))
+        # status lights
+        for i, (lab, key, okt, offt) in enumerate((("Spotify", "spotify", "Logged in", "Logged out"), ("Game", "game", "Running", "Not running"))):
+            x = 20 + i * 245; v = state[key]
+            c = C["acc"] if v else C["idle"]
+            rr(x, 140, x + 235, 176, 18, C["card"])
+            oval_(P(x+16, 152, x+28, 164), fill=c, outline=""); text(x+38, 158, lab, 13, C["mu"])
+            text(x+218, 158, "..." if v is None else (okt if v else offt), 13, c, True, "e")
+        # collapsible Playlists section (collapsed by default)
+        rr(20, 188, 500, 224, 10, C["card"], tag="plh")
+        text(36, 206, "Playlists", 14, b=True, tag="plh")
+        if not ui["open"]:
+            changed = sum(1 for k, _ in AGES if cfg["playlists"].get(k) != defaults.get(k))
+            text(150, 206, "4 ages" + (" · %d changed" % changed if changed else ""), 12, C["mu"], tag="plh")
+        cv.create_image(*P(484, 206), image=chev_up if ui["open"] else chev_down, anchor="center", tags="plh")
+        click("plh", lambda: (ui.update(open=not ui["open"]), draw()))
+        for i, (k, lab) in enumerate(AGES if ui["open"] else []):
+            y = 232 + i * 50; uri = cfg["playlists"].get(k, ""); is_def = uri == defaults.get(k)
+            rr(20, y, 500, y + 42, 10, C["card"]); rr(28, y + 6, 58, y + 36, 6, C["ib"]); icon(i, 43, y + 21, C["acc"])
+            text(70, y + 21, lab, 14, b=True)
+            oval_(P(160, y+17, 168, y+25), fill=C["acc"] if uri else C["idle"], outline="")
+            nm = pl_name(uri); nm = nm if len(nm) <= 22 else nm[:21] + "…"
+            text(176, y + 21, nm, 13, C["mu"])
+            rr(388, y + 9, 450, y + 33, 12, C["card"], C["acc"], "chg%d" % i); text(419, y + 21, "Change", 10, C["acc"], True, "center", "chg%d" % i)
+            rc = C["dis"] if is_def else C["mu"]
+            rr(458, y + 9, 488, y + 33, 12, C["card"], rc, "rev%d" % i); undo_icon(473, y + 21, rc, "rev%d" % i)
+            click("chg%d" % i, lambda k=k, lab=lab: change(k, lab))
+            if not is_def: click("rev%d" % i, lambda k=k: revert(k))
+            tip("rev%d" % i, "Revert" if not is_def else "Revert (already default)")
+        # Age 4 Intro theme
+        base = 440 if ui["open"] else 236
+        Hn = base + 230
+        if int(cv.cget("height")) != int(Hn * S): cv.config(height=int(Hn * S))
+        y = base; bon = bool((cfg.get("boss_intro") or {}).get("enabled", True))
+        rr(20, y, 500, y + 46, 10, C["card"]); icon(3, 45, y + 23, C["acc"])
+        text(66, y + 23, "Age 4 Intro theme", 14, b=True); toggle(452, y + 11, bon, "boss")
+        click("boss", lambda: set_user("boss_intro_enabled", not bon))
+        # fade
+        y = base + 56; fv = float(cfg.get("fade_seconds", 2))
+        rr(20, y, 500, y + 46, 10, C["card"])
+        cv.create_image(*P(44, y + 23), image=fade_img, anchor="center")
+        text(66, y + 23, "Fade", 14, b=True)
+        x0, x1 = FX0, FX1; xv = x0 + (x1 - x0) * fv / 5
+        rr(x0, y + 20, x1, y + 26, 3, C["off"], tag="fade"); rr(x0, y + 20, max(xv, x0 + 6), y + 26, 3, C["acc"], tag="fade")
+        oval_(P(xv-9, y+14, xv+9, y+32), fill="white", outline=C["acc"], width=2*S, tags="fade")
+        text(446, y + 23, ("%.1fs" % fv) if fv else "Off", 13, C["acc"], True, "e")
+        fdef = float(base_cfg.get("fade_seconds", 2)); f_is_def = abs(fv - fdef) < 1e-6
+        rc = C["dis"] if f_is_def else C["mu"]          # revert to default fade, right-aligned like playlist rows
+        rr(458, y + 11, 488, y + 35, 12, C["card"], rc, "revf"); undo_icon(473, y + 23, rc, "revf")
+        if not f_is_def: click("revf", lambda: (user.pop("fade_seconds", None), save_user(user), draw()))
+        tip("revf", "Revert" if not f_is_def else "Revert (already default)")
+        # buttons
+        b1, b2 = base + 118, base + 170
+        btns = (("Log in", "\u21bb", login, 20, b1), ("Updates", "\u2193", lambda: wb.open(RELEASES_URL), 265, b1),
+                ("Open log", "\u2630", open_log, 20, b2), ("Uninstall", "\u2715", uninstall, 265, b2))
+        for lab, ic, fn, x, y in btns:
+            red = lab == "Uninstall"; tg = "b_" + lab.replace(" ", "_")   # Tk tags must not contain spaces
+            rr(x, y, x + 235, y + 44, 10, C["card"], C["red"] if red else "", tg)
+            text(x + 117, y + 22, ic + "  " + lab, 14, C["red"] if red else C["tx"], True, "center", tg)
+            click(tg, fn)
+
+    FX0, FX1 = 130, 360                              # fade slider track (shortened for the revert button)
+    base_cfg = load_config(user=False)
+    drag = {"on": False}
+    def slide(e, save=False):
+        if not drag["on"]: return
+        v = round(max(0, min(5, (e.x / S - FX0) / (FX1 - FX0) * 5)) * 2) / 2
+        if save: drag["on"] = False; set_user("fade_seconds", v)
+        elif v != user.get("fade_seconds"): user["fade_seconds"] = v; draw()
+    cv.tag_bind("fade", "<ButtonPress-1>", lambda e: (drag.update(on=True), root.after_idle(lambda: slide(e))))
+    cv.bind("<B1-Motion>", lambda e: root.after_idle(lambda: slide(e)))
+    cv.bind("<ButtonRelease-1>", lambda e: root.after_idle(lambda: slide(e, True)))
+
+    def dialog(title, prompt):
+        d = tk.Toplevel(root); d.title(title); d.configure(bg=C["card"]); d.transient(root); d.resizable(False, False); d.grab_set()
+        tk.Label(d, text=prompt, bg=C["card"], fg=C["tx"], font=F(12, True), justify="left").pack(padx=16, pady=(14, 6), anchor="w")
+        e = tk.Entry(d, width=52, bg=C["ib"], fg=C["tx"], insertbackground=C["tx"], relief="flat", font=F(12)); e.pack(padx=16, ipady=5)
+        err = tk.Label(d, text="", bg=C["card"], fg=C["red"], font=F(10)); err.pack(padx=16, anchor="w")
+        res = {}
+        def ok(_=None):
+            m = RE_PLAYLIST.search(e.get().strip())
+            if not m: err.config(text="That's not a Spotify playlist link (open.spotify.com/playlist/...)"); return
+            res["id"] = m.group(1); d.destroy()
+        row = tk.Frame(d, bg=C["card"]); row.pack(padx=16, pady=(4, 14), anchor="e")
+        tk.Button(row, text="Cancel", command=d.destroy, bg=C["ib"], fg=C["tx"], relief="flat", font=F(11), padx=12).pack(side="left", padx=6)
+        tk.Button(row, text="Save", command=ok, bg=C["acc"], fg="black", relief="flat", font=F(11, True), padx=14).pack(side="left")
+        e.bind("<Return>", ok); e.focus_set(); root.wait_window(d)
+        return res.get("id")
+
+    def change(k, lab):
+        pid = dialog("Change playlist", "Paste a Spotify playlist link for %s Age:" % lab)
+        if not pid: return
+        pls = dict(user.get("playlists") or {}); pls[k] = "spotify:playlist:" + pid
+        set_user("playlists", pls); fetch_names()
+
+    def revert(k):
+        pls = dict(user.get("playlists") or {}); pls.pop(k, None); set_user("playlists", pls)
+
+    def login():
+        def go():
+            try: Spotify(load_config()).login()
+            except BaseException as e: log("Login failed: %r" % e)
+            refresh_now(); fetch_names()
+        threading.Thread(target=go, daemon=True).start()
+
+    def open_log():
+        if not os.path.exists(LOGFILE): open(LOGFILE, "a").close()
+        os.startfile(LOGFILE)
+
+    def uninstall():
+        from tkinter import messagebox
+        un = os.path.join(HERE, "unins000.exe")
+        if not os.path.exists(un): messagebox.showinfo("Uninstall", "Uninstaller not found (not installed?)."); return
+        if messagebox.askyesno("Uninstall AoE4 Spotify", "Remove AoE4 Spotify from this PC?\nYour Steam launch option is restored."):
+            subprocess.Popen([un]); root.destroy()
+
+    def fetch_names():
+        def go():
+            try:
+                cfg = load_config(); sp = Spotify(cfg)
+                if not sp.tok: return
+                changed = False
+                for uri in set(cfg["playlists"].values()) | set(defaults.values()):
+                    pid = uri.split(":")[-1]
+                    if not pid or pid in names: continue
+                    c, r = sp._api("GET", "/playlists/%s?fields=name" % pid)
+                    if c == 200 and isinstance(r, dict) and r.get("name"): names[pid] = r["name"]; changed = True
+                if changed:
+                    json.dump(names, open(NAMES_CACHE, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+                    post(draw)
+            except Exception as e: log("Playlist names: %r" % e)
+        threading.Thread(target=go, daemon=True).start()
+
+    def refresh_now():
+        def go():
+            s = {"spotify": os.path.exists(TOKEN), "game": aoe_running()}
+            if s != state: state.update(s); post(draw)
+        threading.Thread(target=go, daemon=True).start()
+    def tick(): refresh_now(); root.after(3000, tick)
+    def pump():                                   # run UI updates queued by worker threads (Tk isn't thread-safe)
+        while ui_q:
+            try: ui_q.pop(0)()
+            except Exception as e: log("Panel update failed: %r" % e)
+        root.after(150, pump)
+
+    draw(); pump(); tick(); fetch_names(); root.mainloop()
 
 if __name__ == "__main__":
     try: main()
