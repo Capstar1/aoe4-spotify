@@ -64,3 +64,11 @@ A preset share code is `AOE4S1:` + base64url (no padding) of zlib-compressed JSO
 ## Request access
 
 If Spotify answers `/me` with 403 'User not registered in the Developer Dashboard', a 3-step guide opens (open Spotify account page, copy email, send). Send POSTs JSON `{email, name, version}` to the Grok Bot routine webhook in config `access_webhook` with `Authorization: Bearer <access_key>` (both overridable in user settings; empty URL = disabled, 'Requests not set up yet'; non-2xx shows 'Couldn't send, try again'), max 1 per 10 min, only on the button. It rechecks every 60 s and on the next panel start, then shows the good-to-go window. Test: `atest.py` (fake webhook).
+
+## Fades
+
+`Spotify.switch`: if Spotify on this PC is the active device (type Computer, our device id or the PC name) and its Windows audio session is found (pycaw/Core Audio), the fade drives that session's volume at 60 fps; else the Web API volume via `ApiVolumePacer` (one sender thread, newest value wins, >= 100 ms apart, 429 -> Retry-After and half as many steps). Curve: `fade_gain` = linear in dB with cosine easing down to `FADE_FLOOR_DB` (-34 dB, not silence); the new context starts at the floor, the fade-in waits until `/me/player` reports the new item playing, and the original volume is restored exactly (local: crash-safe via `fade_restore.json`). Each direction lasts the Fade slider time. `--fade-selftest` reports whether the local fader works (reads only). Test: `ftest.py` (simulated timing).
+
+## Adding intro songs
+
+The editor canvas is an OLE drop target via tkinterdnd2 (tkdnd, bundled with `--collect-all tkinterdnd2`); dropped text is scanned for track links/URIs (`parse_tracks`), looked up in one `/tracks?ids=` call and added as one undo step. The '+' dialog searches `/search?type=track` (350 ms debounce), adds `/me/player/currently-playing`, and still accepts pasted links. No minimum songs per civ in any age: an empty list (Imperial stores `[]`) means no intro. Tests: `stest.py`.

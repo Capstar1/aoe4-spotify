@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
 def child_env():
@@ -117,7 +117,7 @@ def build_intros(cfg, u):
     for age in INTRO_AGES:
         pools = dict(base_pools) if age == "imperial" else {}           # other ages start blank
         for civ, lst in (ip.get(age) or {}).items():
-            if isinstance(lst, list) and lst and all(isinstance(x, str) and x.startswith("spotify:track:") for x in lst):
+            if isinstance(lst, list) and (lst or age == "imperial") and all(isinstance(x, str) and x.startswith("spotify:track:") for x in lst):
                 pools[civ] = list(lst)
         out[age] = {"enabled": ia[age] if isinstance(ia.get(age), bool) else age in ages_on, "pools": pools}
     return out
@@ -212,13 +212,13 @@ def preset_counts(base_cfg, p):
     out = {}
     for a in INTRO_AGES:
         dd = (p.get("pools") or {}).get(a) or {}
-        out[a] = sum(1 for c, _ in CIV_LIST if (dd.get(c) or (default_pool(base_cfg, c) if a == "imperial" else [])))
+        out[a] = sum(1 for c, _ in CIV_LIST if (dd[c] if c in dd else (default_pool(base_cfg, c) if a == "imperial" else [])))
     return out
 
 def preset_songs(base_cfg, p):
     """Distinct songs a preset uses (canonical order)."""
     us = [x for a in INTRO_AGES for c, _ in CIV_LIST
-          for x in (((p.get("pools") or {}).get(a) or {}).get(c) or (default_pool(base_cfg, c) if a == "imperial" else []))]
+          for x in ((((p.get("pools") or {}).get(a) or {})[c] if c in ((p.get("pools") or {}).get(a) or {}) else None) or (default_pool(base_cfg, c) if a == "imperial" and c not in ((p.get("pools") or {}).get(a) or {}) else []))]
     return song_sorted(us)
 
 # ---------------------------------------------------------------- Spotify desktop app launch
@@ -257,6 +257,93 @@ def launch_spotify():
     return False
 
 # ---------------------------------------------------------------- Spotify
+FADE_FLOOR_DB = -34.0                                  # quiet point of a switch (about 2% loudness, not silence)
+
+def fade_gain(t, floor_db=FADE_FLOOR_DB):
+    """Amplitude for fade position t (0 = full, 1 = floor). Linear in decibels (even to the ear) with a
+    cosine ease at both ends, so there is no sudden step at the start or a long almost-silent tail."""
+    import math
+    t = max(0.0, min(1.0, t)); e = 0.5 - 0.5 * math.cos(math.pi * t)
+    return 10 ** (floor_db * e / 20.0)
+
+def local_guard(v, last=None):
+    """While a local fade runs: {"v": level to go back to, "last": level we last set}. None = done."""
+    p = os.path.join(DATA, "fade_restore.json")
+    try:
+        if v is None:
+            if os.path.exists(p): os.remove(p)
+        else:
+            os.makedirs(DATA, exist_ok=True)
+            with open(p + ".part", "w") as f: f.write(json.dumps({"v": float(v), "last": None if last is None else float(last)}))
+            os.replace(p + ".part", p)
+    except Exception: pass
+
+def local_guard_restore():
+    """After a crash mid-fade: undo our dip only if Spotify is still exactly where we left it (else it's the user's level)."""
+    p = os.path.join(DATA, "fade_restore.json")
+    try:
+        if not os.path.exists(p): return
+        d = json.load(open(p)); sess = SpotifySession.find()
+        if sess and d.get("last") is not None and abs(sess.get() - d["last"]) <= 0.01:
+            sess.set(d["v"]); log("Restored Spotify app volume after an interrupted fade")
+        else: log("Interrupted fade: volume was changed since, leaving it")
+        os.remove(p)
+    except Exception: pass
+
+class SpotifySession:
+    """Windows per-app volume of Spotify.exe (Core Audio session). Smooth and instant; local only."""
+    def __init__(self, vols): self.vols = vols
+    @staticmethod
+    def find():
+        if sys.platform != "win32" or test_env("AOE4SPOTIFY_NO_LOCAL_FADE"): return None
+        try:
+            from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+            vols = [x._ctl.QueryInterface(ISimpleAudioVolume) for x in AudioUtilities.GetAllSessions()
+                    if x.Process and x.Process.name().lower() == "spotify.exe"]
+            return SpotifySession(vols) if vols else None
+        except Exception as e:
+            log("Local fade unavailable: %s" % type(e).__name__); return None
+    def get(self):
+        return float(self.vols[0].GetMasterVolume())
+    def set(self, v):
+        v = max(0.0, min(1.0, float(v)))
+        for x in self.vols: x.SetMasterVolume(v, None)
+        return True
+
+class ApiVolumePacer:
+    """Fire-and-forget Spotify volume: callers set a target any time; one sender thread sends the newest value
+    (older ones are dropped), at most every `step` seconds, on the shared keep-alive connection. 429 -> wait
+    Retry-After and send less often."""
+    def __init__(self, sp, step=0.1):
+        self.sp, self.step = sp, max(step, getattr(sp, "_vol_step", step)); self.want = None; self.sent = None
+        self.cv = threading.Condition(); self.alive = True; self.fail = False
+        threading.Thread(target=self._run, daemon=True).start()
+    def target(self, v):
+        if self.fail: return False
+        with self.cv: self.want = int(round(v)); self.cv.notify()
+        return True
+    def _run(self):
+        while True:
+            with self.cv:
+                while self.alive and (self.want is None or self.want == self.sent): self.cv.wait(0.5)
+                if not self.alive and (self.want is None or self.want == self.sent): return
+                v = self.want
+            t0 = time.perf_counter()
+            q = "&device_id=" + self.sp.device_id if self.sp.device_id else ""
+            code, _ = self.sp._api("PUT", "/me/player/volume?volume_percent=%d%s" % (max(0, min(100, v)), q))
+            if code == 429:
+                ra = float(getattr(self.sp, "_retry_after", 1) or 1); self.step = min(0.5, self.step * 2); self.sp._vol_step = self.step
+                log("Spotify volume rate-limited: waiting %.1fs, fewer steps" % ra); time.sleep(min(ra, 3)); continue
+            if code not in (200, 202, 204):
+                self.fail = True; return
+            self.sent = v
+            time.sleep(max(0.0, self.step - (time.perf_counter() - t0)))
+    def flush(self, timeout=1.5):
+        t0 = time.time()
+        while not self.fail and self.want is not None and self.want != self.sent and time.time() - t0 < timeout: time.sleep(0.02)
+    def stop(self):
+        with self.cv: self.alive = False; self.cv.notify()
+
 class Spotify:
     def __init__(self, cfg):
         self.cid = cfg["client_id"].strip()
@@ -264,7 +351,7 @@ class Spotify:
         self.tok = None
         self.shuffle = bool(cfg.get("shuffle", True))
         self.repeat = bool(cfg.get("repeat", True))
-        self._glock = threading.Lock(); self._gen = 0; self._orig = None   # fade/switch state
+        self._glock = threading.Lock(); self._gen = 0   # fade/switch state
         if os.path.exists(TOKEN):
             try:
                 with open(TOKEN, encoding="utf-8") as f: self.tok = json.load(f)
@@ -354,6 +441,9 @@ class Spotify:
                         except Exception: pass
                         self._kconn = None                     # stale keep-alive socket: reconnect once
                         if attempt: raise
+            if status == 429:
+                try: self._retry_after = float(r.getheader("Retry-After") or 1)
+                except Exception: self._retry_after = 1.0
             if status == 401 and _retry and self.tok:          # access token rejected: refresh once
                 self.tok["expires_at"] = 0
                 return self._api(method, path, body, False)
@@ -441,53 +531,132 @@ class Spotify:
         return code in (200, 202, 204)
 
     # ---- fading switch (runs in a background thread)
+    # Two faders: LOCAL (Windows per-app volume of Spotify.exe: smooth 60 fps, no network) when Spotify on this
+    # PC is the playing device, else the Web API volume, paced by a timer (fire-and-forget, newest value wins,
+    # backs off on 429). Both use the same perceptual curve down to a quiet floor (never true silence), start
+    # the new music at the floor, wait until it actually plays, fade back in, and restore the exact volume.
     def _set_vol(self, v):
         q = "&device_id=" + self.device_id if self.device_id else ""
-        code, _ = self._api("PUT", "/me/player/volume?volume_percent=%d%s" % (max(0, min(100, int(v))), q))
+        code, _ = self._api("PUT", "/me/player/volume?volume_percent=%d%s" % (max(0, min(100, int(round(v)))), q))
         return code in (200, 202, 204)
 
-    def _ramp(self, a, b, secs, gen):
-        steps = max(1, int(secs / 0.15))
-        for i in range(1, steps + 1):
-            if gen != self._gen: return False          # superseded by a newer switch
-            if not self._set_vol(a + (b - a) * i / steps): return False
-            time.sleep(secs / steps)
-        return True
+    def _fader(self, dev):
+        """('local', session) when Spotify on this PC is the active device and its audio session is reachable."""
+        if not dev or str(dev.get("type", "")).lower() != "computer": return None
+        here = (os.environ.get("COMPUTERNAME") or "").lower()
+        if not (dev.get("id") and dev.get("id") == self.device_id) and str(dev.get("name", "")).lower() != here: return None
+        sess = SpotifySession.find()
+        return sess if sess else None
+
+    def _wait_started(self, old_item, timeout=1.6):
+        """Hold at the quiet point until the new music is really playing (no fade-in over the gap)."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            c, st = self._api("GET", "/me/player")
+            if c == 200 and isinstance(st, dict) and st.get("is_playing") and (st.get("item") or {}).get("uri") != old_item \
+                    and (st.get("progress_ms") or 0) > 0:
+                return True
+            time.sleep(0.12)
+        return False
+
+    # Volume ownership: we never keep an "original" beyond one switch. The level is read right before the fade;
+    # if it moves away from what we last set (Spotify, Windows mixer, another device) that's the user: stop the
+    # fade, leave their level alone, and just switch the music.
+    def _run_fade(self, ctl, secs, down, gen):
+        """Returns "done", "stop" (superseded / volume not allowed) or "user" (someone else changed the volume)."""
+        t0 = time.perf_counter(); dt = 1.0 / ctl["fps"]; nchk = 0.0
+        while True:
+            if gen != self._gen: return "stop"
+            el = time.perf_counter() - t0
+            if el >= nchk and ctl["last"] is not None:
+                cur = ctl["get"]()
+                if cur is not None and not ctl["near"](cur): ctl["user"] = cur; return "user"
+                nchk = el + ctl["every"]
+            t = min(1.0, el / secs) if secs > 0 else 1.0
+            v = ctl["orig"] * fade_gain(t if down else 1.0 - t)
+            if ctl["set"](v) is False: return "stop"
+            if t >= 1.0: return "done"
+            time.sleep(dt)
+
+    def _vol_ctl(self, mode, orig, sess=None):
+        ctl = {"mode": mode, "orig": orig, "last": None, "user": None, "pacer": None}
+        if mode == "local":
+            def set_(v):
+                sess.set(v); ctl["last"] = v; local_guard(orig, v); return True
+            ctl.update(set=set_, get=lambda: sess.get(), near=lambda c: abs(c - ctl["last"]) <= 0.02, every=0.0, fps=60,
+                       read=lambda: sess.get(), put=lambda v: sess.set(v))
+        else:
+            pacer = ApiVolumePacer(self); ctl["pacer"] = pacer; recent = []
+            def set_(v):
+                iv = int(round(v))
+                if pacer.target(iv) is False: return False
+                ctl["last"] = iv; recent.append(iv); del recent[:-12]; return True
+            def get_():
+                c, st = self._api("GET", "/me/player")
+                d = (st or {}).get("device") if c == 200 and isinstance(st, dict) else None
+                return float(d["volume_percent"]) if d and d.get("volume_percent") is not None else None
+            near = lambda c: any(abs(c - x) <= 3 for x in recent + ([pacer.sent] if pacer.sent is not None else []))
+            ctl.update(set=set_, get=get_, near=near, every=0.5, fps=1.0 / pacer.step, read=get_, put=lambda v: self._set_vol(v))
+        return ctl
 
     def switch(self, uri, fade=2.0, player=None):
         player = player or self.play
         if not hasattr(self, "_glock"):
-            self._glock = threading.Lock(); self._gen = 0; self._orig = None
+            self._glock = threading.Lock(); self._gen = 0
         with self._glock:
             self._gen += 1; gen = self._gen
-            orig = self._orig                          # mid-fade: keep the ORIGINAL volume
-            if orig is None and fade > 0:
+            st = None
+            if fade > 0:
                 code, st = self._api("GET", "/me/player")
-                dev = (st or {}).get("device") if isinstance(st, dict) else None
-                if code == 200 and dev and dev.get("volume_percent") is not None \
-                        and dev.get("supports_volume", True):
-                    orig = dev["volume_percent"]
-            self._orig = orig
+                st = st if code == 200 and isinstance(st, dict) else None
+            dev = (st or {}).get("device")
+            playing = bool(st and st.get("is_playing"))
+            old_item = ((st or {}).get("item") or {}).get("uri")
+            loc = self._fader(dev) if (playing and fade > 0) else None
+            mode = cur = None
+            if loc: mode, cur = "local", loc.get()           # Windows app volume; Spotify's own volume is never touched
+            elif fade > 0 and playing and dev and dev.get("volume_percent") is not None and dev.get("supports_volume", True):
+                mode, cur = "api", float(dev["volume_percent"])
+            live = getattr(self, "_live", None)          # a fade a newer age-up just interrupted
+            orig = cur
+            if live and mode and live["mode"] == mode and live["last"] is not None and live["near"](cur):
+                orig = live["orig"]                      # still dipped by us: go back to the level before that dip
+            ctl = self._vol_ctl(mode, orig, loc) if mode else None
+            self._live = ctl
         try:
-            if orig is None or fade <= 0:
+            if not ctl:
                 return player(uri)
-            if not self._ramp(orig, 0, fade, gen):
+            r = self._run_fade(ctl, fade, True, gen)
+            if r == "stop":
                 if gen != self._gen: return False
                 log("Spotify: volume control not allowed on this device, switching without fade")
-                self._set_vol(orig); return player(uri)
+                return player(uri)
+            if r == "user":
+                log("Volume changed during the fade: keeping your level, switching without fade")
+                return player(uri)
+            log("Fade: %s, %.1fs each way" % ("Windows app volume" if ctl["mode"] == "local" else "Spotify volume", fade))
             ok = player(uri)
-            if not self._ramp(0, orig, fade, gen) and gen == self._gen: self._set_vol(orig)
+            if gen == self._gen: self._wait_started(old_item)
+            r = self._run_fade(ctl, fade, False, gen)
+            if r == "user": log("Volume changed during the fade: keeping your level")
             return ok
         finally:
             with self._glock:
-                if gen == self._gen:
-                    if self._orig is not None: self._set_vol(self._orig)
-                    self._orig = None
+                if ctl and gen == self._gen:
+                    if ctl["user"] is None and ctl["last"] is not None:
+                        cur = ctl["read"]()              # only undo OUR dip, never a newer user choice
+                        if cur is None or ctl["near"](cur):
+                            if ctl["pacer"] and not ctl["pacer"].fail: ctl["pacer"].target(ctl["orig"]); ctl["pacer"].flush()
+                            else: ctl["put"](ctl["orig"])
+                        else: log("Volume changed during the fade: keeping your level")
+                    if ctl["mode"] == "local": local_guard(None)
+                    self._live = None
+                if ctl and ctl["pacer"]: ctl["pacer"].stop()
 
     # ---- Age 4 Intro theme (config key boss_intro): play one track, then the age playlist (runs in a background thread)
     def boss_then(self, track, playlist, fade=2.0):
         if not hasattr(self, "_glock"):
-            self._glock = threading.Lock(); self._gen = 0; self._orig = None
+            self._glock = threading.Lock(); self._gen = 0
         dq = "?device_id=" + self.device_id if self.device_id else ""
         # intro must not loop: repeat off, then play it as a single-track list
         self._api("PUT", "/me/player/repeat?state=off" + dq.replace("?", "&"))
@@ -627,7 +796,7 @@ def pick_boss_track(cfg, civ, age="imperial"):
     b = cfg.get("boss_intro") or {}
     pools = intro_of(cfg, age)["pools"]
     fallback = (b.get("default") or []) if age == "imperial" else []    # other ages: empty civ = no intro
-    pool = [u for u in (pools.get(civ) or fallback) if u.startswith("spotify:track:")]
+    pool = [u for u in (pools[civ] if civ in pools else fallback) if u.startswith("spotify:track:")]   # [] = no intro
     if not pool: return None
     try: state = json.load(open(BOSS_STATE, encoding="utf-8"))
     except Exception: state = {}
@@ -1586,8 +1755,18 @@ def main():
     if args[:1] == ["--set-launch-option"]:
         with_steam_closed(set_launch_option); music_sync(load_config().get("enabled", True)); return   # no-op close if Setup already closed Steam
     if args[:1] == ["--remove-launch-option"]: remove_launch_option(); music_sync(False); return
+    if args[:1] == ["--fade-selftest"]:                # diagnostics: is the local fader usable? (reads only)
+        sess = SpotifySession.find(); msg = "local fader: " + ("Spotify session found, volume %.2f" % sess.get() if sess else "not available")
+        try:
+            import tkinter as _tk; from tkinterdnd2 import TkinterDnD; _r = _tk.Tk(); _r.withdraw(); TkinterDnD._require(_r); _r.destroy(); msg += "; drag-in: ok"
+        except Exception as ex: msg += "; drag-in: %r" % ex
+        log(msg)
+        try: open(os.path.join(os.environ.get("TEMP", "."), "aoe4_fade_selftest.txt"), "w").write(msg)
+        except Exception: pass
+        return
     if args[:1] == ["--panel"]: panel(); return        # (--panel --updated: just upgraded, shows "Updated to x.y")
     cfg = load_config()
+    local_guard_restore()
     if args[:1] == ["--dry-run"]:
         t = Tracker(cfg, lambda k, civ=None: log("   [dry-run] would play %s%s: %s" % (k, (" (%s intro for %s: %s)" % (k, civ, pick_boss_track(cfg, civ, k))) if civ and boss_age(cfg, k) else "", cfg["playlists"].get(k))))
         crcs = args[2:]
@@ -1693,7 +1872,7 @@ RE_PLAYLIST = re.compile(r"(?:open\.spotify\.com/(?:intl-[a-z]+/)?playlist/|spot
 
 # ---------------------------------------------------------------- Imperial Age Intro editor
 # Which "For ..." theme each civ can get on reaching Imperial Age. Changes are saved as "boss_pools"
-# in the user settings overlay and used from the next match. A civ needs at least one song.
+# in the user settings overlay and used from the next match. An empty civ = no intro (its playlist plays).
 SONGS = [  # key, song, character (portrait), Spotify track, ring colour
     ("light", "For Light", "Ophilia", "spotify:track:5sEHThQpQWTZZVIbmFIx4k", "#e8d9a0"),
     ("truth", "For Truth", "Cyrus", "spotify:track:0iBkJlkxLIZvw64YMJEhpY", "#6fa8dc"),
@@ -1737,6 +1916,38 @@ def fetch_track(sp, uri, need=96):
             open(p + ".part", "wb").write(data); os.replace(p + ".part", p)
         except Exception as e: log("Track cover download failed: %r" % e)
     return r["name"], ", ".join(a_.get("name", "") for a_ in (r.get("artists") or [])[:2])
+def store_track(r, need=96):
+    """(uri, name, artist) from a Spotify track object; caches its album cover for the chip."""
+    uri = r.get("uri") or ("spotify:track:" + r.get("id", ""))
+    url = pick_image((r.get("album") or {}).get("images"), need)
+    if url and not os.path.exists(track_cover(uri)):
+        try:
+            os.makedirs(COVERS, exist_ok=True); data = http_get(url); p = track_cover(uri)
+            open(p + ".part", "wb").write(data); os.replace(p + ".part", p)
+        except Exception as e: log("Track cover download failed: %r" % e)
+    return uri, r.get("name") or "Song", ", ".join(a_.get("name", "") for a_ in (r.get("artists") or [])[:2])
+def parse_tracks(text):
+    """Every Spotify track in a text (links, URIs, one per line as the Spotify app drags them), in order."""
+    ids = re.findall(r"(?:spotify:track:|open\.spotify\.com/(?:intl-[a-z]+/)?track/)([A-Za-z0-9]{22})", text or "")
+    return ["spotify:track:" + i for i in dict.fromkeys(ids)]
+def fetch_tracks(sp, uris):
+    """Look up several tracks in one call -> [(uri, name, artist)]."""
+    out = []
+    for k in range(0, len(uris), 50):
+        c, r = sp._api("GET", "/tracks?ids=" + ",".join(u.split(":")[-1] for u in uris[k:k + 50]))
+        if c == 200 and isinstance(r, dict):
+            out += [store_track(t) for t in (r.get("tracks") or []) if isinstance(t, dict) and t.get("name")]
+    return out
+def search_tracks(sp, q, limit=8):
+    from urllib.parse import quote
+    c, r = sp._api("GET", "/search?type=track&limit=%d&q=%s" % (limit, quote(q)))
+    if c != 200 or not isinstance(r, dict): return None
+    return [t for t in ((r.get("tracks") or {}).get("items") or []) if isinstance(t, dict) and t.get("uri")]
+def now_playing(sp):
+    c, r = sp._api("GET", "/me/player/currently-playing")
+    if c == 200 and isinstance(r, dict) and isinstance(r.get("item"), dict) and str(r["item"].get("uri", "")).startswith("spotify:track:"):
+        return r["item"]
+    return None
 def parse_track(text):
     m = re.search(r"(?:spotify:track:|open\.spotify\.com/(?:intl-[a-z]+/)?track/)([A-Za-z0-9]{22})", text or "")
     return "spotify:track:" + m.group(1) if m else None
@@ -1896,7 +2107,7 @@ def pool_editor(parent, user, save):
     def ages_on(): return {a_: build_intros(base, user)[a_]["enabled"] for a_ in INTRO_AGES}
     def pools(age=None):
         age = age or ed["age"]; bp = (user.get("intro_pools") or {}).get(age) or {}
-        if age == "imperial": return {c: song_sorted(bp.get(c) or default_pool(base, c)) for c, _ in CIV_LIST}
+        if age == "imperial": return {c: song_sorted(bp[c] if c in bp else default_pool(base, c)) for c, _ in CIV_LIST}
         return {c: song_sorted(bp.get(c) or []) for c, _ in CIV_LIST}          # other ages: blank unless you add songs
     def row_default(civ): return default_pool(base, civ) if ed["age"] == "imperial" else []
     def age_custom(age=None):                          # anything to reset on this age?
@@ -1927,7 +2138,7 @@ def pool_editor(parent, user, save):
     def age_empty(age): return not any(pools(age).values())
     def record():
         for a_ in INTRO_AGES:                          # an age with no songs at all can't be on (same undo step)
-            if a_ != "imperial" and age_empty(a_) and ages_on()[a_]:
+            if age_empty(a_) and ages_on()[a_]:
                 ia = dict(user.get("intro_ages") or {}); ia[a_] = False; user["intro_ages"] = ia
         sn = snap()
         if sn != hist["cur"]:
@@ -1944,16 +2155,60 @@ def pool_editor(parent, user, save):
     def set_age_on(a_, on):
         if on and age_empty(a_): return                # greyed out until the age has a song
         ia = dict(user.get("intro_ages") or {}); ia[a_] = bool(on); user["intro_ages"] = ia; record()
-    def add_custom(uri, name, artist):
-        cs = [c for c in (user.get("custom_songs") or []) if c.get("uri") != uri]
-        cs.append({"uri": uri, "name": name, "artist": artist}); user["custom_songs"] = cs; record(); draw()
+    def add_custom(uri, name, artist): add_customs([(uri, name, artist)])
+    def add_customs(items):                            # several songs = one undo step
+        items = [t for t in items if t[0] not in SONG_BY_URI or t[0] in {c.get("uri") for c in (user.get("custom_songs") or [])}]
+        if not items: return 0
+        new = {t[0] for t in items}
+        cs = [c for c in (user.get("custom_songs") or []) if c.get("uri") not in new]
+        cs += [{"uri": u, "name": n, "artist": a} for u, n, a in items]; user["custom_songs"] = cs; record(); draw()
+        return len(items)
+    uiq = []                                        # worker threads hand UI work to the Tk thread
+    ui = uiq.append
+    def uipump():
+        while uiq:
+            try: uiq.pop(0)()
+            except Exception as ex: log('UI task: %r' % ex)
+        try: win.after(30, uipump)
+        except Exception: pass
+    win.after(30, uipump)
+    # ---- drag songs in from the Spotify app (OLE text drop on the editor window)
+    def drop_text(data):
+        uris = [u for u in parse_tracks(data) if u not in SONG_BY_URI]
+        if not parse_tracks(data): toast("Drop Spotify songs here"); return
+        if not uris: toast("Already in YOURS"); return
+        toast("Adding\u2026")
+        def go():
+            try:
+                sp = Spotify(load_config()); got = fetch_tracks(sp, uris) if sp.tok else "login"
+            except Exception as ex: log("Drop songs: %r" % ex); got = None
+            def done():
+                if got == "login": toast("Log in to Spotify first")
+                elif not got: toast("Couldn't find those songs")
+                else:
+                    n = add_customs(got); toast("Added %d song%s" % (n, "" if n == 1 else "s"))
+            try: ui(done)
+            except Exception: pass
+        threading.Thread(target=go, daemon=True).start()
+    def drop_over(on):
+        if bool(st.get("dropover")) != on: st["dropover"] = on; draw()
+    try:
+        from tkinterdnd2 import TkinterDnD, DND_TEXT
+        TkinterDnD._require(win); cv.drop_target_register(DND_TEXT)
+        cv.dnd_bind("<<DropEnter>>", lambda e: (drop_over(True), "copy")[1])
+        cv.dnd_bind("<<DropPosition>>", lambda e: "copy")
+        cv.dnd_bind("<<DropLeave>>", lambda e: (drop_over(False), "copy")[1])
+        cv.dnd_bind("<<Drop>>", lambda e: (drop_over(False), drop_text(e.data), "copy")[2])
+        st["dnd"] = True
+    except Exception as ex: log("Drag-in from Spotify unavailable: %r" % ex); st["dnd"] = False
+    win._drop = (drop_text, drop_over)                 # (tests)
     def remove_custom(uri):
         user["custom_songs"] = [c for c in (user.get("custom_songs") or []) if c.get("uri") != uri]
         ip = user.get("intro_pools") or {}
         for a_ in list(ip):
             for civ in list(ip[a_]):
                 ip[a_][civ] = [u_ for u_ in ip[a_][civ] if u_ != uri]
-                if not ip[a_][civ]: ip[a_].pop(civ)
+                if not ip[a_][civ] and a_ != "imperial": ip[a_].pop(civ)   # Imperial: [] = emptied (not the default)
         record(); draw()
     def undo_redo(back):
         src, dst = (hist["undo"], hist["redo"]) if back else (hist["redo"], hist["undo"])
@@ -2096,29 +2351,159 @@ def pool_editor(parent, user, save):
         return "break"
     BAR_Y = 92
     def add_dialog():
-        d = tk.Toplevel(win); dark_window(d, C["card"]); d.title("Add a song"); d.resizable(False, False); d.transient(win)
-        tk.Label(d, text="Paste a Spotify song link", bg=C["card"], fg=C["tx"], font=("Segoe UI", 11, "bold")).pack(padx=16, pady=(14, 6), anchor="w")
-        e_ = tk.Entry(d, width=46, bg="#2a2a2a", fg=C["tx"], insertbackground=C["tx"], relief="flat", font=("Segoe UI", 10)); e_.pack(padx=16, ipady=5)
-        err = tk.Label(d, text="", bg=C["card"], fg="#e5534b", font=("Segoe UI", 9)); err.pack(padx=16, anchor="w")
-        def ok(*_):
-            uri = parse_track(e_.get())
-            if not uri: err.config(text="That isn't a Spotify song link"); return
-            if uri in SONG_BY_URI: err.config(text="Already in the tray"); return
-            err.config(text="Looking it up\u2026", fg=C["mu"])
+        """Search Spotify, add what's playing, or paste a link. Clicking a result adds it."""
+        D = dict(bg=C["card"], row="#2a2a2a", fld="#232323", tx=C["tx"], mu=C["mu"], acc=C["acc"])
+        d = tk.Toplevel(win); dark_window(d, D["bg"]); d.title("Add a song"); d.resizable(False, False); d.transient(win)
+        Wd, RHd, NR = 400, 52, 6
+        top = tk.Frame(d, bg=D["bg"]); top.pack(fill="x", padx=16, pady=(14, 8))
+        tk.Label(top, text="Add a song", bg=D["bg"], fg=D["tx"], font=("Segoe UI", 12, "bold")).pack(side="left")
+        fr = tk.Frame(d, bg=D["fld"], highlightthickness=1, highlightbackground="#3a3a3a", highlightcolor=D["acc"]); fr.pack(fill="x", padx=16)
+        tk.Label(fr, text="\u2315", bg=D["fld"], fg=D["mu"], font=("Segoe UI Symbol", 12)).pack(side="left", padx=(8, 0))
+        e_ = tk.Entry(fr, bg=D["fld"], fg=D["tx"], insertbackground=D["tx"], relief="flat", font=("Segoe UI", 11), width=36)
+        e_.pack(side="left", fill="x", expand=True, ipady=7, padx=(4, 8))
+        ph = tk.Label(fr, text="Search Spotify or paste a song link", bg=D["fld"], fg="#6f6f6f", font=("Segoe UI", 11))
+        ph.place(x=30, rely=0.5, anchor="w"); ph.bind("<Button-1>", lambda e: e_.focus_set())
+        np_ = tk.Label(d, text="\u266b  Add what's playing", bg=D["row"], fg=D["tx"], font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2")
+        np_.pack(anchor="w", padx=16, pady=(10, 6))
+        np_.bind("<Enter>", lambda e: np_.config(bg="#333333")); np_.bind("<Leave>", lambda e: np_.config(bg=D["row"]))
+        rc = tk.Canvas(d, width=Wd * S, height=NR * RHd * S, bg=D["bg"], highlightthickness=0); rc.pack(padx=16 - 8, pady=(0, 4))
+        msg = tk.Label(d, text="", bg=D["bg"], fg=D["mu"], font=("Segoe UI", 9)); msg.pack(anchor="w", padx=16, pady=(0, 12))
+        R = {"items": [], "hov": None, "job": None, "seq": 0, "thumbs": {}, "busy": False}
+        def say(t, err=False): msg.config(text=t, fg="#e5534b" if err else D["mu"])
+        def thumb(item):
+            u = item["uri"]
+            if u in R["thumbs"]: return R["thumbs"][u]
+            return None
+        def paint():
+            rc.delete("all")
+            have = {c.get("uri") for c in (user.get("custom_songs") or [])} | set(SONG_BY_URI)
+            for k, it in enumerate(R["items"][:NR]):
+                y0 = k * RHd; added = it["uri"] in have
+                if R["hov"] == k and not added: rc.create_image(0, y0 * S, anchor="nw", image=rr_img(Wd, RHd - 4, 10, D["row"]))
+                im = thumb(it)
+                if im: rc.create_image((8 + 20) * S, (y0 + 24) * S, image=im)
+                else: rc.create_image(8 * S, (y0 + 4) * S, anchor="nw", image=rr_img(40, 40, 8, "#333333"))
+                name = it.get("name", ""); art_ = ", ".join(a_.get("name", "") for a_ in (it.get("artists") or [])[:2])
+                rc.create_text(58 * S, (y0 + 16) * S, text=name[:44], anchor="w", fill=D["mu"] if added else D["tx"], font=("Segoe UI", -int(12 * S), "bold"))
+                rc.create_text(58 * S, (y0 + 33) * S, text=art_[:52], anchor="w", fill=D["mu"], font=("Segoe UI", -int(10.5 * S)))
+                if added: rc.create_text((Wd - 12) * S, (y0 + 24) * S, text="\u2713 Added", anchor="e", fill=D["acc"], font=("Segoe UI", -int(10 * S), "bold"))
+                elif R["hov"] == k: rc.create_text((Wd - 12) * S, (y0 + 24) * S, text="+ Add", anchor="e", fill=D["acc"], font=("Segoe UI", -int(10 * S), "bold"))
+        def load_thumbs(items, seq):
+            from PIL import Image, ImageDraw
+            import io
+            for it in items[:NR]:
+                if it["uri"] in R["thumbs"] or seq != R["seq"]: continue
+                url = pick_image((it.get("album") or {}).get("images"), 64)
+                try: im = Image.open(io.BytesIO(http_get(url))).convert("RGB") if url else None
+                except Exception: im = None
+                if im is None: continue
+                Z = int(40 * S); Q = 4; im = im.resize((Z * Q, Z * Q), Image.LANCZOS)
+                m = Image.new("L", im.size, 0); ImageDraw.Draw(m).rounded_rectangle([0, 0, Z * Q - 1, Z * Q - 1], 8 * S * Q, fill=255)
+                out = Image.new("RGBA", im.size, (0, 0, 0, 0)); out.paste(im, (0, 0), m); out = out.resize((Z, Z), Image.LANCZOS)
+                def put(u=it["uri"], o=out):
+                    try: R["thumbs"][u] = ImageTk.PhotoImage(o, master=d); paint()
+                    except Exception: pass
+                try: ui(put)
+                except Exception: return
+        def sp_():
+            sp = Spotify(load_config())
+            return sp if sp.tok else None
+        def show(items, seq):
+            if seq != R["seq"]: return
+            R["items"] = items or []; R["hov"] = None; paint()
+            if items is None: say("Couldn't search (offline?)", True)
+            elif not items: say("No songs found")
+            else: say("Click a song to add it")
+            if items: threading.Thread(target=load_thumbs, args=(items, seq), daemon=True).start()
+        def search(q):
+            R["seq"] += 1; seq = R["seq"]; say("Searching\u2026")
             def go():
                 try:
-                    sp = Spotify(load_config()); res = fetch_track(sp, uri) if sp.tok else "login"
-                except Exception as ex: log("Add song: %r" % ex); res = None
+                    sp = sp_(); res = search_tracks(sp, q) if sp else "login"
+                except Exception as ex: log("Search: %r" % ex); res = None
                 def done():
-                    if res == "login": err.config(text="Log in to Spotify in AoE4 Spotify first", fg="#e5534b")
-                    elif not res: err.config(text="Couldn't find that song (offline?)", fg="#e5534b")
-                    else: d.destroy(); add_custom(uri, res[0], res[1])
-                try: win.after(0, done)
+                    if res == "login": say("Log in to Spotify in AoE4 Spotify first", True)
+                    else: show(res, seq)
+                try: ui(done)
                 except Exception: pass
             threading.Thread(target=go, daemon=True).start()
-        tk.Button(d, text="Add", command=ok, bg=C["acc"], fg="#121212", relief="flat", font=("Segoe UI", 10, "bold"), padx=14).pack(padx=16, pady=(4, 14), anchor="e")
+        def add_items(objs, close=False):
+            got = [store_track(o) for o in objs]          # (cover download happens on a worker)
+            def done():
+                n = add_customs(got); paint()
+                say("Added \u2713" if n else "Already in YOURS")
+                if close and n:
+                    try: d.destroy()
+                    except Exception: pass
+            try: ui(done)
+            except Exception: pass
+        def add_links(uris):
+            say("Looking it up\u2026")
+            def go():
+                try:
+                    sp = sp_(); got = fetch_tracks(sp, uris) if sp else "login"
+                except Exception as ex: log("Add song: %r" % ex); got = None
+                def done():
+                    if got == "login": say("Log in to Spotify in AoE4 Spotify first", True)
+                    elif not got: say("Couldn't find that song (offline?)", True)
+                    else:
+                        n = add_customs(got); say("Added \u2713" if n else "Already in YOURS")
+                        if n: d.destroy()
+                try: ui(done)
+                except Exception: pass
+            threading.Thread(target=go, daemon=True).start()
+        def on_key(*_):
+            t = e_.get().strip(); ph.place_forget() if t else ph.place(x=30, rely=0.5, anchor="w")
+            if R["job"]: d.after_cancel(R["job"]); R["job"] = None
+            if not t: R["seq"] += 1; R["items"] = []; paint(); say(""); return
+            uris = parse_tracks(t)
+            if uris:
+                new = [u for u in uris if u not in SONG_BY_URI]
+                if not new: say("Already in YOURS"); return
+                say("Press Enter to add" + (" %d songs" % len(new) if len(new) > 1 else "")); return
+            R["job"] = d.after(350, lambda: search(t))      # debounced
+        def ok(*_):
+            t = e_.get().strip(); uris = parse_tracks(t)
+            if uris:
+                new = [u for u in uris if u not in SONG_BY_URI]
+                if new: add_links(new)
+                else: say("Already in YOURS")
+            elif t:
+                if R["items"]: threading.Thread(target=add_items, args=([R["items"][0]],), daemon=True).start()
+                else: search(t)
+            else: say("Type a song name or paste a Spotify song link", True)
+        def what_playing(*_):
+            say("Checking Spotify\u2026")
+            def go():
+                try:
+                    sp = sp_(); it = now_playing(sp) if sp else "login"
+                except Exception as ex: log("Now playing: %r" % ex); it = None
+                def done():
+                    if it == "login": say("Log in to Spotify in AoE4 Spotify first", True)
+                    elif not it: say("Nothing is playing on Spotify", True)
+                    elif it["uri"] in SONG_BY_URI: say("\u201c%s\u201d is already in YOURS" % it.get("name", ""))
+                    else: threading.Thread(target=add_items, args=([it], True), daemon=True).start()
+                try: ui(done)
+                except Exception: pass
+            threading.Thread(target=go, daemon=True).start()
+        def row_at(ev):
+            k = int(ev.y / S // RHd)
+            return k if 0 <= k < min(NR, len(R["items"])) else None
+        def on_motion(ev):
+            k = row_at(ev)
+            if k != R["hov"]: R["hov"] = k; rc.config(cursor="hand2" if k is not None else ""); paint()
+        def on_click(ev):
+            k = row_at(ev)
+            if k is None: return
+            it = R["items"][k]
+            if it["uri"] in SONG_BY_URI: return
+            threading.Thread(target=add_items, args=([it],), daemon=True).start()
+        rc.bind("<Motion>", on_motion); rc.bind("<Leave>", lambda e: (R.update(hov=None), rc.config(cursor=""), paint()))
+        rc.bind("<ButtonRelease-1>", on_click); np_.bind("<Button-1>", what_playing)
+        e_.bind("<KeyRelease>", on_key); e_.bind("<<Paste>>", lambda e: d.after(1, on_key))
         e_.bind("<Return>", ok); d.bind("<Escape>", lambda e: d.destroy())
-        reveal(d, over=win); e_.focus_set(); win._add = (d, e_, ok, err)     # (tests)
+        reveal(d, over=win); e_.focus_set()
+        win._add = (d, e_, ok, msg, {"R": R, "on_key": on_key, "search": search, "what_playing": what_playing, "click_row": lambda k: on_click(type("E", (), {"y": (k * RHd + 10) * S})()), "paint": paint})   # (tests)
         return "break"
     win.bind("<Control-z>", lambda e: undo_redo(True)); win.bind("<Control-Z>", lambda e: undo_redo(False))   # Ctrl+Shift+Z
     win.bind("<Control-y>", lambda e: undo_redo(False)); win.bind("<Control-Y>", lambda e: undo_redo(False))
@@ -2158,7 +2543,7 @@ def pool_editor(parent, user, save):
         if LT <= y <= BOT and 20 <= x <= 568:
             i = int((y - LT + st["sc"]) // STEP)
             if 0 <= i < len(CIV_LIST) and row_y(i) <= y <= row_y(i) + RH:
-                p = pools()[CIV_LIST[i][0]]; minn = 1 if ed["age"] == "imperial" else 0
+                p = pools()[CIV_LIST[i][0]]; minn = 0
                 for j in range(len(p)):
                     cx, cy = chip_xy(i, j)
                     if len(p) > minn and (x - cx - 11) ** 2 + (y - cy + 11) ** 2 <= 7 ** 2 and st["hov"] in (("chip", i, j), ("x", i, j)):
@@ -2317,7 +2702,9 @@ def pool_editor(parent, user, save):
         if age_custom(): undo_glyph(578, 58, C["mu"])
         rr(20, 88, 580, 180, 18, "#1a1a1a", C["line"])
         text(36, 99, "OCTOPATH", 8.5, C["mu"], True)
-        text(438, 99, "YOURS", 8.5, C["acc"], True)
+        if st.get("dropover"):                         # dragging songs in from Spotify
+            rr(430, 92, 576, 176, 14, "#16261b", C["acc"], 2); text(438, 99, "DROP TO ADD", 8.5, C["acc"], True)
+        else: text(438, 99, "YOURS", 8.5, C["acc"], True)
         cv.create_line(424 * S, 102 * S, 424 * S, 168 * S, fill=C["line"], width=max(1, S))
         for i, s_ in enumerate(SONGS):
             cx, cy = tray_xy(i); tr = tray_rad(i)
@@ -2464,7 +2851,7 @@ def pool_editor(parent, user, save):
         if hov and not drag:
             p = pools()
             if ed["page"] == "overview": pass
-            elif hov[0] in ("chip", "x") and len(p[CIV_LIST[hov[1]][0]]) > (1 if ed["age"] == "imperial" else 0):
+            elif hov[0] in ("chip", "x") and len(p[CIV_LIST[hov[1]][0]]) > 0:
                 cx, cy = chip_xy(hov[1], hov[2]); xc = C["acc"] if hov[0] == "x" else "#3a3a3a"
                 cv.create_image((cx + 11) * S, (cy - 11) * S, image=art.disc(14, xc, fg=C["tx"], cross=2.6, outline=C["bg"], ow=1.5))
             elif hov[0] == "undo" and p[CIV_LIST[hov[1]][0]] != song_sorted(default_pool(base, CIV_LIST[hov[1]][0])):
@@ -2487,7 +2874,7 @@ def pool_editor(parent, user, save):
             if s:
                 cx, cy = tray_xy(hov[1]) if hov[0] == "tray" else chip_xy(hov[1], hov[2])
                 tip = ("%s \u2014 %s" % (s[1], s[2]) if s[2] else s[1], cx, cy + 26)
-                if hov[0] == "chip" and ed["age"] == "imperial" and len(p[CIV_LIST[hov[1]][0]]) == 1: tip = (tip[0] + "  (at least one song)", tip[1], tip[2])
+
         if hov and hov[0] == "swoff": tip = ("Add a song first", hov[2], hov[3])
         if st.get("press") and not st.get("released", True): tip = None       # mouse button down: no tooltips
         if st["msg"]: tip = st["msg"]
@@ -2577,7 +2964,6 @@ def pool_editor(parent, user, save):
         st["hov"] = hit(x, y); draw()
     def remove(i, j):
         p = pools(); civ = CIV_LIST[i][0]
-        if ed["age"] == "imperial" and len(p[civ]) <= 1: st["msg"] = ("Each civ needs at least one song", *chip_xy(i, j)[:1], chip_xy(i, j)[1] + 26); draw(); return
         p[civ].pop(j); commit(p)
     def on_right(e):
         h = hit(*L(e))
@@ -2598,7 +2984,7 @@ def pool_editor(parent, user, save):
     set_app_icon(win)
     draw(); fetch_missing_covers()
     pvpump()
-    win._ed = {"undo_redo": undo_redo, "pv": pv, "cv": cv, "st": st, "pools": pools, "tray_xy": tray_xy, "chip_xy": chip_xy, "row_y": row_y, "S": S, "draw": draw,
+    win._ed = {"record": record, "undo_redo": undo_redo, "pv": pv, "cv": cv, "st": st, "pools": pools, "tray_xy": tray_xy, "chip_xy": chip_xy, "row_y": row_y, "S": S, "draw": draw,
                "ed": ed, "ages_on": ages_on, "add_custom": add_custom, "remove_custom": remove_custom, "add_dialog": add_dialog, "hist": hist, "glow_kick": glow_kick,
                "open_page": open_page, "set_age_on": set_age_on, "tray_rad": tray_rad, "CARD_Y": CARD_Y,
                "switch_preset": switch_preset, "save_preset": save_preset, "share": share, "import_preset": import_preset,
