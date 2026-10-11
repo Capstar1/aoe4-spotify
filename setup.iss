@@ -1,6 +1,6 @@
 ; Inno Setup script for AoE4 Spotify. Build: ISCC.exe setup.iss (after building the dist\AoE4 Spotify\ folder)
 #ifndef AppVer
-#define AppVer "0.4.0"
+#define AppVer "0.4.1"
 #endif
 #ifdef TEST
 ; test build (ISCC /DTEST): separate AppId/name/folder so it never touches a real install

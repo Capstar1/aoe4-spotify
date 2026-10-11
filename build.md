@@ -54,5 +54,13 @@ The app is built with PyInstaller `--onedir` (`dist\AoE4 Spotify\AoE4 Spotify.ex
 
 ## Playlist covers and previews
 
-The panel fetches each playlist's name, images and snapshot_id (`GET /playlists/{id}`), downloads the smallest image at least ~1.5x the 30 px thumbnail and caches it in `%APPDATA%\AoE4Spotify\covers\<playlist id>_<snapshot>.jpg` (older snapshots are deleted; offline uses the cache, else the age icon). In the editor a click (no drag, < 4 px movement) on a chip plays that track via the app's login (`Spotify.preview`/`pause`). Tests: `ctest.py` (covers, simulated API), `etest.py` (editor incl. preview), `ptest.py`, `utest.py`, `wtest.py`, `vtest.py` (Age Intros v2: overview/age pages, migration, empty civs, match replay), `itest.py`, `htest.py`, `mtest.py <sample .lua>`, `fcap.py` (no blink), `e2e.ps1` (TEST installer with a fake Steam; silent only). Every Python test runs with a throwaway `%APPDATA%`, never your real settings.
+The panel fetches each playlist's name, images and snapshot_id (`GET /playlists/{id}`), downloads the smallest image at least ~1.5x the 30 px thumbnail and caches it in `%APPDATA%\AoE4Spotify\covers\<playlist id>_<snapshot>.jpg` (older snapshots are deleted; offline uses the cache, else the age icon). In the editor a click (no drag, < 4 px movement) on a chip plays that track via the app's login (`Spotify.preview`/`pause`). Tests: `ctest.py` (covers, simulated API), `etest.py` (editor incl. preview), `ptest.py`, `utest.py`, `wtest.py`, `prtest.py` (presets: share-code roundtrip, invalid codes, import with custom songs, switching/undo), `vtest.py` (Age Intros v2: overview/age pages, migration, empty civs, match replay), `itest.py`, `htest.py`, `mtest.py <sample .lua>`, `fcap.py` (no blink), `e2e.ps1` (TEST installer with a fake Steam; silent only). Every Python test runs with a throwaway `%APPDATA%`, never your real settings.
 
+
+## Share codes
+
+A preset share code is `AOE4S1:` + base64url (no padding) of zlib-compressed JSON `{v: 1, name, pools: {age: {civ: [track uris]}}, ages: {age: bool}, custom: [{uri, name, artist}]}`. Unknown versions are rejected with an 'update AoE4 Spotify' message; unknown civs/ages are dropped; codes referencing songs they don't include are rejected. Presets live in the user settings (`intro_presets`, `intro_preset`).
+
+## Request access
+
+If Spotify answers `/me` with 403 'User not registered in the Developer Dashboard', a 3-step guide opens (open Spotify account page, copy email, send). Send POSTs JSON `{email, name, version}` to the Grok Bot routine webhook in config `access_webhook` with `Authorization: Bearer <access_key>` (both overridable in user settings; empty URL = disabled, 'Requests not set up yet'; non-2xx shows 'Couldn't send, try again'), max 1 per 10 min, only on the button. It rechecks every 60 s and on the next panel start, then shows the good-to-go window. Test: `atest.py` (fake webhook).

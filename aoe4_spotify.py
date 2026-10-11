@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
 def child_env():
@@ -76,6 +76,8 @@ def apply_user(cfg, u):
     cfg["playlists"] = {**cfg.get("playlists", {}),
                         **{k: v for k, v in pls.items() if isinstance(v, str) and v.startswith("spotify:playlist:")}}
     if isinstance(u.get("enabled"), bool): cfg["enabled"] = u["enabled"]
+    for k in ("access_webhook", "access_key"):                       # request-access endpoint: overridable per user
+        if isinstance(u.get(k), str) and u[k]: cfg[k] = u[k]
     if isinstance(u.get("fade_seconds"), (int, float)): cfg["fade_seconds"] = max(0.0, min(5.0, float(u["fade_seconds"])))
     if isinstance(u.get("boss_intro_enabled"), bool): cfg.setdefault("boss_intro", {})["enabled"] = u["boss_intro_enabled"]
     cfg["intros"] = build_intros(cfg, u)
@@ -119,6 +121,105 @@ def build_intros(cfg, u):
                 pools[civ] = list(lst)
         out[age] = {"enabled": ia[age] if isinstance(ia.get(age), bool) else age in ages_on, "pools": pools}
     return out
+
+# ---------------------------------------------------------------- intro presets + share codes
+PRESET_VER = 1; PRESET_PREFIX = "AOE4S%d:" % PRESET_VER; DEFAULT_PRESET_NAME = "Default"
+_TRACK_RE = re.compile(r"^spotify:track:[A-Za-z0-9]{22}$")
+
+def preset_from_user(u, name):
+    """A preset = every age's civ->song lists, age on/off and the custom songs those lists use."""
+    pools = json.loads(json.dumps(u.get("intro_pools") or {})); ages = dict(u.get("intro_ages") or {})
+    used = {x for a in pools.values() for v in a.values() for x in v}
+    custom = [{k: c[k] for k in ("uri", "name", "artist", "cover") if c.get(k)} for c in (u.get("custom_songs") or []) if c.get("uri") in used]
+    return {"v": PRESET_VER, "name": str(name)[:40], "pools": pools, "ages": ages, "custom": custom}
+
+def default_preset(): return {"v": PRESET_VER, "name": DEFAULT_PRESET_NAME, "pools": {}, "ages": {}, "custom": [], "builtin": True}
+
+def user_presets(u):
+    return [default_preset()] + [p for p in (u.get("intro_presets") or []) if isinstance(p, dict) and p.get("name")]
+
+def preset_key(u, p=None):
+    """Comparable (pools, ages) of the user's current lists (p=None) or of a preset - for the 'unsaved' dot."""
+    pools = (p or {}).get("pools") if p is not None else u.get("intro_pools")
+    ages = (p or {}).get("ages") if p is not None else u.get("intro_ages")
+    pk = {a: {c: sorted(v) for c, v in (d or {}).items() if v} for a, d in (pools or {}).items()}
+    pk = {a: d for a, d in pk.items() if d}
+    on = {a: bool((ages or {}).get(a, a == "imperial")) for a in INTRO_AGES}
+    return json.dumps([pk, on], sort_keys=True)
+
+def apply_preset(u, p):
+    """Switch the user's lists to preset p (custom songs it uses are added to YOURS; nothing is removed)."""
+    if p.get("pools"): u["intro_pools"] = json.loads(json.dumps(p["pools"]))
+    else: u.pop("intro_pools", None)
+    if p.get("ages"): u["intro_ages"] = dict(p["ages"])
+    else: u.pop("intro_ages", None)
+    cs = list(u.get("custom_songs") or []); have = {c.get("uri") for c in cs}
+    for c in p.get("custom") or []:
+        if c.get("uri") not in have: cs.append(dict(c)); have.add(c.get("uri"))
+    if cs: u["custom_songs"] = cs
+    u["intro_preset"] = p.get("name") or DEFAULT_PRESET_NAME; u["intro_v2"] = True
+
+def unique_preset_name(u, name):
+    names = {p["name"].lower() for p in user_presets(u)}; name = (name or "Preset").strip()[:40] or "Preset"
+    if name.lower() not in names: return name
+    n = 2
+    while ("%s (%d)" % (name, n)).lower() in names: n += 1
+    return "%s (%d)" % (name, n)
+
+def encode_preset(p):
+    import zlib
+    d = {k: p.get(k) for k in ("v", "name", "pools", "ages", "custom")}; d["v"] = PRESET_VER
+    raw = zlib.compress(json.dumps(d, separators=(",", ":")).encode("utf-8"), 9)
+    return PRESET_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+def decode_preset(code):
+    """(preset, None) or (None, short reason). Accepts surrounding whitespace / line breaks."""
+    import zlib
+    code = re.sub(r"\s+", "", code or "")
+    m = re.match(r"^AOE4S(\d+):(.*)$", code)
+    if not m: return None, "Not an AoE4 Spotify code"
+    if int(m.group(1)) != PRESET_VER: return None, "Made with a newer version - update AoE4 Spotify"
+    try:
+        b = m.group(2); raw = zlib.decompress(base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)), bufsize=1 << 16)
+        if len(raw) > 1 << 18: return None, "Code is too big"
+        d = json.loads(raw.decode("utf-8"))
+    except Exception: return None, "Code is incomplete or damaged"
+    if not isinstance(d, dict): return None, "Code is incomplete or damaged"
+    if d.get("v") != PRESET_VER: return None, "Made with a newer version - update AoE4 Spotify"
+    civs = {c for c, _ in CIV_LIST}; pools = {}; ages = {}; custom = []
+    for a, dd in (d.get("pools") or {}).items() if isinstance(d.get("pools"), dict) else ():
+        if a in INTRO_AGES and isinstance(dd, dict):
+            ok_ = {c: list(dict.fromkeys(x for x in v if isinstance(x, str) and _TRACK_RE.match(x)))[:12]
+                   for c, v in dd.items() if c in civs and isinstance(v, list)}
+            ok_ = {c: v for c, v in ok_.items() if v}
+            if ok_: pools[a] = ok_
+    for a, v in (d.get("ages") or {}).items() if isinstance(d.get("ages"), dict) else ():
+        if a in INTRO_AGES and isinstance(v, bool): ages[a] = v
+    used = {x for dd in pools.values() for v in dd.values() for x in v}
+    for c in d.get("custom") or [] if isinstance(d.get("custom"), list) else ():
+        if isinstance(c, dict) and isinstance(c.get("uri"), str) and _TRACK_RE.match(c["uri"]) and c["uri"] in used:
+            e = {"uri": c["uri"], "name": str(c.get("name") or "Song")[:80], "artist": str(c.get("artist") or "")[:80]}
+            if isinstance(c.get("cover"), str) and c["cover"].startswith("https://"): e["cover"] = c["cover"][:300]
+            custom.append(e)
+    known = {x[3] for x in BUILTIN_SONGS} | {c["uri"] for c in custom}
+    if used - known: return None, "Code uses songs it doesn't include"
+    if "pools" not in d and "ages" not in d: return None, "Code has no intro lists"
+    name = str(d.get("name") or "Shared").strip()[:40] or "Shared"
+    return {"v": PRESET_VER, "name": name, "pools": pools, "ages": ages, "custom": custom}, None
+
+def preset_counts(base_cfg, p):
+    """{age: civs with an intro} for a preset (Imperial starts from the defaults)."""
+    out = {}
+    for a in INTRO_AGES:
+        dd = (p.get("pools") or {}).get(a) or {}
+        out[a] = sum(1 for c, _ in CIV_LIST if (dd.get(c) or (default_pool(base_cfg, c) if a == "imperial" else [])))
+    return out
+
+def preset_songs(base_cfg, p):
+    """Distinct songs a preset uses (canonical order)."""
+    us = [x for a in INTRO_AGES for c, _ in CIV_LIST
+          for x in (((p.get("pools") or {}).get(a) or {}).get(c) or (default_pool(base_cfg, c) if a == "imperial" else []))]
+    return song_sorted(us)
 
 # ---------------------------------------------------------------- Spotify desktop app launch
 STORE_APP = r"SpotifyAB.SpotifyMusic_zpdnekdrzrea0"
@@ -1138,6 +1239,325 @@ def set_app_icon(win):
         if os.path.exists(ico): win.iconbitmap(ico); win.iconbitmap(default=ico); return
     except Exception as e: log("Icon: %r" % e)
 
+# ---------------------------------------------------------------- "Not invited yet" (Spotify app in development mode)
+ACCOUNT_URL = "https://www.spotify.com/account/overview/"
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$")
+ACCESS_GAP = 600                                       # one request per 10 min per install
+
+def not_invited(code, body):
+    """True when Spotify refuses this account because it isn't on the app's user list (dev-mode 403)."""
+    if code != 403: return False
+    t = json.dumps(body).lower() if not isinstance(body, str) else body.lower()
+    return "not registered" in t or "developer dashboard" in t or "user may not be registered" in t
+
+def access_status(sp):
+    """'ok', 'blocked' or None (offline / not logged in)."""
+    if not (sp and sp.tok): return None
+    c, r = sp._api("GET", "/me")
+    if c == 200: return "ok"
+    return "blocked" if not_invited(c, r) else None
+
+def webhook_ok(url):
+    if not isinstance(url, str) or not url: return False
+    if url.startswith("https://api2.cursor.sh/automations/webhook/"): return True
+    return bool(test_env("AOE4SPOTIFY_TEST")) and url.startswith("http://127.0.0.1:")
+
+def send_access_request(cfg, email, name=None, now=None):
+    """POST one request to the configured Discord webhook. Returns 'sent', 'wait', 'off', 'bad' or 'error'.
+    Only ever called from the 'Send request' button."""
+    url = cfg.get("access_webhook"); now = now or time.time()
+    if not webhook_ok(url): return "off"
+    if not EMAIL_RE.match(email or ""): return "bad"
+    u = load_user_settings()
+    if now - float(u.get("access_last") or 0) < ACCESS_GAP: return "wait"
+    hdr = {"Content-Type": "application/json", "User-Agent": "AoE4Spotify/" + VERSION}
+    if cfg.get("access_key"): hdr["Authorization"] = "Bearer " + str(cfg["access_key"])
+    try:
+        req = urllib.request.Request(url, data=json.dumps({"email": email, "name": name or None, "version": VERSION}).encode(), headers=hdr, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as r: ok_ = 200 <= r.status < 300
+    except urllib.error.HTTPError as e: log("Access request failed: HTTP %s" % e.code); return "error"
+    except Exception as e: log("Access request failed: %s" % type(e).__name__); return "error"     # never logs the URL/key
+    if not ok_: return "error"
+    u["access_last"] = now; u["access_pending"] = True; save_user(u); log("Access request sent")
+    return "sent"
+
+def windows_light():
+    """True when Windows apps use the light theme (HKCU ...\\Themes\\Personalize AppsUseLightTheme = 1)."""
+    if test_env("AOE4SPOTIFY_THEME") in ("light", "dark"): return test_env("AOE4SPOTIFY_THEME") == "light"
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return bool(winreg.QueryValueEx(k, "AppsUseLightTheme")[0])
+    except Exception: return False
+
+def set_titlebar(win, dark):
+    if sys.platform != "win32": return
+    try:
+        import ctypes
+        hwnd = ctypes.c_void_p(int(win.wm_frame(), 16)); v = ctypes.c_int(1 if dark else 0)
+        for attr in (20, 19):
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), 4) == 0: break
+    except Exception: pass
+
+ACCESS_THEMES = {   # soft, no pure white / pure black; same Spotify green family in both
+    "dark":  dict(bg="#171717", card="#222222", tx="#e6e6e3", mu="#a3a29f", g="#1db954", gtx="#0e1a12", gact="#2fcf68", gdis="#35503f",
+                  gdtx="#5f7a68", b2="#303030", b2a="#3a3a3a", b2tx="#e6e6e3", dis="#6c6c6c", ent="#2c2c2c", enttx="#ececea", err="#e8958c",
+                  pg=(46, 46, 46), pgbar=(34, 34, 34), pglab=(170, 170, 166), pgline=(78, 78, 78), hl=(30, 66, 44), hlo=(29, 185, 84), hltx=(232, 232, 228)),
+    "light": dict(bg="#efeeea", card="#e3e1dc", tx="#2b2b2a", mu="#62615d", g="#1a9f4a", gtx="#f4f3ef", gact="#178c41", gdis="#a9c8b3",
+                  gdtx="#e8efe9", b2="#d4d2cc", b2a="#c9c7c1", b2tx="#2b2b2a", dis="#9a9893", ent="#f6f5f1", enttx="#262625", err="#b4473c",
+                  pg=(240, 239, 235), pgbar=(204, 202, 197), pglab=(88, 88, 85), pgline=(206, 204, 199), hl=(208, 232, 214), hlo=(26, 159, 74), hltx=(36, 36, 34)),
+}
+
+def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000):
+    """Simple 3-step 'Not invited yet' guide. Everything is drawn on one canvas from 4x-supersampled images on a
+    strict grid (cards r=12, pill buttons, box r=8); follows the Windows light/dark theme live.
+    Rechecks every minute; closes and calls on_allowed() once access works."""
+    if not single_window("access", "AoE4 Spotify - Get access"): return None
+    import tkinter as tk, webbrowser as wb
+    from PIL import Image, ImageDraw, ImageTk, ImageFont
+    own = parent is None
+    win = tk.Tk() if own else tk.Toplevel(parent)
+    if own: win.withdraw()
+    th = {"light": windows_light()}; P = lambda: ACCESS_THEMES["light" if th["light"] else "dark"]
+    dark_window(win, P()["bg"]); win.title("AoE4 Spotify - Get access"); win.resizable(False, False)
+    win.bind("<Destroy>", lambda e: release_window("access") if e.widget is win else None, add="+")
+    S = win.winfo_fpixels("1i") / 96.0; F = lambda sz, b=True: ("Segoe UI", -int(round(sz * S)), "bold" if b else "normal")
+    cfg = load_config(); st = {"sent": False, "job": None, "clip": None, "allowed": False, "hov": None, "focus": False, "b3": "disabled", "b3t": "Send request", "note": None}
+    on = webhook_ok(cfg.get("access_webhook"))
+    st["note"] = ("" if on else "Requests not set up yet", "mu")
+    # ---- grid (logical px)
+    W = 500; M = 20; PAD = 18; BD = 36; GAP = 12
+    BX = M + PAD + BD / 2                               # badge centre x (all steps)
+    CX = M + PAD + BD + 14                              # card content left edge (titles, buttons, picture, box)
+    CR = W - M - PAD                                    # card content right edge
+    HDR = 96                                            # cards start
+    H1, H2, H3 = 114, 233, 196                          # card heights: 18 px below the last content in every card
+    Y1 = HDR; Y2 = Y1 + H1 + GAP; Y3 = Y2 + H2 + GAP; HH = Y3 + H3 + M
+    TY = 30                                             # step title centre, from the card top (= badge centre)
+    IW, IH = W - M - PAD - CX, 118                      # illustration box
+    BOXW, BOXH = 300, 44
+    G = {"lay": dict(W=W, BX=BX, CX=CX, CR=CR, Y=(Y1, Y2, Y3), H=(H1, H2, H3), TY=TY, GAP=GAP, BOXW=BOXW, BOXH=BOXH, IW=IW, IH=IH)}
+    cv = tk.Canvas(win, width=even_px(W, S), height=even_px(HH, S), highlightthickness=0, bd=0); cv.pack()
+    imgs = {}
+    def rgb(h): return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+    def rr_img(w, h, r, fill, outline=None, ow=0.0):
+        k = ("rr", w, h, r, fill, outline, ow)
+        if k not in imgs:
+            Q = 4; Wp, Hp = even_px(w, S), even_px(h, S); im = Image.new("RGBA", (Wp * Q, Hp * Q), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+            if outline and ow:
+                d.rounded_rectangle([0, 0, Wp * Q - 1, Hp * Q - 1], r * S * Q, fill=rgb(outline))
+                o = ow * S * Q; d.rounded_rectangle([o, o, Wp * Q - 1 - o, Hp * Q - 1 - o], max(0, r * S * Q - o), fill=rgb(fill))
+            else: d.rounded_rectangle([0, 0, Wp * Q - 1, Hp * Q - 1], r * S * Q, fill=rgb(fill))
+            imgs[k] = ImageTk.PhotoImage(im.resize((Wp, Hp), Image.LANCZOS), master=win)
+        return imgs[k]
+    def badge_img(n, fill, fg):
+        k = ("badge", n, fill, fg)
+        if k not in imgs:
+            Q = 4; D = even_px(BD, S); B = D * Q; im = Image.new("RGBA", (B, B), (0, 0, 0, 0)); ImageDraw.Draw(im).ellipse([0, 0, B - 1, B - 1], fill=rgb(fill))
+            tl = Image.new("RGBA", (B, B), (0, 0, 0, 0))
+            try: fnt = ImageFont.truetype("segoeuib.ttf", int(17 * S * Q))
+            except Exception: fnt = None
+            ImageDraw.Draw(tl).text((B / 2, B / 2), str(n), font=fnt, fill=rgb(fg), anchor="mm")
+            im = Image.alpha_composite(im, ink_centre(tl)); imgs[k] = ImageTk.PhotoImage(im.resize((D, D), Image.LANCZOS), master=win)
+        return imgs[k]
+    def check_img(fill, fg):
+        k = ("check", fill, fg)
+        if k not in imgs:
+            Q = 4; D = even_px(26, S); B = D * Q; im = Image.new("RGBA", (B, B), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+            d.ellipse([0, 0, B - 1, B - 1], fill=rgb(fill)); u = B / 26.0
+            d.line([(7.5 * u, 13.5 * u), (11.2 * u, 17.2 * u), (18.5 * u, 9.3 * u)], fill=rgb(fg), width=int(2.6 * u), joint="curve")
+            for x, y in ((7.5, 13.5), (18.5, 9.3)): d.ellipse([(x - 1.3) * u, (y - 1.3) * u, (x + 1.3) * u, (y + 1.3) * u], fill=rgb(fg))
+            imgs[k] = ImageTk.PhotoImage(im.resize((D, D), Image.LANCZOS), master=win)
+        return imgs[k]
+    def illustration():
+        p = P(); k_ = ("illu", th["light"])
+        if k_ in imgs: return imgs[k_]
+        Q = 4; Wp, Hp = even_px(IW, S), even_px(IH, S); u = Wp * Q / IW; L = lambda v: v * u; SW = 1.8                # one stroke width everywhere
+        im = Image.new("RGBA", (Wp * Q, Hp * Q), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+        try:
+            fb = ImageFont.truetype("segoeuib.ttf", int(L(10.5))); fr = ImageFont.truetype("segoeui.ttf", int(L(10))); fh = ImageFont.truetype("segoeuib.ttf", int(L(11.5)))
+        except Exception: fb = fr = fh = None
+        def line(pts, c, w=SW):
+            d.line([(L(x), L(y)) for x, y in pts], fill=c, width=int(round(L(w))), joint="curve")
+            for x, y in (pts[0], pts[-1]): r = w / 2; d.ellipse([L(x - r), L(y - r), L(x + r), L(y + r)], fill=c)   # round caps
+        pw = (IW - 24) / 2                                   # two equal mini pages, 24 px gutter for the arrow
+        lx0, lx1, rx0, rx1 = 0, pw, IW - pw, IW
+        for x0, x1 in ((lx0, lx1), (rx0, rx1)): d.rounded_rectangle([L(x0), 0, L(x1) - 1, Hp * Q - 1], L(10), fill=p["pg"])
+        # left page: Account -> pencil row
+        d.text((L(lx0 + 12), L(18)), "Account", fill=p["pglab"], font=fh, anchor="lm")
+        ry0, ry1 = 34, 62; cy = (ry0 + ry1) / 2
+        d.rounded_rectangle([L(lx0 + 8), L(ry0), L(lx1 - 8), L(ry1)], L(8), fill=p["hl"], outline=p["hlo"], width=int(round(L(SW))))
+        d.rounded_rectangle([L(lx0 + 14), L(cy - 8), L(lx0 + 30), L(cy + 8)], L(4), fill=p["pgline"])
+        pc = (lx0 + 22, cy)                                   # pencil: shaft + tip, 45 degrees, crisp
+        line([(pc[0] - 3.2, pc[1] + 3.2), (pc[0] + 3.6, pc[1] - 3.6)], p["hltx"], 2.2)
+        d.polygon([(L(pc[0] - 5.2), L(pc[1] + 5.2)), (L(pc[0] - 4.6), L(pc[1] + 2.4)), (L(pc[0] - 2.4), L(pc[1] + 4.6))], fill=p["hltx"])
+        d.text((L(lx0 + 37), L(cy)), "Edit personal info", fill=p["hltx"], font=fb, anchor="lm")
+        line([(lx1 - 20, cy - 4), (lx1 - 16, cy), (lx1 - 20, cy + 4)], p["hltx"])
+        for i, w_ in enumerate((0.62, 0.45)): d.rounded_rectangle([L(lx0 + 12), L(78 + i * 15), L(lx0 + 12 + (pw - 24) * w_), L(84 + i * 15)], L(3), fill=p["pgline"])
+        # pointer (classic proportions: 12 x 18), tip on the row, white-ish edge so it reads on both themes
+        px, py = lx1 - 44, cy + 2
+        ptr = [(0, 0), (0, 15.5), (3.8, 12.2), (6.6, 18), (9.2, 16.8), (6.5, 11.2), (11.4, 11.2)]
+        d.polygon([(L(px + x), L(py + y)) for x, y in ptr], fill=p["hltx"], outline=p["pg"], width=int(round(L(1.2))))
+        # arrow between the pages
+        ax0, ax1, ay = lx1 + 6, rx0 - 6, IH / 2
+        line([(ax0, ay), (ax1, ay)], p["hlo"], 2.0); line([(ax1 - 4.5, ay - 4.5), (ax1, ay), (ax1 - 4.5, ay + 4.5)], p["hlo"], 2.0)
+        # right page: Email field
+        d.rounded_rectangle([L(rx0 + 12), L(15), L(rx0 + 12 + (pw - 24) * 0.55), L(21)], L(3), fill=p["pgline"])
+        d.text((L(rx0 + 12), L(42)), "Email", fill=p["pglab"], font=fb, anchor="lm")
+        d.rounded_rectangle([L(rx0 + 8), L(52), L(rx1 - 8), L(78)], L(8), fill=p["hl"], outline=p["hlo"], width=int(round(L(SW))))
+        d.text((L(rx0 + 16), L(65)), "you@example.com", fill=p["hltx"], font=fr, anchor="lm")
+        d.rounded_rectangle([L(rx0 + 12), L(92), L(rx0 + 12 + (pw - 24) * 0.7), L(98)], L(3), fill=p["pgline"])
+        imgs[k_] = ImageTk.PhotoImage(im.resize((Wp, Hp), Image.LANCZOS), master=win); return imgs[k_]
+    # ---- live widgets: email box (Entry on a rounded image), placeholder, check
+    ev = tk.StringVar()
+    e_ = tk.Entry(cv, textvariable=ev, font=F(15, False), relief="flat", bd=0, highlightthickness=0)
+    ph = tk.Label(e_, text="your Spotify email", font=F(15, False), cursor="xterm", bd=0)
+    ck = tk.Label(cv, text="", bd=0)                      # text kept for tests; shows the drawn check image
+    def ph_upd(*_):
+        if ev.get(): ph.place_forget()
+        else: ph.place(x=0, rely=0.5, anchor="w")
+    ph.bind("<Button-1>", lambda e: (e_.focus_set(), e_.icursor("end")))
+    e_.bind("<FocusIn>", lambda e: (st.update(focus=True), draw())); e_.bind("<FocusOut>", lambda e: (st.update(focus=False), draw()))
+    done = tk.Frame(win)
+    class Btn:                                          # pill button drawn on the canvas; Tk-button-like config/state for callers
+        def __init__(s, key): s.key = key
+        def __getitem__(s, o): return st["b3"] if o == "state" else st["b3t"]
+        def config(s, state=None, text=None, **_):
+            if state: st["b3"] = state
+            if text: st["b3t"] = text
+            draw()
+        configure = config
+    class Note:
+        def __getitem__(s, o): return st["note"][0]
+        def config(s, text=None, fg=None, **_): st["note"] = (text if text is not None else st["note"][0], "err" if fg else st["note"][1]); draw()
+        configure = config
+    b3, note = Btn("b3"), Note()
+    def valid(): return bool(EMAIL_RE.match(ev.get().strip()))
+    def text(x, y, s_, sz, key, bold=True, anchor="w", tags=()):
+        return cv.create_text(x * S, y * S, text=s_, fill=P()[key], font=F(sz, bold), anchor=anchor, tags=tags)
+    def pill(x, y, w, h, label, kind, tag, enabled=True):
+        p = P(); hv = st["hov"] == tag and enabled
+        if kind == "g": fill, fg = (p["gact"] if hv else p["g"]) if enabled else p["gdis"], "gtx" if enabled else "gdtx"
+        else: fill, fg = p["b2a"] if hv else p["b2"], "b2tx"
+        cv.create_image(x * S, y * S, anchor="nw", image=rr_img(w, h, h / 2, fill), tags=(tag,))
+        text(x + w / 2, y + h / 2, label, 15, fg, True, "center", (tag,))
+    def draw():
+        p = P()
+        for i in cv.find_all():
+            if "win" not in cv.gettags(i): cv.delete(i)
+        cv.configure(bg=p["bg"]); win.configure(bg=p["bg"])
+        e_.configure(bg=p["ent"], fg=p["enttx"], insertbackground=p["enttx"], disabledbackground=p["ent"]); ph.configure(bg=p["ent"], fg=p["dis"])
+        ok_ = valid(); ck.configure(bg=p["card"], image=check_img(p["g"], p["gtx"]) if ok_ else "", text="\u2714" if ok_ else "")
+        st["b3"] = "normal" if (on and ok_ and not st["sent"] and st["b3t"] == "Send request") else "disabled"
+        text(M + 8, 38, "Not invited yet", 26, "tx", tags=("hdr",)); text(M + 8, 70, "Ask for access in 3 easy steps.", 15, "mu", False, tags=("hdr",))
+        if st.get("donev"):                            # Done: same canvas, same header, same window size
+            for i in cv.find_withtag("win"): cv.itemconfigure(i, state="hidden")
+            if not cv.find_withtag("dwin"): cv.create_window((M + 8) * S, HDR * S, anchor="nw", window=done, tags=("dwin",))
+            return
+        titles = ("Open your Spotify page", "Find your email and copy it", "Paste or type your Spotify email")
+        h3 = H3 if st["note"][0] else H3 - 24              # no note line: card 3 ends 18 px under the button
+        hh = Y3 + h3 + M
+        if int(cv.cget("height")) != even_px(hh, S): cv.configure(height=even_px(hh, S))
+        G["lay"]["H"] = (H1, H2, h3)
+        for i, (y0, h) in enumerate(zip((Y1, Y2, Y3), (H1, H2, h3))):
+            cv.create_image(M * S, y0 * S, anchor="nw", image=rr_img(W - 2 * M, h, 12, p["card"]))
+            cv.create_image(BX * S, (y0 + TY) * S, image=badge_img(i + 1, p["g"], p["gtx"]), tags=("badge",))
+            text(CX, y0 + TY, titles[i], 17, "tx", tags=("title",))
+        pill(CX, Y1 + 52, 200, 44, "Open Spotify page", "b2", "b1")
+        cv.create_image(CX * S, (Y2 + 52) * S, anchor="nw", image=illustration(), tags=("illu",))
+        text(CX, Y2 + 52 + IH + 16, "Click \u201cEdit personal info\u201d (the row with the pencil).", 14, "mu", False)
+        text(CX, Y2 + 52 + IH + 36, "Then select your Email and press Ctrl + C.", 14, "mu", False)
+        by = Y3 + 52
+        cv.create_image(CX * S, by * S, anchor="nw", image=rr_img(BOXW, BOXH, 8, p["ent"], p["g"] if st["focus"] else p["b2"], 1.5), tags=("box",))
+        if not cv.find_withtag("win"):                  # embedded widgets are created once and kept on top
+            cv.create_window((CX + 14) * S, (by + BOXH / 2) * S, anchor="w", window=e_, width=int((BOXW - 28) * S), height=int(26 * S), tags=("win",))
+            cv.create_window((CX + BOXW + 14) * S, (by + BOXH / 2) * S, anchor="w", window=ck, tags=("win",))
+        cv.tag_raise("win")
+        pill(CX, by + BOXH + 14, 200, 44, st["b3t"], "g", "b3", st["b3"] == "normal")
+        if st["note"][0]: text(CX, by + BOXH + 14 + 44 + 16, st["note"][0], 13, st["note"][1], False)
+    def hit(e):
+        it = cv.find_overlapping(e.x, e.y, e.x, e.y)
+        for i in reversed(it):
+            for t in cv.gettags(i):
+                if t in ("b1", "b3"): return t
+    def motion(e):
+        h = hit(e)
+        if h != st["hov"]:
+            st["hov"] = h; cv.config(cursor="hand2" if h == "b1" or (h == "b3" and st["b3"] == "normal") else ""); draw()
+    def click(e):
+        h = hit(e)
+        if h == "b1": wb.open(ACCOUNT_URL)
+        elif h == "b3": send()
+    cv.bind("<Motion>", motion); cv.bind("<ButtonRelease-1>", click); cv.bind("<Leave>", lambda e: motion(e) if False else (st.update(hov=None), draw()))
+    def refresh(*_): ph_upd(); draw()
+    ev.trace_add("write", refresh)
+    def retheme(): imgs.clear(); set_titlebar(win, not th["light"]); draw(); show_done() if (st["sent"] or st.get("donev")) else None
+    uiq = []
+    def poll_clip():                                   # fills the box as soon as an email is copied; also follows the theme
+        while uiq:
+            uiq.pop(0)()
+            if st["allowed"]: return
+        try:
+            c = win.clipboard_get().strip()
+            if c != st["clip"]:
+                st["clip"] = c
+                if EMAIL_RE.match(c) and not st["sent"]: ev.set(c)
+        except Exception: pass
+        st["tick"] = st.get("tick", 0) + 1
+        if st["tick"] % 8 == 0:                        # ~2 s: Windows light/dark switch while open
+            lt = windows_light()
+            if lt != th["light"]: th["light"] = lt; retheme()
+        try: win.after(250, poll_clip)
+        except Exception: pass
+    def show_done():
+        p = P(); st["donev"] = True; done.configure(bg=p["bg"])
+        for w_ in done.winfo_children(): w_.destroy()
+        for t_, sz, key, pady in (("\u2714  Done!", 30, "g", (14, 0)), ("You'll get access soon.", 20, "tx", (8, 6)),
+                                  ("Keep this window open or reopen the app later.\nIt continues by itself when it works.", 15, "mu", (0, 30))):
+            tk.Label(done, text=t_, font=F(sz, sz != 15), bg=p["bg"], fg=p[key], justify="left").pack(anchor="w", pady=tuple(int(v * S) for v in pady))
+        draw()
+    def send():
+        if not (on and valid()) or st["sent"] or st["b3t"] != "Send request": return
+        b3.config(text="Sending\u2026"); em = ev.get().strip()
+        def go():
+            r = send_access_request(cfg, em, name)
+            def fin():
+                st["b3t"] = "Send request"
+                if r in ("sent", "wait"): st["sent"] = True; show_done()     # 'wait': asked recently - same friendly end
+                else: note.config(text="Couldn't send, try again", fg="err")
+                win._res = r
+            uiq.append(fin)                            # Tk is only touched on the UI thread
+        threading.Thread(target=go, daemon=True).start()
+    def recheck():
+        def go():
+            try: r = access_status(Spotify(load_config()))
+            except Exception: r = None
+            if r == "ok": uiq.append(allowed)
+        threading.Thread(target=go, daemon=True).start()
+        st["job"] = win.after(recheck_ms, recheck)
+    def allowed():
+        if st["allowed"]: return
+        st["allowed"] = True; u = load_user_settings(); u.pop("access_pending", None); save_user(u)
+        try: win.destroy()
+        except Exception: pass
+        if on_allowed: on_allowed()
+    ph_upd(); draw()
+    if load_user_settings().get("access_pending") and time.time() - float(load_user_settings().get("access_last") or 0) < ACCESS_GAP:
+        st["sent"] = True; show_done()
+    poll_clip(); st["job"] = win.after(recheck_ms, recheck)
+    reveal(win, over=parent) if parent is not None else reveal(win)
+    set_titlebar(win, not th["light"])
+    if not st["sent"]:
+        try: win.focus_force(); e_.focus_set()                  # ready to type / Ctrl+V straight away
+        except Exception: pass
+    win._acc = {"ev": ev, "send": send, "b3": b3, "ck": ck, "st": st, "note": note, "done": done, "recheck": recheck, "allowed": allowed,
+                "th": th, "retheme": retheme, "show_done": show_done, "P": P, "entry": e_, "ph": ph, "cv": cv, "G": G, "draw": draw}
+    if own:
+        win.mainloop() if not test_env("AOE4SPOTIFY_TEST_NOLOOP") else None
+    return win
+
+def ImageColor_rgb(h): return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+
 def login_flow(cfg):
     """No-arg start (installer Finish page): log in if needed, then show the result window."""
     if os.environ.get("AOE4SPOTIFY_GTG_DEMO"):    # testing/screenshots only: show the window with sample data
@@ -1147,6 +1567,10 @@ def login_flow(cfg):
         if not sp.tok:
             try: sp.login()
             except BaseException as e: log("Login failed: %r" % e)
+        if access_status(sp) == "blocked":
+            ok_ = []
+            access_dialog(None, on_allowed=lambda: ok_.append(1))
+            if not ok_: return
         st = setup_status(sp)
         again = []
         good_to_go(st, on_retry=lambda: again.append(1), fix=lambda: with_steam_closed(set_launch_option))
@@ -1349,6 +1773,68 @@ class Art:
         m = Image.new("L", (inner, inner), 0); ImageDraw.Draw(m).ellipse([0, 0, inner - 1, inner - 1], fill=255)
         off = (big - inner) // 2; im.paste(p, (off, off), m)
         ph = ImageTk.PhotoImage(im.resize((D, D), Image.LANCZOS), master=self.m); self.cache[k] = ph; return ph
+    def plus(self, r, hover=False):
+        """The YOURS '+' button: same image size/parity as a song chip (so it centres exactly like one), one
+        thin ring and a '+' made of two centred strokes (no font glyph). Hover = slightly brighter + faint fill."""
+        k = ("plus", r, hover)
+        if k in self.cache: return self.cache[k]
+        from PIL import Image, ImageDraw, ImageTk
+        D = chip_px(r, self.S); Q = 4; B = D * Q; d_ = None
+        im = Image.new("RGBA", (B, B), (0, 0, 0, 0)); d_ = ImageDraw.Draw(im)
+        g = (64, 222, 120) if hover else (29, 185, 84)
+        def box(rad):
+            R = int(round(rad)); C_ = B // 2; return [C_ - R, C_ - R, C_ + R - 1, C_ + R - 1]
+        ring = (r + 0.5) * self.S * Q; lw = max(Q, int(round(1.6 * self.S * Q)))
+        if hover: d_.ellipse(box(ring), fill=g + (38,))
+        d_.ellipse(box(ring), outline=g + (255,), width=lw)
+        arm = int(round(r * 0.42 * self.S * Q)); sw = max(Q, int(round(2.0 * self.S * Q))); sw += sw % 2
+        C_ = B // 2
+        d_.rectangle([C_ - arm, C_ - sw // 2, C_ + arm - 1, C_ + sw // 2 - 1], fill=g + (255,))
+        d_.rectangle([C_ - sw // 2, C_ - arm, C_ + sw // 2 - 1, C_ + arm - 1], fill=g + (255,))
+        ph = ImageTk.PhotoImage(im.resize((D, D), Image.LANCZOS), master=self.m); self.cache[k] = ph; return ph
+    def chevron(self, size, color, back=False, fill=None, w=7.0, h=14.0, lw=2.0):
+        """Supersampled chevron (optionally on a round button of logical diameter `size`). The two arms are
+        placed so their visual mass (centroid = midpoint between tip and arm ends) sits on the exact centre."""
+        k = ("chev", size, color, back, fill, w, h, lw)
+        if k in self.cache: return self.cache[k]
+        from PIL import Image, ImageDraw, ImageTk
+        D = even_px(size, self.S); Q = 4; B = D * Q
+        im = Image.new("RGBA", (B, B), (0, 0, 0, 0)); d_ = ImageDraw.Draw(im); c = (B - 1) / 2; k_ = self.S * Q
+        if fill: d_.ellipse([0, 0, B - 1, B - 1], fill=fill)
+        disc_im = im; im = Image.new("RGBA", (B, B), (0, 0, 0, 0)); d_ = ImageDraw.Draw(im)
+        sgn = -1 if back else 1
+        tip = (c + sgn * w / 2 * k_, c); a1 = (c - sgn * w / 2 * k_, c - h / 2 * k_); a2 = (c - sgn * w / 2 * k_, c + h / 2 * k_)
+        L = max(Q, int(round(lw * k_)))
+        d_.line([a1, tip, a2], fill=color, width=L, joint="curve")
+        for p_ in (a1, a2, tip):                                       # round caps
+            d_.ellipse([p_[0] - L / 2, p_[1] - L / 2, p_[0] + L / 2, p_[1] + L / 2], fill=color)
+        im = Image.alpha_composite(disc_im, ink_centre(im))             # optical centre = ink centroid
+        ph = ImageTk.PhotoImage(im.resize((D, D), Image.LANCZOS), master=self.m); self.cache[k] = ph; return ph
+    def disc(self, diam, fill, text=None, fg=None, tsize=None, cross=None, outline=None, ow=0.0):
+        """Round badge as an even-sized supersampled image (exact centre at any DPI, unlike canvas ovals),
+        with an optional glyph whose INK (not font metrics) is centred, or a cross drawn as two strokes."""
+        k = ("disc", diam, fill, text, fg, tsize, cross, outline, ow)
+        if k in self.cache: return self.cache[k]
+        from PIL import Image, ImageDraw, ImageFont, ImageTk
+        D = even_px(diam, self.S); Q = 4; B = D * Q; k_ = self.S * Q
+        im = Image.new("RGBA", (B, B), (0, 0, 0, 0)); d_ = ImageDraw.Draw(im)
+        o = int(round(ow * k_)) if outline else 0
+        d_.ellipse([0, 0, B - 1, B - 1], fill=outline or fill)
+        if o: d_.ellipse([o, o, B - 1 - o, B - 1 - o], fill=fill)
+        c = (B - 1) / 2
+        if text:
+            try: f = ImageFont.truetype(os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "segoeuib.ttf"), int(round(tsize * k_)))
+            except Exception: f = ImageFont.load_default()
+            tl = Image.new("RGBA", (B, B), (0, 0, 0, 0)); ImageDraw.Draw(tl).text((c, c), text, font=f, fill=fg, anchor="mm")
+            im = Image.alpha_composite(im, ink_centre(tl)); d_ = ImageDraw.Draw(im)      # centre the glyph INK
+        if cross:
+            base_im = im; im = Image.new("RGBA", (B, B), (0, 0, 0, 0)); d_ = ImageDraw.Draw(im)
+            a_ = cross * k_; L = max(Q, int(round(1.6 * k_)))
+            for p_, q_ in (((c - a_, c - a_), (c + a_, c + a_)), ((c - a_, c + a_), (c + a_, c - a_))):
+                d_.line([p_, q_], fill=fg, width=L)
+                for e_ in (p_, q_): d_.ellipse([e_[0] - L / 2, e_[1] - L / 2, e_[0] + L / 2, e_[1] + L / 2], fill=fg)
+            im = Image.alpha_composite(base_im, ink_centre(im))
+        ph = ImageTk.PhotoImage(im.resize((D, D), Image.LANCZOS), master=self.m); self.cache[k] = ph; return ph
     def flag(self, civ, h=16):
         k = ("flag", civ, h)
         if k in self.cache: return self.cache[k]
@@ -1423,7 +1909,7 @@ def pool_editor(parent, user, save):
         m = len(SONGS) - NB; return min(50.0, 100.0 / max(1, m))
     def tray_xy(i):                                    # OCTOPATH group | divider | YOURS group (+ the '+' chip)
         if i < NB: return 53 + i * 48, 137
-        return 459 + (i - NB) * _ysp(), 137
+        return 438 + tray_rad(NB) + 2 + (i - NB) * _ysp(), 137      # left edge of the first chip under the YOURS label
     def tray_rad(i): return 19 if i < NB else max(9.0, min(19.0, _ysp() * 0.45))
     def tray_r(): return 19
     def chip_xy(i, j): return 205 + j * 34, row_y(i) + RH / 2
@@ -1431,14 +1917,18 @@ def pool_editor(parent, user, save):
         if ed["age"] != "imperial": return {c: song_sorted(v) for c, v in p.items() if v}
         return {c: song_sorted(v) for c, v in p.items() if song_sorted(v) != song_sorted(default_pool(base, c))}
     def snap():                                         # everything the editor can change (all ages)
-        return json.loads(json.dumps({k: user.get(k) for k in ("intro_pools", "intro_ages", "custom_songs")}))
+        return json.loads(json.dumps({k: user.get(k) for k in ("intro_pools", "intro_ages", "custom_songs", "intro_preset")}))
     hist = {"cur": snap(), "undo": [], "redo": []}     # Ctrl+Z / Ctrl+Y history for this editor session (all tabs)
     def _apply(sn):
         for k, v in sn.items():
             if v: user[k] = json.loads(json.dumps(v))
             else: user.pop(k, None)
         load_custom_songs(user); normalize_pools(user); save()
+    def age_empty(age): return not any(pools(age).values())
     def record():
+        for a_ in INTRO_AGES:                          # an age with no songs at all can't be on (same undo step)
+            if a_ != "imperial" and age_empty(a_) and ages_on()[a_]:
+                ia = dict(user.get("intro_ages") or {}); ia[a_] = False; user["intro_ages"] = ia
         sn = snap()
         if sn != hist["cur"]:
             hist["undo"].append(hist["cur"]); hist["redo"].clear(); hist["cur"] = sn
@@ -1452,6 +1942,7 @@ def pool_editor(parent, user, save):
         else: user.pop("intro_pools", None)
         record()
     def set_age_on(a_, on):
+        if on and age_empty(a_): return                # greyed out until the age has a song
         ia = dict(user.get("intro_ages") or {}); ia[a_] = bool(on); user["intro_ages"] = ia; record()
     def add_custom(uri, name, artist):
         cs = [c for c in (user.get("custom_songs") or []) if c.get("uri") != uri]
@@ -1478,7 +1969,132 @@ def pool_editor(parent, user, save):
             h = hit(px / S, py / S) if 0 <= px < cv.winfo_width() and 0 <= py < cv.winfo_height() else None
         except Exception: h = None
         set_hover(h)
-    CARD_Y = lambda k: 96 + k * 142
+    CARD_Y = lambda k: 132 + k * 136
+    # ---- presets (overview bar)
+    def cur_preset():
+        n = user.get("intro_preset") or DEFAULT_PRESET_NAME
+        return next((p for p in user_presets(user) if p["name"] == n), None)
+    def dirty():
+        p = cur_preset(); return p is None or preset_key(user, p) != preset_key(user)
+    def switch_preset(name):
+        p = next((p for p in user_presets(user) if p["name"] == name), None)
+        if not p: return
+        apply_preset(user, p); st["menu"] = None; record(); fetch_missing_covers(); draw()
+    def save_preset(name=None):                        # name=None: overwrite the current one
+        ps = [p for p in (user.get("intro_presets") or []) if isinstance(p, dict)]
+        if name is None:
+            cur = cur_preset()
+            if not cur or cur.get("builtin"): return
+            name = cur["name"]; ps = [p for p in ps if p.get("name") != name]
+        else: name = unique_preset_name(user, name)
+        ps.append(preset_from_user(user, name)); user["intro_presets"] = ps; user["intro_preset"] = name
+        hist["cur"] = snap(); _apply(hist["cur"]); st["menu"] = None; draw()
+    def share():
+        p = preset_from_user(user, (cur_preset() or {}).get("name") or user.get("intro_preset") or "Shared")
+        code = encode_preset(p); win.clipboard_clear(); win.clipboard_append(code)
+        try: win.update()
+        except Exception: pass
+        win._last_code = code; toast("Code copied")
+    def toast(msg):
+        st["toast"] = msg
+        if st.get("toastjob"): win.after_cancel(st["toastjob"])
+        def clr(): st["toast"] = None; st["toastjob"] = None; draw()
+        st["toastjob"] = win.after(1800, clr); draw()
+    def import_preset(p):
+        p = dict(p); p["name"] = unique_preset_name(user, p["name"]); p.pop("builtin", None)
+        user["intro_presets"] = [q for q in (user.get("intro_presets") or [])] + [p]
+        apply_preset(user, p); record(); fetch_missing_covers(); draw(); toast("Imported")
+        return p["name"]
+    def fetch_missing_covers():                        # imported songs: covers arrive in the background
+        miss = [c["uri"] for c in (user.get("custom_songs") or []) if not os.path.exists(track_cover(c["uri"]))]
+        if not miss: return
+        def go():
+            try:
+                sp = Spotify(load_config())
+                if not sp.tok: return
+                for u_ in miss: fetch_track(sp, u_)
+            except Exception as ex: log("Covers: %r" % ex); return
+            try: win.after(0, lambda: (art.cache.clear(), draw()))
+            except Exception: pass
+        threading.Thread(target=go, daemon=True).start()
+    def name_dialog(title, init, cb):
+        d = tk.Toplevel(win); dark_window(d, C["card"]); d.title(title); d.resizable(False, False); d.transient(win)
+        tk.Label(d, text=title, bg=C["card"], fg=C["tx"], font=("Segoe UI", 11, "bold")).pack(padx=16, pady=(14, 6), anchor="w")
+        e_ = tk.Entry(d, width=32, bg="#2a2a2a", fg=C["tx"], insertbackground=C["tx"], relief="flat", font=("Segoe UI", 10)); e_.pack(padx=16, ipady=5)
+        e_.insert(0, init); e_.select_range(0, "end")
+        def ok(*_):
+            v = e_.get().strip()
+            if v: d.destroy(); cb(v)
+        tk.Button(d, text="Save", command=ok, bg=C["acc"], fg="#121212", relief="flat", font=("Segoe UI", 10, "bold"), padx=14).pack(padx=16, pady=(10, 14), anchor="e")
+        e_.bind("<Return>", ok); d.bind("<Escape>", lambda e: d.destroy())
+        reveal(d, over=win); e_.focus_set(); win._name = (d, e_, ok); return "break"
+    def import_dialog():
+        d = tk.Toplevel(win); dark_window(d, "#1e1e1e"); d.title("Import"); d.resizable(False, False); d.transient(win)
+        DW, DH = 480, 360; dc = tk.Canvas(d, width=int(DW * S), height=int(DH * S), bg="#1e1e1e", highlightthickness=0); dc.pack()
+        e_ = tk.Entry(d, bg="#141414", fg="#c8c8c8", insertbackground=C["tx"], relief="flat", font=("Segoe UI", 10),
+                      highlightthickness=max(1, int(S)), highlightbackground="#3e3e3e", highlightcolor=C["acc"])
+        res = {"p": None, "err": None, "hov": None}; dimg = []
+        def drr(x0, y0, x1, y1, r, fill, outline=None, width=1.5):
+            dc.create_image(x0 * S, y0 * S, anchor="nw", image=rr_img(x1 - x0, y1 - y0, r, fill, outline, width), tags="g")
+        def dtext(x, y, s_, sz, c=None, b=False, anchor="w"):
+            dc.create_text(x * S, y * S, text=s_, fill=c or C["tx"], anchor=anchor, font=("Segoe UI", -int(sz * S), "bold" if b else "normal"), tags="g")
+        def ddraw():
+            dc.delete("g"); dimg.clear()
+            if not dc.find_withtag("entry"): dc.create_window(24 * S, 66 * S, anchor="nw", width=int(432 * S), height=int(40 * S), window=e_, tags="entry")
+            dc.create_image(38 * S, 36 * S, image=art.disc(30, "#1e3c28", outline=C["acc"], ow=1.5), tags="g"); dc.create_image(38 * S, 36 * S, image=bar_icon("import", C["acc"]), tags="g")
+            dtext(62, 36, "Import", 17, b=True); dtext(452, 34, "×", 20, C["tx"] if res["hov"] == "x" else C["mu"], anchor="center")
+            drr(24, 126, 456, 290, 14, "#262626")
+            p, err = res["p"], res["err"]
+            if p:
+                for j, u_ in enumerate(preset_songs(base, p)[:3]):
+                    sg = SONG_BY_URI.get(u_) or next(((None, c_["name"]) for c_ in p["custom"] if c_["uri"] == u_), None)
+                    key = sg[0] if sg and sg[0] else None
+                    if key: dc.create_image((56 + j * 20) * S, 158 * S, image=art.chip(key, 15), tags="g")
+                    else: dc.create_image((56 + j * 20) * S, 158 * S, image=art.plus(15), tags="g")
+                dtext(130, 150, p["name"], 16, b=True); dtext(130, 171, "from code", 10, C["mu"])
+                cnt = preset_counts(base, p); on = {a_: bool(p["ages"].get(a_, a_ == "imperial")) for a_ in INTRO_AGES}
+                for k_, a_ in enumerate(INTRO_AGES):
+                    x = 40 + k_ * 102
+                    dc.create_image((x + 15) * S, 219 * S, image=art.disc(30, "#1e3c28" if on[a_] and cnt[a_] else "#2c2c2c",
+                                    ("I", "II", "III", "IV")[k_], C["acc"] if on[a_] and cnt[a_] else C["mu"], 11), tags="g")
+                    dtext(x + 38, 212, str(cnt[a_]), 14, b=True); dtext(x + 38, 228, "civs", 9, C["mu"])
+                dc.create_image(55 * S, 263 * S, image=art.plus(13), tags="g")
+                dtext(78, 256, str(len(p["custom"])), 14, b=True); dtext(78, 272, "custom", 9, C["mu"])
+                dc.create_line(*[v * S for v in (382, 263, 387, 268, 396, 257)], fill=C["acc"], width=max(1, 2.2 * S), capstyle="round", joinstyle="round", tags="g")
+                dtext(404, 263, "Valid", 11, C["acc"], True)
+            elif err:
+                dc.create_image(240 * S, 186 * S, image=art.disc(34, "#3c1e1e", "!", "#e5534b", 17), tags="g")
+                dtext(240, 228, err, 12, "#e5534b", True, "center")
+            else:
+                dtext(240, 208, "Paste a code someone shared with you", 11, C["mu"], anchor="center")
+            drr(24, 306, 190, 346, 20, "#383838" if res["hov"] == "cancel" else "#2a2a2a"); dtext(107, 326, "Cancel", 13, b=True, anchor="center")
+            gc = (C["acc"] if res["hov"] != "ok" else "#3be477") if p else "#24412e"
+            drr(202, 306, 456, 346, 20, gc); dtext(329, 326, "Import as preset", 13, "#0a0a0a" if p else "#5f7a68", True, "center")
+        def check(*_):
+            v = e_.get().strip(); res["p"], res["err"] = decode_preset(v) if v else (None, None); ddraw()
+        def dhit(e):
+            x, y = e.x / S, e.y / S
+            if 438 <= x <= 466 and 20 <= y <= 50: return "x"
+            if 306 <= y <= 346: return "cancel" if 24 <= x <= 190 else ("ok" if 202 <= x <= 456 else None)
+        def dmove(e):
+            h = dhit(e)
+            if h != res["hov"]: res["hov"] = h; dc.config(cursor="hand2" if h and (h != "ok" or res["p"]) else ""); ddraw()
+        def go_import():
+            if res["p"]: d.destroy(); import_preset(res["p"])
+        def dclick(e):
+            h = dhit(e)
+            if h in ("x", "cancel"): d.destroy()
+            elif h == "ok": go_import()
+        dc.bind("<Motion>", dmove); dc.bind("<ButtonRelease-1>", dclick)
+        e_.bind("<KeyRelease>", check); e_.bind("<<Paste>>", lambda e: d.after(1, check)); e_.bind("<Return>", lambda e: go_import())
+        d.bind("<Escape>", lambda e: d.destroy())
+        try:
+            clip = win.clipboard_get()
+            if isinstance(clip, str) and clip.strip().startswith("AOE4S"): e_.insert(0, clip.strip())
+        except Exception: pass
+        check(); reveal(d, over=win); e_.focus_set(); win._imp = (d, e_, res, go_import, check)
+        return "break"
+    BAR_Y = 92
     def add_dialog():
         d = tk.Toplevel(win); dark_window(d, C["card"]); d.title("Add a song"); d.resizable(False, False); d.transient(win)
         tk.Label(d, text="Paste a Spotify song link", bg=C["card"], fg=C["tx"], font=("Segoe UI", 11, "bold")).pack(padx=16, pady=(14, 6), anchor="w")
@@ -1510,16 +2126,34 @@ def pool_editor(parent, user, save):
     # ---- hit testing (logical coords)
     def hit(x, y):
         if ed["page"] == "overview":
+            m = st.get("menu")
+            if m == "presets":
+                ps = user_presets(user)
+                for i_, p in enumerate(ps):
+                    if 26 <= x <= 324 and 126 + i_ * 46 <= y <= 168 + i_ * 46: return ("pm", p["name"])
+                yn = 126 + len(ps) * 46
+                if 26 <= x <= 324 and yn + 2 <= y <= yn + 32: return ("pnew",)
+                if 20 <= x <= 330 and 116 <= y <= yn + 40: return ("menu",)
+            elif m == "save":
+                if 344 <= x <= 544 and 116 <= y <= 148: return ("ssave",) if not (cur_preset() or {}).get("builtin") else ("menu",)
+                if 344 <= x <= 544 and 148 <= y <= 182: return ("snew",)
+            if 74 <= y <= 110:
+                if 20 <= x <= 330: return ("preset",)
+                if 344 <= x <= 436: return ("save",)
+                if (x - 494) ** 2 + (y - BAR_Y) ** 2 <= 16 ** 2: return ("share",)
+                if (x - 542) ** 2 + (y - BAR_Y) ** 2 <= 16 ** 2: return ("import",)
+            if m: return None
             for k, a_ in enumerate(INTRO_AGES):
                 y0 = CARD_Y(k)
                 if 20 <= x <= 580 and y0 <= y <= y0 + 128:
-                    return ("cardtog", a_) if (490 <= x <= 544 and y0 + 26 <= y <= y0 + 58) else ("card", a_)
+                    if 490 <= x <= 544 and y0 + 26 <= y <= y0 + 58: return ("swoff", a_, 515, y0 + 58) if age_empty(a_) else ("cardtog", a_)
+                    return ("card", a_)
             return None
         for i in range(len(SONGS) + 1):
             cx, cy = tray_xy(i); rt = tray_rad(i) + 2
             if (x - cx) ** 2 + (y - cy) ** 2 <= rt ** 2: return ("tray", i) if i < len(SONGS) else ("plus",)
         if 18 <= x <= 50 and 42 <= y <= 74: return ("back",)
-        if 520 <= x <= 566 and 44 <= y <= 72: return ("tabtog", ed["age"])
+        if 520 <= x <= 566 and 44 <= y <= 72: return ("swoff", ed["age"], 544, 74) if age_empty(ed["age"]) else ("tabtog", ed["age"])
         if age_custom() and 568 <= x <= 590 and 46 <= y <= 70: return ("reset",)
         if LT <= y <= BOT and 20 <= x <= 568:
             i = int((y - LT + st["sc"]) // STEP)
@@ -1533,14 +2167,15 @@ def pool_editor(parent, user, save):
                 if ed["age"] == "imperial" and 532 <= x <= 562: return ("undo", i)
                 return ("row", i)
         return None
-    def sw(x0, y0, on):                                # small anti-aliased switch
-        rr(x0, y0, x0 + 36, y0 + 20, 10, C["acc"] if on else "#464646")
+    def sw(x0, y0, on, disabled=False):                # small anti-aliased switch (greyed = can't be turned on)
+        rr(x0, y0, x0 + 36, y0 + 20, 10, "#2e2e2e" if disabled else (C["acc"] if on else "#464646"))
         kx = x0 + 26 if on else x0 + 10
-        cv.create_oval((kx - 7) * S, (y0 + 3) * S, (kx + 7) * S, (y0 + 17) * S, fill="white", outline="")
+        cv.create_image(kx * S, (y0 + 10) * S, image=art.disc(14, "#6a6a6a" if disabled else "#ffffff"))
     def badge(x, y, age, on, r):
-        cv.create_oval((x - r) * S, (y - r) * S, (x + r) * S, (y + r) * S, fill="#1e3c28" if on else "#2c2c2c", outline="")
-        text(x, y, {"dark": "I", "feudal": "II", "castle": "III", "imperial": "IV"}[age], r * 0.6, C["acc"] if on else C["mu"], True, "center")
+        cv.create_image(x * S, y * S, image=art.disc(2 * r, "#1e3c28" if on else "#2c2c2c",
+                        {"dark": "I", "feudal": "II", "castle": "III", "imperial": "IV"}[age], C["acc"] if on else C["mu"], r * 0.62))
     def chev(x, y, c, back=False):
+        cv.create_image(x * S, y * S, image=art.chevron(22, c, back)); return
         k = -1 if back else 1
         cv.create_line((x - 4 * k) * S, (y - 7) * S, (x + 3 * k) * S, y * S, (x - 4 * k) * S, (y + 7) * S, fill=c,
                        width=max(1, 2 * S), capstyle="round", joinstyle="round")
@@ -1554,18 +2189,91 @@ def pool_editor(parent, user, save):
             badge(62, y + 42, a_, on[a_], 24)
             text(100, y + 30, a_.capitalize(), 17, b=True)
             text(100, y + 54, ("%d/%d civs" % (n, len(CIV_LIST))) if n else "Empty", 11, C["acc"] if (n and on[a_]) else C["mu"], True)
-            sw(498, y + 32, on[a_]); chev(560, y + 42, C["mu"])
+            sw(498, y + 32, on[a_], age_empty(a_)); chev(560, y + 42, C["mu"])
             rr(100, y + 82, 330, y + 88, 3, "#323232")
             if n: rr(100, y + 82, 100 + max(6, 230 * n // len(CIV_LIST)), y + 88, 3, C["acc"] if on[a_] else "#5a5a5a")
-            used = song_sorted([u for v in p.values() for u in v])[:5]
+            allu = [u for u in song_sorted([u for v in p.values() for u in v]) if u in SONG_BY_URI]; used = allu[:5]
             if used:
                 for j, u in enumerate(used):
-                    sg = SONG_BY_URI.get(u)
-                    if sg: cv.create_image((375 + j * 24) * S, (y + 85) * S, image=art.chip(sg[0], 13))
+                    cv.create_image((375 + j * 24) * S, (y + 85) * S, image=art.chip(SONG_BY_URI[u][0], 13))
+                more = len(allu) - len(used)
+                if more > 0:                               # '+X' overflow chip (variant A): same size, overlapping
+                    ox = (375 + len(used) * 24) * S
+                    cv.create_image(ox, (y + 85) * S, image=art.disc(33, "#262626" if hv else C["card"]))
+                    cv.create_image(ox, (y + 85) * S, image=art.disc(30, "#2c2c2c", "+%d" % more, "#dcdcdc", 11, outline="#6e6e6e", ow=2.5))
             else:
                 for j in range(3):
                     cv.create_oval((360 + j * 24) * S, (y + 70) * S, (390 + j * 24) * S, (y + 100) * S, outline="#464646", width=max(1, S), fill=C["card"])
-        text(W / 2, H - 22, "Click an age to edit", 10, "#5a5a5a", anchor="center")
+        if st.get("toast"):
+            import tkinter.font as tkfont
+            tw = tkfont.Font(root=win, family="Segoe UI", size=-int(13 * S), weight="bold").measure(st["toast"]) / S + 70
+            x0 = W / 2 - tw / 2; rr(x0, H - 46, x0 + tw, H - 8, 19, "#282828", C["acc"], 1.2)
+            cv.create_image((x0 + 25) * S, (H - 27) * S, image=art.disc(22, C["acc"]))
+            cv.create_line(*[v * S for v in (x0 + 19, H - 27, x0 + 23, H - 23, x0 + 30, H - 31)], fill="#0a0a0a", width=max(1, 2.4 * S), capstyle="round", joinstyle="round")
+            text(x0 + 45, H - 27, st["toast"], 13, b=True)
+        else: text(W / 2, H - 20, "Click an age to edit", 10, "#5a5a5a", anchor="center")
+        draw_bar()
+    def chev_down(x, y, c):
+        cv.create_line(*[v * S for v in (x - 4, y - 2, x, y + 2, x + 4, y - 2)], fill=c, width=max(1, 2 * S), capstyle="round", joinstyle="round")
+    def bar_icon(kind, c):
+        k = ("baricon", kind, c)
+        if k not in imgs:
+            Q = 4; Z = even_px(30, S); im = Image.new("RGBA", (Z * Q, Z * Q), (0, 0, 0, 0)); d_ = ImageDraw.Draw(im)
+            u = Z * Q / 30.0; cx = cy = Z * Q / 2; lw = max(Q, int(round(1.8 * S * Q)))
+            P = lambda pts: [(cx + a * u, cy + b * u) for a, b in pts]
+            if kind == "save":
+                d_.line(P([(0, -7), (0, 3)]), fill=c, width=lw); d_.line(P([(-4, -1), (0, 3), (4, -1)]), fill=c, width=lw, joint="curve")
+                d_.line(P([(-7, 2), (-7, 7), (7, 7), (7, 2)]), fill=c, width=lw, joint="curve")
+            elif kind == "share":
+                for a, b in ((-5, 0), (5, -6), (5, 6)): d_.ellipse([cx + (a - 2.6) * u, cy + (b - 2.6) * u, cx + (a + 2.6) * u, cy + (b + 2.6) * u], fill=c)
+                d_.line(P([(-5, 0), (5, -6)]), fill=c, width=max(Q, int(1.5 * S * Q))); d_.line(P([(-5, 0), (5, 6)]), fill=c, width=max(Q, int(1.5 * S * Q)))
+            else:
+                d_.rounded_rectangle([cx - 6 * u, cy - 6 * u, cx + 6 * u, cy + 8 * u], 2.5 * u, outline=c, width=lw)
+                d_.rounded_rectangle([cx - 3 * u, cy - 8 * u, cx + 3 * u, cy - 4 * u], 1.5 * u, fill=c)
+            imgs[k] = ImageTk.PhotoImage(im.resize((Z, Z), Image.LANCZOS), master=win)
+        return imgs[k]
+    def draw_bar():
+        hov = st["hov"] or ("",); m = st.get("menu"); y = BAR_Y; cur = cur_preset()
+        op = m == "presets" or hov[0] == "preset"
+        rr(20, y - 18, 330, y + 18, 18, "#2a2a2a" if op else C["card"], C["acc"] if m == "presets" else "#3e3e3e", 1.2)
+        cv.create_image(40 * S, y * S, image=art.disc(12, C["acc"]))
+        text(56, y, user.get("intro_preset") or DEFAULT_PRESET_NAME, 13, b=True)
+        if dirty(): cv.create_image(292 * S, y * S, image=art.disc(8, "#c8a24a"))
+        chev_down(310, y, C["tx"] if op else C["mu"])
+        so = m == "save" or hov[0] == "save"
+        rr(344, y - 15, 436, y + 15, 15, "#2a2a2a" if so else C["card"], C["acc"] if m == "save" else "#3e3e3e", 1.2)
+        cv.create_image(364 * S, y * S, image=bar_icon("save", C["tx"])); text(378, y, "Save", 12, b=True)
+        for cx_, kind in ((494, "share"), (542, "import")):
+            hv = hov[0] == kind
+            cv.create_image(cx_ * S, y * S, image=art.disc(30, "#383838" if hv else "#2a2a2a"))
+            cv.create_image(cx_ * S, y * S, image=bar_icon(kind, "#ffffff" if hv else "#cdcdcd"))
+        if m == "presets":
+            ps = user_presets(user); yb = 126 + len(ps) * 46
+            rr(18, 114, 332, yb + 44, 15, "#0c0c0c"); rr(20, 116, 330, yb + 40, 14, "#242424", "#3e3e3e", 1)
+            for i_, p in enumerate(ps):
+                yy = 126 + i_ * 46; is_cur = p["name"] == (user.get("intro_preset") or DEFAULT_PRESET_NAME)
+                if is_cur: rr(26, yy, 324, yy + 42, 10, "#1e3426")
+                elif hov == ("pm", p["name"]): rr(26, yy, 324, yy + 42, 10, "#2e2e2e")
+                for j, u_ in enumerate(preset_songs(base, p)[:3]):
+                    sg = SONG_BY_URI.get(u_)
+                    if sg: cv.create_image((48 + j * 16) * S, (yy + 21) * S, image=art.chip(sg[0], 10))
+                text(100, yy + 21, p["name"], 13, C["acc"] if is_cur else C["tx"], True)
+                cnt = preset_counts(base, p)
+                ag = " ".join(r for r, a_ in zip(("I", "II", "III", "IV"), INTRO_AGES) if cnt[a_] and (p.get("ages") or {}).get(a_, a_ == "imperial"))
+                text(250, yy + 21, ag, 10, C["mu"], True)
+                if is_cur: cv.create_line(*[v * S for v in (300, yy + 21, 305, yy + 26, 314, yy + 15)], fill=C["acc"], width=max(1, 2.2 * S), capstyle="round", joinstyle="round")
+            cv.create_line(32 * S, (yb + 1) * S, 318 * S, (yb + 1) * S, fill="#3e3e3e", width=max(1, int(S)))
+            nh = hov[0] == "pnew"
+            if nh: rr(26, yb + 4, 324, yb + 32, 8, "#2e2e2e")
+            text(48, yb + 18, "+", 16, C["acc"], anchor="center"); text(62, yb + 18, "New preset", 12, C["acc"], True)
+        elif m == "save":
+            rr(342, 114, 546, 186, 13, "#0c0c0c"); rr(344, 116, 544, 184, 12, "#242424", "#3e3e3e", 1)
+            cp = cur_preset(); ro = not cp or cp.get("builtin")
+            if hov[0] == "ssave" and not ro: rr(348, 120, 540, 148, 8, "#2e2e2e")
+            if hov[0] == "snew": rr(348, 152, 540, 180, 8, "#2e2e2e")
+            nm = user.get("intro_preset") or DEFAULT_PRESET_NAME
+            text(360, 134, ("Save to \u201c%s\u201d" % nm) if len(nm) <= 14 else "Save to this preset", 12, "#5a5a5a" if ro else C["tx"], True)
+            text(360, 166, "Save as new\u2026", 12, C["tx"], True)
     def draw():
         if ed["page"] == "overview": draw_overview(); return
         cv.delete("all"); p = pools(); hov = st["hov"]; drag = st["drag"]
@@ -1603,9 +2311,9 @@ def pool_editor(parent, user, save):
         cv.create_rectangle(0, 0, W * S, (LT - 4) * S, fill=C["bg"], outline="", tags="cover")
         cv.create_rectangle(0, BOT * S, W * S, H * S, fill=C["bg"], outline="", tags="cover")
         a_ = ed["age"]; on = ages_on()
-        rr(18, 42, 50, 74, 16, "#2a2a2a" if (st["hov"] or ("",))[0] == "back" else C["card"]); chev(35, 58, C["tx"], back=True)
+        cv.create_image(34 * S, 58 * S, image=art.chevron(32, C["tx"], True, "#2a2a2a" if (st["hov"] or ("",))[0] == "back" else C["card"], w=6, h=12))
         badge(78, 58, a_, on[a_], 15); text(102, 58, a_.capitalize(), 18, b=True)
-        sw(526, 48, on[a_])
+        sw(526, 48, on[a_], age_empty(a_))
         if age_custom(): undo_glyph(578, 58, C["mu"])
         rr(20, 88, 580, 180, 18, "#1a1a1a", C["line"])
         text(36, 99, "OCTOPATH", 8.5, C["mu"], True)
@@ -1616,9 +2324,7 @@ def pool_editor(parent, user, save):
             if drag and drag["src"] == ("tray", i):
                 cv.create_oval((cx - tr - 3) * S, (cy - tr - 3) * S, (cx + tr + 3) * S, (cy + tr + 3) * S, outline=C["acc"], width=max(1, int(1.5 * S)))
             cv.create_image(cx * S, cy * S, image=art.chip(s_[0], tr))
-        cx, cy = tray_xy(len(SONGS)); tr = tray_rad(len(SONGS))
-        cv.create_oval((cx - tr) * S, (cy - tr) * S, (cx + tr) * S, (cy + tr) * S, outline=C["acc"], width=max(1, 2 * S))
-        text(cx, cy - 1, "+", tr * 1.1, C["acc"], anchor="center")
+        cx, cy = tray_xy(len(SONGS)); cv.create_image(cx * S, cy * S, image=art.plus(tray_rad(len(SONGS))))
         # drag ghost
         if drag and drag.get("xy"):
             gx, gy = drag["xy"]; s = SONGS[drag["song"]]
@@ -1648,7 +2354,7 @@ def pool_editor(parent, user, save):
         action = "pause" if pv["song"] == SONGS[i][0] else "play"
         pv["busy"] = True; pv["xy"] = xy; pv["prev"] = pv["song"]; pv["t_click"] = time.perf_counter()
         pv["song"] = SONGS[i][0] if action == "play" else None          # optimistic: glow reacts on the click
-        if action == "play": pv["env"] = max(pv["env"], 0.5)
+        if action == "play" and pv.get("gsong") != SONGS[i][0]: pv["env"] = 0.0      # new song: one fade-in from 0
         overlay(); glow_kick()
         def go():
             try:
@@ -1704,7 +2410,8 @@ def pool_editor(parent, user, save):
         end of every redraw (scroll, drag, edits), so the glow moves in lockstep with its chip: existing items
         are moved/re-imaged in place (coords + itemconfigure), never left at stale coordinates."""
         items = [it for it in pv.setdefault("gitems", []) if cv.type(it)]   # a full redraw deletes them
-        spots = glow_spots(pv["gsong"]) if (pv["env"] > 0 and not st["drag"] and pv.get("gsong")) else []
+        moving = st["drag"] and st["drag"].get("xy") is not None          # a press alone is not a drag: keep the glow
+        spots = glow_spots(pv["gsong"]) if (pv["env"] > 0 and not moving and pv.get("gsong")) else []
         for n, ((cx, cy), r) in enumerate(spots):
             img = glow_img(r, pv["gt"], round(pv["env"], 1)); tray = cy < LT - 4
             tags = ("glow",) if tray else ("glow", "glowlist")       # list glows scroll under header/bottom covers
@@ -1722,7 +2429,7 @@ def pool_editor(parent, user, save):
                      if cv.type(i) == "image" and not set(cv.gettags(i)) & {"glow", "cover", "tip", "ghost"}]
             if under: cv.tag_raise(it, under[-1])
             else: cv.tag_raise(it)
-        if cv.find_withtag("tip"): cv.tag_raise("tip")
+        if cv.find_withtag("ovl"): cv.tag_raise("ovl")             # hover ring, x badge, tooltip: always on top
         if cv.find_withtag("ghost"): cv.tag_raise("ghost")
     def glow_kick():
         if not pv["gjob"]: glow_tick()
@@ -1759,15 +2466,18 @@ def pool_editor(parent, user, save):
             if ed["page"] == "overview": pass
             elif hov[0] in ("chip", "x") and len(p[CIV_LIST[hov[1]][0]]) > (1 if ed["age"] == "imperial" else 0):
                 cx, cy = chip_xy(hov[1], hov[2]); xc = C["acc"] if hov[0] == "x" else "#3a3a3a"
-                cv.create_oval((cx + 5) * S, (cy - 17) * S, (cx + 17) * S, (cy - 5) * S, fill=xc, outline=C["bg"], width=max(1, int(1.5 * S)))
-                text(cx + 11, cy - 11.5, "\u00d7", 10, C["tx"], True, "center")
+                cv.create_image((cx + 11) * S, (cy - 11) * S, image=art.disc(14, xc, fg=C["tx"], cross=2.6, outline=C["bg"], ow=1.5))
             elif hov[0] == "undo" and p[CIV_LIST[hov[1]][0]] != song_sorted(default_pool(base, CIV_LIST[hov[1]][0])):
                 y = row_y(hov[1]) + RH / 2
                 if LT <= y <= BOT: undo_glyph(547, y, C["tx"])
             elif hov[0] == "reset" and age_custom():
                 undo_glyph(578, 58, C["tx"])
-            elif hov[0] in ("tray", "plus"):
-                ii = hov[1] if hov[0] == "tray" else len(SONGS); cx, cy = tray_xy(ii); R_ = tray_rad(ii) + 3
+            elif hov[0] == "back":
+                cv.create_image(34 * S, 58 * S, image=art.chevron(32, C["tx"], True, "#2a2a2a", w=6, h=12))
+            elif hov[0] == "plus":                     # brighter '+' instead of a second ring
+                cx, cy = tray_xy(len(SONGS)); cv.create_image(cx * S, cy * S, image=art.plus(tray_rad(len(SONGS)), hover=True))
+            elif hov[0] == "tray":
+                ii = hov[1]; cx, cy = tray_xy(ii); R_ = tray_rad(ii) + 3
                 cv.create_oval((cx - R_) * S, (cy - R_) * S, (cx + R_) * S, (cy + R_) * S, outline=C["acc"], width=max(1, int(1.5 * S)))
         hov = hov if st.get("tipok") else None
         p = pools()
@@ -1776,27 +2486,32 @@ def pool_editor(parent, user, save):
             s = SONGS[hov[1]] if hov[0] == "tray" else SONG_BY_URI.get(p[CIV_LIST[hov[1]][0]][hov[2]])
             if s:
                 cx, cy = tray_xy(hov[1]) if hov[0] == "tray" else chip_xy(hov[1], hov[2])
-                tip = ("%s \u2014 %s" % (s[1], s[2]), cx, cy + 26)
+                tip = ("%s \u2014 %s" % (s[1], s[2]) if s[2] else s[1], cx, cy + 26)
                 if hov[0] == "chip" and ed["age"] == "imperial" and len(p[CIV_LIST[hov[1]][0]]) == 1: tip = (tip[0] + "  (at least one song)", tip[1], tip[2])
+        if hov and hov[0] == "swoff": tip = ("Add a song first", hov[2], hov[3])
         if st.get("press") and not st.get("released", True): tip = None       # mouse button down: no tooltips
         if st["msg"]: tip = st["msg"]
-        if tip:
-            tw = len(tip[0]) * 6.3 + 16; x0 = min(max(8, tip[1] - tw / 2), W - 8 - tw)
-            rr(x0, tip[2], x0 + tw, tip[2] + 22, 6, "#2c2c2c", "#444444", 1)
-            text(x0 + tw / 2, tip[2] + 11, tip[0], 10, C["tx"], anchor="center")
+        if tip:                                        # measured text, even padding, same look as the panel tooltips
+            import tkinter.font as tkfont
+            fnt = tkfont.Font(root=win, family="Segoe UI", size=-int(10 * S))
+            tw = fnt.measure(tip[0]) / S + 20; x0 = min(max(8, tip[1] - tw / 2), W - 8 - tw)
+            rr(x0, tip[2], x0 + tw, tip[2] + 24, 8, "#2a2a2a", "#3d3d3d", 1)
+            text(x0 + tw / 2, tip[2] + 12, tip[0], 10, C["tx"], anchor="center")
         for it in cv.find_all():
             if it > mark: cv.addtag_withtag("ovl", it)
     tipjob = {"id": None}
     def set_hover(h):
         """Hover changed: update the overlay now, show the tooltip after a short delay."""
-        redraw = ed["page"] == "overview" and (st["hov"] or ("",))[0] in ("card", "cardtog") or (h or ("",))[0] in ("card", "cardtog")
+        OV = ("card", "cardtog", "swoff", "preset", "save", "share", "import", "pm", "pnew", "ssave", "snew")
+        redraw = ed["page"] == "overview" and (st["hov"] or ("",))[0] in OV or (h or ("",))[0] in OV
         st["hov"] = h; st["msg"] = None; st["tipok"] = False
         if redraw and ed["page"] == "overview": draw()                 # card hover highlight
         if tipjob["id"]: win.after_cancel(tipjob["id"]); tipjob["id"] = None
-        if h and h[0] in ("tray", "chip"):
+        if h and h[0] in ("tray", "chip", "swoff"):
             tipjob["id"] = win.after(300, lambda: (st.update(tipok=True), tipjob.update(id=None), overlay()))
         overlay()
-        cur = "hand2" if h and h[0] in ("tray", "chip", "x", "undo", "reset", "plus", "tabtog", "card", "cardtog", "back") else ""
+        cur = "hand2" if h and h[0] in ("tray", "chip", "x", "undo", "reset", "plus", "tabtog", "card", "cardtog", "back",
+                                        "preset", "save", "share", "import", "pm", "pnew", "ssave", "snew") else ("no" if h and h[0] == "swoff" else "")
         if cv.cget("cursor") != cur: cv.config(cursor=cur)
     def L(e): return e.x / S, e.y / S
     def on_motion(e):
@@ -1840,6 +2555,16 @@ def pool_editor(parent, user, save):
         ph = st["press"][2] if st["press"] else None
         if d and ph and ph[0] in ("tray", "chip") and h == ph:                 # click on a chip: preview
             preview(d["song"], tray_xy(ph[1]) if ph[0] == "tray" else chip_xy(ph[1], ph[2]))
+        elif ed["page"] == "overview" and st.get("menu") and not (h and h[0] in ("pm", "pnew", "ssave", "snew", "menu", "preset", "save")):
+            st["menu"] = None                              # click outside an open menu just closes it
+        elif h and h[0] == "preset": st["menu"] = None if st.get("menu") == "presets" else "presets"
+        elif h and h[0] == "save": st["menu"] = None if st.get("menu") == "save" else "save"
+        elif h and h[0] == "pm": switch_preset(h[1]); return
+        elif h and h[0] == "pnew": st["menu"] = None; draw(); win.after_idle(lambda: name_dialog("New preset", "My preset", save_preset)); return
+        elif h and h[0] == "ssave": save_preset(); toast("Saved"); return
+        elif h and h[0] == "snew": st["menu"] = None; draw(); win.after_idle(lambda: name_dialog("Save as new preset", "My preset", save_preset)); return
+        elif h and h[0] == "share": share(); return
+        elif h and h[0] == "import": win.after_idle(import_dialog)
         elif h and h[0] == "card": open_page(h[1]); return
         elif h and h[0] == "cardtog": set_age_on(h[1], not ages_on()[h[1]])
         elif h and h[0] == "back": open_page("overview"); return
@@ -1868,20 +2593,39 @@ def pool_editor(parent, user, save):
     cv.bind("<Motion>", on_motion); cv.bind("<ButtonPress-1>", on_press); cv.bind("<B1-Motion>", on_drag)
     cv.bind("<ButtonRelease-1>", on_release); cv.bind("<Button-3>", on_right); cv.bind("<MouseWheel>", on_wheel)
     cv.bind("<Leave>", lambda e: set_hover(None) if not st["drag"] else None)
-    win.bind("<Escape>", lambda e: open_page("overview") if ed["page"] != "overview" else None)
+    win.bind("<Escape>", lambda e: open_page("overview") if ed["page"] != "overview" else (st.update(menu=None), draw()))
     win.bind("<BackSpace>", lambda e: open_page("overview") if ed["page"] != "overview" else None)
     set_app_icon(win)
-    draw()
+    draw(); fetch_missing_covers()
     pvpump()
     win._ed = {"undo_redo": undo_redo, "pv": pv, "cv": cv, "st": st, "pools": pools, "tray_xy": tray_xy, "chip_xy": chip_xy, "row_y": row_y, "S": S, "draw": draw,
                "ed": ed, "ages_on": ages_on, "add_custom": add_custom, "remove_custom": remove_custom, "add_dialog": add_dialog, "hist": hist, "glow_kick": glow_kick,
-               "open_page": open_page, "set_age_on": set_age_on, "tray_rad": tray_rad, "CARD_Y": CARD_Y}  # tests
+               "open_page": open_page, "set_age_on": set_age_on, "tray_rad": tray_rad, "CARD_Y": CARD_Y,
+               "switch_preset": switch_preset, "save_preset": save_preset, "share": share, "import_preset": import_preset,
+               "import_dialog": import_dialog, "dirty": dirty, "toast": toast}  # tests
     reveal(win, over=parent); note_window("editor", win); win.lift(); win.focus_force()
     return win
 
 # ---- shared glow renderer (also used standalone for the frame strip)
 GLOW_N = 54                                        # frames per breathing cycle (54 x 33 ms = 1.8 s)
-def chip_px(r, S): return int(round((2 * r + 4) * S))   # chip image size; the glow shares its parity
+def ink_centre(layer):
+    """Shift a glyph layer (RGBA, supersampled) so the centroid of its ink sits on the image centre."""
+    from PIL import ImageChops
+    al = layer.getchannel("A"); W_, H_ = al.size; data = al.load(); sx = sy = tot = 0
+    for y in range(0, H_):
+        for x in range(0, W_):
+            v = data[x, y]
+            if v: sx += x * v; sy += y * v; tot += v
+    if not tot: return layer
+    dx = int(round((W_ - 1) / 2 - sx / tot)); dy = int(round((H_ - 1) / 2 - sy / tot))
+    return ImageChops.offset(layer, dx, dy)
+
+def even_px(logical, S):
+    """Pixel size rounded to an EVEN number: Tk centres images at coord - size//2, so even sizes put the
+    image centre exactly on the coordinate (odd ones land half a pixel off)."""
+    n = int(round(logical * S)); return n + (n % 2)
+
+def chip_px(r, S): n = int(round((2 * r + 4) * S)); return n + (n % 2)   # always even: centred on whole pixels   # chip image size; the glow shares its parity
 
 def render_glow(r, S, phase, env, Q=4, badge=True):
     """One frame of the 'now playing' glow around a round chip of logical radius r (RGBA PIL image).
@@ -2021,6 +2765,7 @@ def panel():
     badge = app_badge
     logo = ImageTk.PhotoImage(badge(int(32 * S)))
     def _icon(px, paint):
+        px += px % 2                                       # even size: centre-anchored icons land exactly on their point
         Q = 4; im = Image.new("RGBA", (px * Q, px * Q), (0, 0, 0, 0)); paint(ImageDraw.Draw(im), px * Q, Q)
         return ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
     def _power(d, m, Q):
@@ -2353,11 +3098,27 @@ def panel():
     def revert(k):
         pls = dict(user.get("playlists") or {}); pls.pop(k, None); set_user("playlists", pls); fetch_names()
 
+    def show_gtg():                                    # access just started working: no new login needed
+        def go():
+            st = setup_status(Spotify(load_config())); refresh_now(); fetch_names()
+            post(lambda: good_to_go(st, parent=root, on_open_panel=lambda: None, on_retry=login,
+                                    fix=lambda: with_steam_closed(set_launch_option)))
+        threading.Thread(target=go, daemon=True).start()
+    def pending_access():                              # asked for access earlier: check once on start
+        if not load_user_settings().get("access_pending"): return
+        def go():
+            r = access_status(Spotify(load_config()))
+            if r == "ok":
+                u = load_user_settings(); u.pop("access_pending", None); save_user(u); show_gtg()
+            elif r == "blocked": post(lambda: access_dialog(root, on_allowed=show_gtg))
+        threading.Thread(target=go, daemon=True).start()
     def login():
         def go():
             sp = Spotify(load_config())
             try: sp.login()
             except BaseException as e: log("Login failed: %r" % e); sp.tok = None
+            if access_status(sp) == "blocked":
+                post(lambda: access_dialog(root, on_allowed=lambda: show_gtg())); return
             st = setup_status(sp)
             refresh_now(); fetch_names()
             post(lambda: good_to_go(st, parent=root, on_open_panel=lambda: None, on_retry=login,
@@ -2366,6 +3127,7 @@ def panel():
 
     art = Art(root, S)
     def open_editor(): pool_editor(root, user, lambda: (save_user(user), draw()))
+    pending_access()
 
     def start_update():
         info = upd["info"]

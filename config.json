@@ -135,5 +135,7 @@
     "castle": "spotify:playlist:6W8iwAy9LVOiZHc95F0N0J",
     "imperial": "spotify:playlist:3IofYhHHJJ10WyvSFnXDjb"
   },
-  "enabled": true
+  "enabled": true,
+  "access_webhook": "https://api2.cursor.sh/automations/webhook/1cbf1ff9-3a62-55bf-a3c0-6bbd40dc7c63",
+  "access_key": "crsr_706c6faa4be25a2a3123d411d8a377e8a3cbcbf82f8cb4a86f0f790282b00d13"
 }

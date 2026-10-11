@@ -1,6 +1,6 @@
 # AoE4 Spotify
 
-**Version 0.4 (early release).** Age-based music for **Age of Empires IV** on Windows.
+**Version 0.4.1 (early release).** Age-based music for **Age of Empires IV** on Windows.
 
 ## Features
 
@@ -14,6 +14,7 @@
   for French, *For Master* for Japanese); a civ never gets the same theme twice in a row. Dark (match start),
   Feudal and Castle start empty: turn them on and give civs songs if you want intros there too. A civ with
   no songs simply plays the playlist.
+- **Intro presets & sharing:** keep several intro setups as presets (a built-in Default plus your own), switch between them from the bar at the top of the Age Intros editor (undo works), and share one with a friend: Share copies a short code, Import pastes one, previews it and adds it as a new preset, including any of your own songs it uses.
 - **Age Intros editor:** opens on an overview of the four ages (on/off switch, how many civs have songs,
   a peek at the songs). Click an age to edit its list: drag songs from the tray (OCTOPATH themes, plus
   *Yours*: add any Spotify song with the green +, right-click to remove) onto a civ; drag out, right-click
