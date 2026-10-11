@@ -1,6 +1,6 @@
 ; Inno Setup script for AoE4 Spotify. Build: ISCC.exe setup.iss (after building the dist\AoE4 Spotify\ folder)
 #ifndef AppVer
-#define AppVer "0.3.2"
+#define AppVer "0.4.0"
 #endif
 #ifdef TEST
 ; test build (ISCC /DTEST): separate AppId/name/folder so it never touches a real install
@@ -49,23 +49,24 @@ Source: "make_editor_assets.py"; DestDir: "{app}\source"
 Source: "assets\app.ico"; DestDir: "{app}\source\assets"
 
 [Icons]
-; control panel (settings window)
-Name: "{userdesktop}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\assets\app.ico"
-Name: "{userprograms}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\assets\app.ico"
+; the app window (settings)
+Name: "{userdesktop}\{#AppName}"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\assets\app.ico"
+Name: "{userprograms}\{#AppName}"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\assets\app.ico"
 
 [InstallDelete]
 ; app is a PyInstaller folder build (exe + _internal); drop stale libraries from an older build first
 Type: filesandordirs; Name: "{app}\_internal"
 ; older versions used a Windows Startup shortcut
 Type: files; Name: "{userstartup}\{#AppName}.lnk"
-; 0.1/0.2 shortcuts were called just "AoE4 Spotify"
-Type: files; Name: "{userdesktop}\{#AppName}.lnk"
+; 0.2-0.3.2 shortcuts were called "AoE4 Spotify Control Panel"
+Type: files; Name: "{userdesktop}\{#AppName} Control Panel.lnk"
+Type: files; Name: "{userprograms}\{#AppName} Control Panel.lnk"
 Type: files; Name: "{userprograms}\{#AppName}.lnk"
 
 [Run]
 ; no arguments = Spotify login only, then it exits
 Filename: "{app}\AoE4 Spotify.exe"; WorkingDir: "{app}"; Description: "Log in to Spotify now"; Flags: postinstall nowait skipifsilent
-; in-app update (silent, /RELAUNCH=1): reopen the Control Panel, which shows "Updated to x.y"
+; in-app update (silent, /RELAUNCH=1): reopen the app window, which shows "Updated to x.y"
 Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel --updated"; WorkingDir: "{app}"; Flags: nowait; Check: Relaunch
 
 [UninstallDelete]
@@ -73,6 +74,8 @@ Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel --updated"; WorkingDir:
 Type: filesandordirs; Name: "{userappdata}\AoE4Spotify"
 #endif
 Type: files; Name: "{app}\launch_option_backup.json"
+Type: filesandordirs; Name: "{app}\source"
+Type: dirifempty; Name: "{app}"
 
 [Code]
 { Steam rewrites localconfig.vdf while running, so Steam is closed (gracefully) before we edit
@@ -217,10 +220,22 @@ begin
   end;
 end;
 
+{ One click to uninstall: our own confirm (mentions Steam), then the uninstaller re-runs itself silently,
+  so there is no second "Are you sure" box, no Steam prompt and no "successfully removed" box. }
 function InitializeUninstall(): Boolean;
+var R: Integer; Msg: String;
 begin
+  Result := False;
+  if not UninstallSilent() then begin
+    Msg := 'Removes the app, its shortcuts and settings, and puts the game''s launch options and music volume back.';
+    if ProcRunning(SteamProc()) then Msg := Msg + #13#10#13#10 + 'Steam will close for a moment and reopen by itself.';
+    if TaskDialogMsgBox('Uninstall AoE4 Spotify?', Msg, mbConfirmation, MB_OKCANCEL, ['Uninstall', 'Cancel'], 0) <> IDOK then Exit;
+    { start the silent run ~1 s later, after this one has let go of unins000.dat }
+    Exec(ExpandConstant('{cmd}'), '/c ping -n 2 127.0.0.1 >nul & start "" "' + ExpandConstant('{app}\unins000.exe') + '" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE, ewNoWait, R);
+    Exit;                                              { this (interactive) run ends here; the silent run does the work }
+  end;
   KillApp();
-  Result := CloseSteam();
+  Result := CloseSteam();                              { silent: closes Steam without asking }
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

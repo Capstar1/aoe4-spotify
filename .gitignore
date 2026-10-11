@@ -8,3 +8,5 @@ out/
 __pycache__/
 .venv/
 launch_option_backup.json
+portrait_src/
+portraits_candidates/

@@ -1,6 +1,6 @@
 # AoE4 Spotify
 
-**Version 0.3 (early release).** Age-based music for **Age of Empires IV** on Windows.
+**Version 0.4 (early release).** Age-based music for **Age of Empires IV** on Windows.
 
 ## Features
 
@@ -9,17 +9,19 @@
   so other players' age-ups don't count).
 - **Fade:** switches fade out and back in smoothly (0-5 s, default 2 s, 0 = off).
 - **Shuffle / repeat:** each playlist starts on a random track, shuffles, and loops.
-- **Age Intros:** when you reach Imperial Age, one civ-themed theme from the OCTOPATH TRAVELER
-  soundtrack plays first (one of the 8 *For ...* themes, e.g. *For Light* for French, *For Master* for
-  Japanese), then your Imperial playlist continues. A civ never gets the same theme twice in a row.
-- **Age Intros editor:** a tier-list style editor (opened from the Age Intros row in the Control Panel) with a tab and on/off switch per age (Dark = match start, Feudal, Castle, Imperial; only Imperial is on by default). Add your own Spotify songs with the + chip (right-click to remove). Ctrl+Z / Ctrl+Y undo and redo.
-  Every tab with every civ's flag. Drag character chips from the tray onto a civ to add a theme;
-  drag out, right-click or click x to remove (every civ keeps at least one). Undo per civ or Reset all.
-  Click a chip to hear that theme on Spotify (a green pulse marks it; click again to pause).
-  Changes apply from the next match.
-- **Control Panel** (Desktop / Start Menu shortcut *AoE4 Spotify Control Panel*): on/off switch,
-  Spotify chip (click to log in) and game status, change or revert each age's playlist (each row shows the playlist's cover; click it to open the playlist in Spotify), Imperial Age
-  Intro toggle and editor, fade slider. The gear menu has *Open log* and *Uninstall*. Settings are saved
+- **Age Intros:** when you enter an age, a short civ-themed intro can play before that age's playlist.
+  Imperial is on by default with one of the 8 OCTOPATH TRAVELER *For ...* themes per civ (e.g. *For Light*
+  for French, *For Master* for Japanese); a civ never gets the same theme twice in a row. Dark (match start),
+  Feudal and Castle start empty: turn them on and give civs songs if you want intros there too. A civ with
+  no songs simply plays the playlist.
+- **Age Intros editor:** opens on an overview of the four ages (on/off switch, how many civs have songs,
+  a peek at the songs). Click an age to edit its list: drag songs from the tray (OCTOPATH themes, plus
+  *Yours*: add any Spotify song with the green +, right-click to remove) onto a civ; drag out, right-click
+  or click x to remove. Every civ shows its flag. Click a chip to hear the song (a soft green glow marks it;
+  click again to pause). Ctrl+Z / Ctrl+Y undo and redo across all ages. Changes apply from the next match.
+- **App window** (Desktop / Start Menu shortcut *AoE4 Spotify*): on/off switch,
+  Spotify chip (click to log in) and game status, change or revert each age's playlist (each row shows the playlist's cover; click it to open the playlist in Spotify), Age Intros
+  row (opens the editor), fade slider. The gear menu has *Open log* and *Uninstall*. Settings are saved
   in `%APPDATA%\AoE4Spotify\config.json`.
 - **One-click updates:** when a newer release exists, the gear gets a green dot and a green
   *Update x.y* pill appears in the header. One click downloads the Setup (size and checksum verified),
@@ -51,9 +53,9 @@
    (Upgrades skip this when the launch option is already set.)
 4. At the end your browser opens Spotify: log in and click Agree.
 
-Then start AoE4 from Steam as usual. Later versions can be installed from the Control Panel's Update pill.
+Then start AoE4 from Steam as usual. Later versions can be installed from the app's Update pill.
 
-Uninstall from the Control Panel's gear menu or *Settings -> Apps -> Installed apps*. Steam is closed and
+Uninstall from the app's gear menu or *Settings -> Apps -> Installed apps*. Steam is closed and
 reopened the same way, and your original launch options are restored.
 
 ## How it works
@@ -72,8 +74,8 @@ reopened the same way, and your original launch options are restored.
 (`dark`, `feudal`, `castle`, `imperial` as `spotify:playlist:...` URIs), `fade_seconds`, `shuffle`,
 `repeat`, optional `device_id` / `log_path`, and `boss_intro` (the Age Intros): `enabled`,
 `ages` (default `["imperial"]`), `pools` (internal civ id -> list of `spotify:track:` URIs) and
-`default` (for civs not listed). The Control Panel and editor settings are layered on top
-(`%APPDATA%\AoE4Spotify\config.json`, editor pools as `boss_pools`) and never change this file.
+`default` (for civs not listed). The app and editor settings are layered on top
+(`%APPDATA%\AoE4Spotify\config.json`, editor lists per age as `intro_pools`) and never change this file.
 
 ## Build from source
 

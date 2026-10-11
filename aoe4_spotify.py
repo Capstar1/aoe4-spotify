@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
 def child_env():
@@ -83,20 +83,37 @@ def apply_user(cfg, u):
     return cfg
 
 INTRO_AGES = ("dark", "feudal", "castle", "imperial")
-def user_intro_pools(u):
-    """Per-age civ pools edited in the Age Intros editor; migrates the 0.3.x Imperial-only "boss_pools"."""
+def user_intro_pools(u, base_pools=None):
+    """Per-age civ pools edited in the Age Intros editor; migrates the 0.3.x Imperial-only "boss_pools".
+    Semantics (v2): Imperial = defaults + your changes; Dark/Feudal/Castle = only what you put there
+    (a civ with no songs has no intro). Before v2 the other ages were copies of the Imperial defaults:
+    civ lists that are just those defaults are dropped (blank), genuine edits are kept."""
     ip = u.get("intro_pools") if isinstance(u.get("intro_pools"), dict) else {}
     if isinstance(u.get("boss_pools"), dict) and "imperial" not in ip: ip = {**ip, "imperial": u["boss_pools"]}
+    if not u.get("intro_v2") and base_pools is not None:
+        ip = dict(ip)
+        for age in ("dark", "feudal", "castle"):
+            if isinstance(ip.get(age), dict):
+                ip[age] = {c: l for c, l in ip[age].items() if isinstance(l, list) and l and sorted(l) != sorted(base_pools.get(c) or base_pools.get("__default__") or [])}
+                if not ip[age]: ip.pop(age)
     return ip
+
+def migrate_intros_v2(u, base_pools):
+    """One-time in-place migration of the user settings to the v2 per-age semantics. True if changed."""
+    if u.get("intro_v2"): return False
+    ip = user_intro_pools(u, base_pools); u.pop("boss_pools", None)
+    if ip: u["intro_pools"] = ip
+    else: u.pop("intro_pools", None)
+    u["intro_v2"] = True; return True
 
 def build_intros(cfg, u):
     """{age: {"enabled": bool, "pools": {civ: [track uris]}}}. Every age starts from the default pools;
     only the ages listed in boss_intro.ages (default Imperial) are on until you switch others on."""
     b = cfg.setdefault("boss_intro", {}); base_pools = dict(b.get("pools") or {})
     ages_on = b.get("ages") or ["imperial"]; ia = u.get("intro_ages") if isinstance(u.get("intro_ages"), dict) else {}
-    ip = user_intro_pools(u); out = {}
+    ip = user_intro_pools(u, {**base_pools, "__default__": b.get("default") or []}); out = {}
     for age in INTRO_AGES:
-        pools = dict(base_pools)
+        pools = dict(base_pools) if age == "imperial" else {}           # other ages start blank
         for civ, lst in (ip.get(age) or {}).items():
             if isinstance(lst, list) and lst and all(isinstance(x, str) and x.startswith("spotify:track:") for x in lst):
                 pools[civ] = list(lst)
@@ -219,22 +236,33 @@ class Spotify:
 
     def _api(self, method, path, body=None, _retry=True):
         """Call the Spotify Web API. Never raises: returns (status, body); status 0 = offline/not logged in."""
+        import http.client, threading
+        if not hasattr(self, "_klock"): self._klock = threading.Lock(); self._kconn = None
         try:
-            req = urllib.request.Request("https://api.spotify.com/v1" + path, method=method,
-                data=json.dumps(body).encode() if body is not None else None,
-                headers={"Authorization": "Bearer " + self.access(), "Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                raw = r.read()
-                try: return r.status, (json.loads(raw) if raw else None)
-                except ValueError: return r.status, None
-        except urllib.error.HTTPError as e:
-            if e.code == 401 and _retry and self.tok:          # access token rejected: refresh once
+            data = json.dumps(body).encode() if body is not None else None
+            hdr = {"Authorization": "Bearer " + self.access(), "Content-Type": "application/json"}
+            if data is None and method in ("PUT", "POST"): hdr["Content-Length"] = "0"
+            with self._klock:                                  # one persistent connection, reused (keep-alive)
+                for attempt in (0, 1):
+                    if self._kconn is None: self._kconn = http.client.HTTPSConnection("api.spotify.com", timeout=15)
+                    try:
+                        self._kconn.request(method, "/v1" + path, body=data, headers=hdr)
+                        r = self._kconn.getresponse(); raw = r.read(); status = r.status; break
+                    except (http.client.HTTPException, ConnectionError, OSError):
+                        try: self._kconn.close()
+                        except Exception: pass
+                        self._kconn = None                     # stale keep-alive socket: reconnect once
+                        if attempt: raise
+            if status == 401 and _retry and self.tok:          # access token rejected: refresh once
                 self.tok["expires_at"] = 0
                 return self._api(method, path, body, False)
+            try: return status, (json.loads(raw) if raw else None)
+            except ValueError: return status, (raw.decode(errors="replace") if status >= 400 else None)
+        except urllib.error.HTTPError as e:                    # token refresh failed (raised by access())
             raw = e.read()
             try: return e.code, json.loads(raw)
             except Exception: return e.code, raw.decode(errors="replace")
-        except (urllib.error.URLError, OSError) as e:
+        except (urllib.error.URLError, OSError, __import__("http.client").client.HTTPException) as e:
             log("Spotify unreachable (offline?): %s" % getattr(e, "reason", e)); return 0, None
         except BaseException as e:
             log("Spotify request failed: %r" % e); return 0, None
@@ -288,6 +316,18 @@ class Spotify:
         if code not in (200, 202, 204):
             log("Spotify error %s: %s" % (code, body)); return False
         return True
+
+    def warm(self):
+        """Editor warm-up on a worker thread: token + keep-alive connection + this PC's device id, so a
+        preview click is a single PUT. Never starts Spotify."""
+        try:
+            c, d = self._api("GET", "/me/player/devices")
+            devs = (d or {}).get("devices", []) if c == 200 and isinstance(d, dict) else []
+            comp = [x for x in devs if (x.get("type") or "").lower() == "computer"]
+            me = os.environ.get("COMPUTERNAME", "").lower()
+            comp.sort(key=lambda x: (x.get("name", "").lower() != me, not x.get("is_active")))
+            if comp and not self.device_id: self.device_id = comp[0]["id"]
+        except Exception as e: log("Preview warm-up: %r" % e)
 
     def preview(self, track):
         """Play one track right now (editor preview, no fade). Starts Spotify / picks this PC like the switcher."""
@@ -484,7 +524,9 @@ def intro_of(cfg, age):
 
 def pick_boss_track(cfg, civ, age="imperial"):
     b = cfg.get("boss_intro") or {}
-    pool = [u for u in (intro_of(cfg, age)["pools"].get(civ) or b.get("default") or []) if u.startswith("spotify:track:")]
+    pools = intro_of(cfg, age)["pools"]
+    fallback = (b.get("default") or []) if age == "imperial" else []    # other ages: empty civ = no intro
+    pool = [u for u in (pools.get(civ) or fallback) if u.startswith("spotify:track:")]
     if not pool: return None
     try: state = json.load(open(BOSS_STATE, encoding="utf-8"))
     except Exception: state = {}
@@ -494,6 +536,11 @@ def pick_boss_track(cfg, civ, age="imperial"):
     try: json.dump(state, open(BOSS_STATE, "w", encoding="utf-8"), indent=1)
     except Exception as e: log("Could not save boss state: %r" % e)
     return uri
+
+def choose_intro(cfg, age, civ):
+    """The intro track to play when entering `age` as `civ`, or None (intro off, or that civ has no songs
+    in this age): then the switcher just plays the age playlist."""
+    return pick_boss_track(cfg, civ, age) if civ and boss_age(cfg, age) else None
 
 def boss_age(cfg, key):
     b = cfg.get("boss_intro") or {}
@@ -901,7 +948,14 @@ def good_to_go(status, parent=None, on_open_panel=None, on_retry=None, fix=None)
         text((x0 + x1) / 2, (y0 + y1) / 2, label, 12, "#121212" if primary else C["tx"], True, "center", tag)
         actions[tag] = fn
         cv.tag_bind(tag, "<Button-1>", lambda e, t=tag: win.after_idle(actions[t]))
-        cv.tag_bind(tag, "<Enter>", lambda e: cv.config(cursor="hand2")); cv.tag_bind(tag, "<Leave>", lambda e: cv.config(cursor=""))
+        if not getattr(cv, "_ptr", False):
+            cv._ptr = True
+            def ptr(e):
+                tags = set()
+                for it in cv.find_overlapping(e.x, e.y, e.x, e.y): tags.update(cv.gettags(it))
+                c_ = "hand2" if any(t in actions for t in tags) else ""
+                if cv.cget("cursor") != c_: cv.config(cursor=c_)
+            cv.bind("<Motion>", ptr, add="+"); cv.bind("<Leave>", lambda e: cv.cget("cursor") and cv.config(cursor=""), add="+")
     def close():
         try: win.destroy()
         except tk.TclError: pass
@@ -1133,7 +1187,7 @@ def main():
     music_sync(cfg.get("enabled", True))           # game reads its music volume at launch
     subprocess.Popen(args, env=child_env(), cwd=game_dir)
     log("Started game: %s" % " ".join(args))
-    if not cfg.get("enabled", True): log("Disabled in the control panel - game started, doing nothing else"); return
+    if not cfg.get("enabled", True): log("Disabled in the app - game started, doing nothing else"); return
     if not single_instance(): log("Another switcher is already running - exiting"); return
     if not sp.tok: sp.login()
     t0 = time.time()
@@ -1147,7 +1201,7 @@ def main():
         if not uri.startswith("spotify:") or "PASTE" in uri: log("No playlist set for %s" % k); return
         fade = float(cfg.get("fade_seconds", 2))
         cur = load_config()                                                   # editor changes apply right away
-        track = pick_boss_track(cur, civ, k) if civ and boss_age(cur, k) else None
+        track = choose_intro(cur, k, civ)
         if track:
             log("%s intro for %s: %s" % (k.capitalize(), civ, track))
             threading.Thread(target=sp.boss_then, args=(track, uri, fade), daemon=True).start()
@@ -1234,6 +1288,19 @@ def load_custom_songs(u):
     SONGS[:] = BUILTIN_SONGS + [(custom_key(c["uri"]), c.get("name") or "Song", c.get("artist") or "", c["uri"], "#1DB954")
                                 for c in (u.get("custom_songs") or []) if isinstance(c, dict) and str(c.get("uri", "")).startswith("spotify:track:")]
     SONG_BY_URI.clear(); SONG_BY_URI.update({s[3]: s for s in SONGS})
+def song_sorted(lst):
+    """One canonical chip order everywhere: tray order (built-ins, then your songs in add order); unknowns last."""
+    idx = {x[3]: i for i, x in enumerate(SONGS)}; lst = list(dict.fromkeys(lst or []))
+    return sorted(lst, key=lambda u: (idx.get(u, len(idx)), lst.index(u)))
+def normalize_pools(u):
+    """Sort every stored intro pool canonically (returns True if anything changed)."""
+    ip = u.get("intro_pools"); ch = False
+    if isinstance(ip, dict):
+        for age in ip.values():
+            if isinstance(age, dict):
+                for civ, lst in age.items():
+                    if isinstance(lst, list) and song_sorted(lst) != lst: age[civ] = song_sorted(lst); ch = True
+    return ch
 def track_cover(uri): return os.path.join(COVERS, "track_%s.jpg" % uri.split(":")[-1])
 def fetch_track(sp, uri, need=96):
     """(name, artist) of a Spotify track; caches its album cover for the chip. None if not found."""
@@ -1265,10 +1332,10 @@ class Art:
         if k in self.cache: return self.cache[k]
         from PIL import Image, ImageDraw, ImageTk
         song = next((s for s in SONGS if s[0] == key), ("plus", "", "", "", "#3a3a3a"))
-        D = int(round((2 * r + 4) * self.S)); Q = 4; big = D * Q
+        D = chip_px(r, self.S); Q = 4; big = D * Q
         im = Image.new("RGBA", (big, big), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
-        d.ellipse([0, 0, big - 1, big - 1], fill=song[4])
-        inner = big - int(4 * self.S * Q)
+        d.ellipse([0, 0, big - 1, big - 1], fill=song[4])          # PIL boxes are inclusive: 0..big-1 is centred
+        inner = big - 2 * int(round(2 * self.S * Q))                     # even margin: portrait exactly centred
         src = track_cover(song[3]) if key.startswith("c_") else os.path.join(ASSETS, "assets", "portraits", key + ".jpg")
         try: p = Image.open(src).convert("RGB").resize((inner, inner), Image.LANCZOS)
         except Exception:
@@ -1306,7 +1373,8 @@ def pool_editor(parent, user, save):
     win = tk.Toplevel(parent); dark_window(win, C["bg"]); win.title("Age Intros"); win.resizable(False, False)
     win.bind("<Destroy>", lambda e: release_window("editor") if e.widget is win else None, add="+")
     S = win.winfo_fpixels("1i") / 96.0
-    W, H, LT, RH, GAP = 600, 720, 178, 42, 4
+    W, H, LT, RH, GAP = 600, 720, 196, 40, 4
+    CR = 14                                            # civ-row chip radius
     BOT = H - 12; STEP = RH + GAP
     cv = tk.Canvas(win, width=int(W * S), height=int(H * S), bg=C["bg"], highlightthickness=0); cv.pack()
     art = Art(win, S)
@@ -1334,22 +1402,34 @@ def pool_editor(parent, user, save):
             imgs[k] = ImageTk.PhotoImage(im.resize((Z, Z), Image.LANCZOS), master=win)
         cv.create_image(cx * S, cy * S, image=imgs[k])
     base = load_config(user=False)
-    if isinstance(user.get("boss_pools"), dict):                      # migrate 0.3.x Imperial-only pools
-        user["intro_pools"] = user_intro_pools(user); user.pop("boss_pools", None); save()
+    _bi = base.get("boss_intro") or {}
+    if migrate_intros_v2(user, {**(_bi.get("pools") or {}), "__default__": _bi.get("default") or []}): save()   # v2 per-age lists
     load_custom_songs(user)
-    ed = {"age": "imperial"}
+    if normalize_pools(user): save()                                   # same songs -> same chip order
+    ed = {"age": "imperial", "page": "overview"}            # page: "overview" or the age being edited
     def ages_on(): return {a_: build_intros(base, user)[a_]["enabled"] for a_ in INTRO_AGES}
-    def pools():
-        bp = (user.get("intro_pools") or {}).get(ed["age"]) or {}
-        return {c: list(bp.get(c) or default_pool(base, c)) for c, _ in CIV_LIST}
+    def pools(age=None):
+        age = age or ed["age"]; bp = (user.get("intro_pools") or {}).get(age) or {}
+        if age == "imperial": return {c: song_sorted(bp.get(c) or default_pool(base, c)) for c, _ in CIV_LIST}
+        return {c: song_sorted(bp.get(c) or []) for c, _ in CIV_LIST}          # other ages: blank unless you add songs
+    def row_default(civ): return default_pool(base, civ) if ed["age"] == "imperial" else []
+    def age_custom(age=None):                          # anything to reset on this age?
+        age = age or ed["age"]; return bool((user.get("intro_pools") or {}).get(age))
     st = {"sc": 0, "hov": None, "drag": None, "ghost": None, "drop": None, "press": None, "msg": None}
     max_sc = lambda: max(0, len(CIV_LIST) * STEP - GAP - (BOT - LT))
     def row_y(i): return LT + i * STEP - st["sc"]
-    def tray_sp(): return min(70.0, 490.0 / max(1, len(SONGS)))      # spacing shrinks as you add songs
-    def tray_r(): return 20 if tray_sp() >= 48 else max(11, tray_sp() * 0.42)
-    def tray_xy(i): return 55 + i * tray_sp(), 110
-    def chip_xy(i, j): return 200 + j * 42, row_y(i) + RH / 2
-    def _bp(p): return {c: list(v) for c, v in p.items() if v != default_pool(base, c)}
+    NB = len(BUILTIN_SONGS)
+    def _ysp():
+        m = len(SONGS) - NB; return min(50.0, 100.0 / max(1, m))
+    def tray_xy(i):                                    # OCTOPATH group | divider | YOURS group (+ the '+' chip)
+        if i < NB: return 53 + i * 48, 137
+        return 459 + (i - NB) * _ysp(), 137
+    def tray_rad(i): return 19 if i < NB else max(9.0, min(19.0, _ysp() * 0.45))
+    def tray_r(): return 19
+    def chip_xy(i, j): return 205 + j * 34, row_y(i) + RH / 2
+    def _bp(p):
+        if ed["age"] != "imperial": return {c: song_sorted(v) for c, v in p.items() if v}
+        return {c: song_sorted(v) for c, v in p.items() if song_sorted(v) != song_sorted(default_pool(base, c))}
     def snap():                                         # everything the editor can change (all ages)
         return json.loads(json.dumps({k: user.get(k) for k in ("intro_pools", "intro_ages", "custom_songs")}))
     hist = {"cur": snap(), "undo": [], "redo": []}     # Ctrl+Z / Ctrl+Y history for this editor session (all tabs)
@@ -1357,7 +1437,7 @@ def pool_editor(parent, user, save):
         for k, v in sn.items():
             if v: user[k] = json.loads(json.dumps(v))
             else: user.pop(k, None)
-        load_custom_songs(user); save()
+        load_custom_songs(user); normalize_pools(user); save()
     def record():
         sn = snap()
         if sn != hist["cur"]:
@@ -1389,12 +1469,16 @@ def pool_editor(parent, user, save):
         if not src or st["drag"]: return "break"
         dst.append(hist["cur"]); hist["cur"] = src.pop(); _apply(hist["cur"]); st["msg"] = None; draw()
         return "break"
-    TAB_X = lambda n: 176 + n * 90
-    def tab_hit(x, y):
-        if 40 <= y <= 66:
-            for n, a_ in enumerate(INTRO_AGES):
-                if TAB_X(n) <= x <= TAB_X(n) + 86: return ("tabtog", a_) if x <= TAB_X(n) + 32 else ("tab", a_)
-        return None
+    def open_page(page):
+        ed["page"] = page
+        if page != "overview": ed["age"] = page
+        st["sc"] = 0; st["hov"] = None; draw()
+        try:                                           # re-evaluate hover/cursor for the new page right away
+            px, py = cv.winfo_pointerx() - cv.winfo_rootx(), cv.winfo_pointery() - cv.winfo_rooty()
+            h = hit(px / S, py / S) if 0 <= px < cv.winfo_width() and 0 <= py < cv.winfo_height() else None
+        except Exception: h = None
+        set_hover(h)
+    CARD_Y = lambda k: 96 + k * 142
     def add_dialog():
         d = tk.Toplevel(win); dark_window(d, C["card"]); d.title("Add a song"); d.resizable(False, False); d.transient(win)
         tk.Label(d, text="Paste a Spotify song link", bg=C["card"], fg=C["tx"], font=("Segoe UI", 11, "bold")).pack(padx=16, pady=(14, 6), anchor="w")
@@ -1410,7 +1494,7 @@ def pool_editor(parent, user, save):
                     sp = Spotify(load_config()); res = fetch_track(sp, uri) if sp.tok else "login"
                 except Exception as ex: log("Add song: %r" % ex); res = None
                 def done():
-                    if res == "login": err.config(text="Log in to Spotify in the Control Panel first", fg="#e5534b")
+                    if res == "login": err.config(text="Log in to Spotify in AoE4 Spotify first", fg="#e5534b")
                     elif not res: err.config(text="Couldn't find that song (offline?)", fg="#e5534b")
                     else: d.destroy(); add_custom(uri, res[0], res[1])
                 try: win.after(0, done)
@@ -1425,90 +1509,132 @@ def pool_editor(parent, user, save):
     win.bind("<Control-Shift-Z>", lambda e: undo_redo(False)); win.bind("<Control-Shift-z>", lambda e: undo_redo(False))
     # ---- hit testing (logical coords)
     def hit(x, y):
-        rt = tray_r() + 2
-        for i in range(len(SONGS)):
-            cx, cy = tray_xy(i)
-            if (x - cx) ** 2 + (y - cy) ** 2 <= rt ** 2: return ("tray", i)
-        cx, cy = tray_xy(len(SONGS))
-        if (x - cx) ** 2 + (y - cy) ** 2 <= rt ** 2: return ("plus",)
-        th = tab_hit(x, y)
-        if th: return th
-        if 548 <= x <= 580 and 40 <= y <= 66: return ("reset",)
-        if LT <= y <= BOT and 20 <= x <= 566:
+        if ed["page"] == "overview":
+            for k, a_ in enumerate(INTRO_AGES):
+                y0 = CARD_Y(k)
+                if 20 <= x <= 580 and y0 <= y <= y0 + 128:
+                    return ("cardtog", a_) if (490 <= x <= 544 and y0 + 26 <= y <= y0 + 58) else ("card", a_)
+            return None
+        for i in range(len(SONGS) + 1):
+            cx, cy = tray_xy(i); rt = tray_rad(i) + 2
+            if (x - cx) ** 2 + (y - cy) ** 2 <= rt ** 2: return ("tray", i) if i < len(SONGS) else ("plus",)
+        if 18 <= x <= 50 and 42 <= y <= 74: return ("back",)
+        if 520 <= x <= 566 and 44 <= y <= 72: return ("tabtog", ed["age"])
+        if age_custom() and 568 <= x <= 590 and 46 <= y <= 70: return ("reset",)
+        if LT <= y <= BOT and 20 <= x <= 568:
             i = int((y - LT + st["sc"]) // STEP)
             if 0 <= i < len(CIV_LIST) and row_y(i) <= y <= row_y(i) + RH:
-                p = pools()[CIV_LIST[i][0]]
+                p = pools()[CIV_LIST[i][0]]; minn = 1 if ed["age"] == "imperial" else 0
                 for j in range(len(p)):
                     cx, cy = chip_xy(i, j)
-                    if len(p) > 1 and (x - cx - 12) ** 2 + (y - cy + 12) ** 2 <= 7 ** 2 and st["hov"] in (("chip", i, j), ("x", i, j)):
+                    if len(p) > minn and (x - cx - 11) ** 2 + (y - cy + 11) ** 2 <= 7 ** 2 and st["hov"] in (("chip", i, j), ("x", i, j)):
                         return ("x", i, j)
-                    if (x - cx) ** 2 + (y - cy) ** 2 <= 17 ** 2: return ("chip", i, j)
-                if 532 <= x <= 562: return ("undo", i)
+                    if (x - cx) ** 2 + (y - cy) ** 2 <= 16 ** 2: return ("chip", i, j)
+                if ed["age"] == "imperial" and 532 <= x <= 562: return ("undo", i)
                 return ("row", i)
         return None
+    def sw(x0, y0, on):                                # small anti-aliased switch
+        rr(x0, y0, x0 + 36, y0 + 20, 10, C["acc"] if on else "#464646")
+        kx = x0 + 26 if on else x0 + 10
+        cv.create_oval((kx - 7) * S, (y0 + 3) * S, (kx + 7) * S, (y0 + 17) * S, fill="white", outline="")
+    def badge(x, y, age, on, r):
+        cv.create_oval((x - r) * S, (y - r) * S, (x + r) * S, (y + r) * S, fill="#1e3c28" if on else "#2c2c2c", outline="")
+        text(x, y, {"dark": "I", "feudal": "II", "castle": "III", "imperial": "IV"}[age], r * 0.6, C["acc"] if on else C["mu"], True, "center")
+    def chev(x, y, c, back=False):
+        k = -1 if back else 1
+        cv.create_line((x - 4 * k) * S, (y - 7) * S, (x + 3 * k) * S, y * S, (x - 4 * k) * S, (y + 7) * S, fill=c,
+                       width=max(1, 2 * S), capstyle="round", joinstyle="round")
+    def draw_overview():
+        cv.delete("all"); on = ages_on(); hov = st["hov"]
+        cv.create_polygon(*[v * S for v in (20, 58, 20, 42, 27, 49, 32, 38, 37, 49, 44, 42, 44, 58)], fill=C["acc"])
+        text(52, 49, "Age Intros", 18, b=True)
+        for k, a_ in enumerate(INTRO_AGES):
+            y = CARD_Y(k); p = pools(a_); n = sum(1 for v in p.values() if v); hv = hov and hov[1:] == (a_,)
+            rr(20, y, 580, y + 128, 18, "#262626" if hv else C["card"], "#464646" if hv else None)
+            badge(62, y + 42, a_, on[a_], 24)
+            text(100, y + 30, a_.capitalize(), 17, b=True)
+            text(100, y + 54, ("%d/%d civs" % (n, len(CIV_LIST))) if n else "Empty", 11, C["acc"] if (n and on[a_]) else C["mu"], True)
+            sw(498, y + 32, on[a_]); chev(560, y + 42, C["mu"])
+            rr(100, y + 82, 330, y + 88, 3, "#323232")
+            if n: rr(100, y + 82, 100 + max(6, 230 * n // len(CIV_LIST)), y + 88, 3, C["acc"] if on[a_] else "#5a5a5a")
+            used = song_sorted([u for v in p.values() for u in v])[:5]
+            if used:
+                for j, u in enumerate(used):
+                    sg = SONG_BY_URI.get(u)
+                    if sg: cv.create_image((375 + j * 24) * S, (y + 85) * S, image=art.chip(sg[0], 13))
+            else:
+                for j in range(3):
+                    cv.create_oval((360 + j * 24) * S, (y + 70) * S, (390 + j * 24) * S, (y + 100) * S, outline="#464646", width=max(1, S), fill=C["card"])
+        text(W / 2, H - 22, "Click an age to edit", 10, "#5a5a5a", anchor="center")
     def draw():
+        if ed["page"] == "overview": draw_overview(); return
         cv.delete("all"); p = pools(); hov = st["hov"]; drag = st["drag"]
         # list (drawn first; header/tray cover what scrolls above)
         for i, (civ, name) in enumerate(CIV_LIST):
             y = row_y(i)
             if y > BOT or y + RH < LT - 60: continue
             drop = st["drop"] == i
-            rr(20, y, 566, y + RH, 10, "#1c2a20" if drop else C["card"], C["acc"] if drop else None)
-            cv.create_image(34 * S, (y + RH / 2) * S, anchor="w", image=art.flag(civ))
-            text(74, y + RH / 2, name, 12.5, b=True)
+            rr(20, y, 568, y + RH, 10, "#1c2a20" if drop else C["card"], C["acc"] if drop else None)
+            cv.create_image(32 * S, (y + RH / 2) * S, anchor="w", image=art.flag(civ))
+            text(72, y + RH / 2, name, 12, b=True)
             for j, uri in enumerate(p[civ]):
                 s = SONG_BY_URI.get(uri)
                 if not s: continue
                 cx, cy = chip_xy(i, j)
                 moving = drag and drag["src"] == ("row", i, j)
-                cv.create_image(cx * S, cy * S, image=art.chip(s[0], 15, dim=bool(moving)))
+                cv.create_image(cx * S, cy * S, image=art.chip(s[0], CR, dim=bool(moving)))
+            cy = y + RH / 2
             if drop:
-                x = 200 + len(p[civ]) * 42; cy = y + RH / 2
-                cv.create_oval((x - 16) * S, (cy - 16) * S, (x + 16) * S, (cy + 16) * S, outline=C["acc"], width=max(1, int(1.5 * S)))
-                text(x, cy, "+", 14, C["acc"], True, "center")
-            isdef = p[civ] == default_pool(base, civ)
-            undo_glyph(547, y + RH / 2, C["dis"] if isdef else C["mu"])
+                x = 205 + len(p[civ]) * 34
+                cv.create_oval((x - 15) * S, (cy - 15) * S, (x + 15) * S, (cy + 15) * S, outline=C["acc"], width=max(1, int(1.5 * S)))
+                text(x, cy, "+", 13, C["acc"], True, "center")
+            elif not p[civ]:                               # empty civ: dashed drop slot (+ hint on the first one)
+                cv.create_oval(190 * S, (cy - 15) * S, 220 * S, (cy + 15) * S, outline="#4b4b4b", width=max(1, S), dash=(3, 3))
+                if i == next((k for k, (c_, _) in enumerate(CIV_LIST) if not p[c_]), -1):
+                    text(205, cy, "+", 13, "#6e6e6e", anchor="center"); text(232, cy, "Drag songs here", 10, "#646464")
+            if ed["age"] == "imperial" and p[civ] != song_sorted(default_pool(base, civ)):
+                undo_glyph(547, cy, C["mu"])
         # scrollbar
         ms = max_sc()
         if ms:
             th = (BOT - LT) * (BOT - LT) / (BOT - LT + ms); ty = LT + (BOT - LT - th) * st["sc"] / ms
             rr(572, LT, 576, BOT, 2, "#2a2a2a"); rr(572, ty, 576, ty + th, 2, "#5a5a5a")
         # header + tray (opaque, on top of the scrolled list)
-        cv.create_rectangle(0, 0, W * S, (LT - 4) * S, fill=C["bg"], outline="")
-        cv.create_rectangle(0, BOT * S, W * S, H * S, fill=C["bg"], outline="")
-        cv.create_polygon(*[v * S for v in (20, 62, 20, 46, 27, 53, 32, 42, 37, 53, 44, 46, 44, 62)], fill=C["acc"])
-        text(54, 53, "Age Intros", 17, b=True)
-        on = ages_on()
-        for n, a_ in enumerate(INTRO_AGES):                # age tabs, each with its own on/off switch
-            x0 = TAB_X(n); sel = ed["age"] == a_
-            rr(x0, 40, x0 + 86, 66, 13, "#263a2d" if sel else C["card"], C["acc"] if sel else "#3a3a3a")
-            rr(x0 + 8, 47, x0 + 30, 59, 6, C["acc"] if on[a_] else "#4a4a4a")
-            kx = x0 + 24 if on[a_] else x0 + 14
-            cv.create_oval((kx - 4.5) * S, (53 - 4.5) * S, (kx + 4.5) * S, (53 + 4.5) * S, fill="white", outline="")
-            text(x0 + 37, 53, a_.capitalize(), 11, C["tx"] if on[a_] else C["mu"], sel)
-        anyc = bool((user.get("intro_pools") or {}).get(ed["age"]))
-        rr(548, 40, 580, 66, 13, C["card"], "#3a3a3a"); undo_glyph(564, 53, C["tx"] if anyc else C["dis"])
-        rr(20, 78, 580, 166, 12, "#181818", C["line"])
-        tr = tray_r(); lab = tray_sp() >= 56
-        for i, s in enumerate(SONGS):
-            cx, cy = tray_xy(i)
+        cv.create_rectangle(0, 0, W * S, (LT - 4) * S, fill=C["bg"], outline="", tags="cover")
+        cv.create_rectangle(0, BOT * S, W * S, H * S, fill=C["bg"], outline="", tags="cover")
+        a_ = ed["age"]; on = ages_on()
+        rr(18, 42, 50, 74, 16, "#2a2a2a" if (st["hov"] or ("",))[0] == "back" else C["card"]); chev(35, 58, C["tx"], back=True)
+        badge(78, 58, a_, on[a_], 15); text(102, 58, a_.capitalize(), 18, b=True)
+        sw(526, 48, on[a_])
+        if age_custom(): undo_glyph(578, 58, C["mu"])
+        rr(20, 88, 580, 180, 18, "#1a1a1a", C["line"])
+        text(36, 99, "OCTOPATH", 8.5, C["mu"], True)
+        text(438, 99, "YOURS", 8.5, C["acc"], True)
+        cv.create_line(424 * S, 102 * S, 424 * S, 168 * S, fill=C["line"], width=max(1, S))
+        for i, s_ in enumerate(SONGS):
+            cx, cy = tray_xy(i); tr = tray_rad(i)
             if drag and drag["src"] == ("tray", i):
                 cv.create_oval((cx - tr - 3) * S, (cy - tr - 3) * S, (cx + tr + 3) * S, (cy + tr + 3) * S, outline=C["acc"], width=max(1, int(1.5 * S)))
-            cv.create_image(cx * S, cy * S, image=art.chip(s[0], tr))
-            if lab:
-                nm = s[1].replace("For ", ""); nm = nm if len(nm) <= 10 else nm[:9] + "\u2026"
-                text(cx, 148, nm, 9.5, C["mu"], anchor="center")
-        cx, cy = tray_xy(len(SONGS)); cv.create_image(cx * S, cy * S, image=art.chip("plus", tr))
-        if lab: text(cx, 148, "Add", 9.5, C["mu"], anchor="center")
-        if not on[ed["age"]]:
-            text(300, 172, "%s intro is off - switch it on in the tab to use these songs" % ed["age"].capitalize(), 9.5, C["mu"], anchor="center")
+            cv.create_image(cx * S, cy * S, image=art.chip(s_[0], tr))
+        cx, cy = tray_xy(len(SONGS)); tr = tray_rad(len(SONGS))
+        cv.create_oval((cx - tr) * S, (cy - tr) * S, (cx + tr) * S, (cy + tr) * S, outline=C["acc"], width=max(1, 2 * S))
+        text(cx, cy - 1, "+", tr * 1.1, C["acc"], anchor="center")
         # drag ghost
         if drag and drag.get("xy"):
             gx, gy = drag["xy"]; s = SONGS[drag["song"]]
             cv.create_image(gx * S, gy * S, image=art.chip(s[0], 19), tags="ghost")
         overlay()
     # click a chip (no drag) = play that theme on Spotify now; click it again = pause
-    pv = {"song": None, "busy": False, "phase": 0, "sp": None, "q": [], "msgjob": None, "env": 0.0, "gsong": None, "gt": 0, "gjob": None}
+    pv = {"song": None, "busy": False, "phase": 0, "sp": None, "q": [], "msgjob": None, "env": 0.0, "gsong": None, "gt": 0, "gjob": None,
+          "lock": threading.Lock()}
+    def _warm():                                       # token + keep-alive connection + device id, before the first click
+        try:
+            with pv["lock"]:
+                if pv["sp"] is None: pv["sp"] = Spotify(load_config())
+                sp = pv["sp"]
+            if sp.tok and hasattr(sp, "warm"): sp.warm()
+        except Exception as e: log("Preview warm-up: %r" % e)
+    threading.Thread(target=_warm, daemon=True).start()
     glow_cache = {}
     def hint(msg, x, y):
         st["msg"] = (msg, x, y + 26)
@@ -1520,10 +1646,14 @@ def pool_editor(parent, user, save):
     def preview(i, xy):
         if pv["busy"]: return
         action = "pause" if pv["song"] == SONGS[i][0] else "play"
-        pv["busy"] = True; pv["xy"] = xy
+        pv["busy"] = True; pv["xy"] = xy; pv["prev"] = pv["song"]; pv["t_click"] = time.perf_counter()
+        pv["song"] = SONGS[i][0] if action == "play" else None          # optimistic: glow reacts on the click
+        if action == "play": pv["env"] = max(pv["env"], 0.5)
+        overlay(); glow_kick()
         def go():
             try:
-                if pv["sp"] is None: pv["sp"] = Spotify(load_config())
+                with pv["lock"]:
+                    if pv["sp"] is None: pv["sp"] = Spotify(load_config())
                 sp = pv["sp"]
                 if not sp.tok: res = "login"
                 else: res = bool(sp.preview(SONGS[i][3]) if action == "play" else sp.pause())
@@ -1535,22 +1665,26 @@ def pool_editor(parent, user, save):
         changed = False
         while pv["q"]:
             action, i, res = pv["q"].pop(0); pv["busy"] = False; changed = True
-            if res == "login": hint("Log in to Spotify in the Control Panel to preview", *pv["xy"])
+            pv["t_done"] = time.perf_counter()
+            if res == "login": pv["song"] = pv.get("prev"); hint("Log in to Spotify in AoE4 Spotify to preview", *pv["xy"])
             elif action == "play":
                 if res: pv["song"] = SONGS[i][0]; log("Preview: %s" % SONGS[i][1])
-                else: hint("Couldn't play - is Spotify (Premium) running?", *pv["xy"])
-            else: pv["song"] = None
+                else: pv["song"] = pv.get("prev") if pv.get("prev") != SONGS[i][0] else None; hint("Couldn't play - is Spotify (Premium) running?", *pv["xy"])
+            else:
+                if not res and pv.get("prev"): pv["song"] = pv["prev"]       # pause failed: still playing
+                else: pv["song"] = None
         if changed: overlay(); glow_kick()
-        try: win.after(80, pvpump)
+        try: win.after(30, pvpump)
         except Exception: pass
     def glow_spots(song):
-        spots = [(tray_xy(i), tray_r()) for i, s in enumerate(SONGS) if s[0] == song]
+        if ed["page"] == "overview": return []
+        spots = [(tray_xy(i), tray_rad(i)) for i, s in enumerate(SONGS) if s[0] == song]
         p = pools()
         for i, (civ, _) in enumerate(CIV_LIST):
             y = row_y(i)
             if y + RH < LT or y > BOT: continue
             for j, uri in enumerate(p[civ]):
-                if SONG_BY_URI.get(uri, ("",))[0] == song: spots.append((chip_xy(i, j), 15))
+                if SONG_BY_URI.get(uri, ("",))[0] == song: spots.append((chip_xy(i, j), CR))
         return spots
     def glow_img(r, ph, env):
         k = (r, ph, env)
@@ -1562,15 +1696,41 @@ def pool_editor(parent, user, save):
         pv["env"] = min(1.0, pv["env"] + 0.1) if pv["song"] else max(0.0, pv["env"] - 0.1)
         pv["gt"] = (pv["gt"] + 1) % GLOW_N
         try:
-            cv.delete("glow")
-            if pv["env"] > 0 and not st["drag"]:
-                for (cx, cy), r in glow_spots(pv["gsong"]):
-                    cv.create_image(cx * S, cy * S, image=glow_img(r, pv["gt"], round(pv["env"], 1)), anchor="center", tags="glow")
-                cv.tag_raise("tip") if cv.find_withtag("tip") else None
+            glow_sync()
             if pv["song"] or pv["env"] > 0: pv["gjob"] = win.after(33, glow_tick)
-        except Exception: pass
+        except Exception as ex: log("Glow: %r" % ex)
+    def glow_sync():
+        """Place the glow items at their chips' *current* positions. Called by the animation timer and at the
+        end of every redraw (scroll, drag, edits), so the glow moves in lockstep with its chip: existing items
+        are moved/re-imaged in place (coords + itemconfigure), never left at stale coordinates."""
+        items = [it for it in pv.setdefault("gitems", []) if cv.type(it)]   # a full redraw deletes them
+        spots = glow_spots(pv["gsong"]) if (pv["env"] > 0 and not st["drag"] and pv.get("gsong")) else []
+        for n, ((cx, cy), r) in enumerate(spots):
+            img = glow_img(r, pv["gt"], round(pv["env"], 1)); tray = cy < LT - 4
+            tags = ("glow",) if tray else ("glow", "glowlist")       # list glows scroll under header/bottom covers
+            if n < len(items):
+                cv.coords(items[n], cx * S, cy * S); cv.itemconfigure(items[n], image=img, tags=tags)
+            else:
+                items.append(cv.create_image(cx * S, cy * S, image=img, anchor="center", tags=tags))
+        for it in items[len(spots):]: cv.delete(it)
+        pv["gitems"] = items[:len(spots)]
+        # z-order: each glow sits directly ABOVE its own chip (halo, ring and badge over the chip edge; the
+        # face shows through the cut-out), but list glows stay below the header/bottom covers that the
+        # list scrolls under. Restacked every redraw and tick; items are never recreated for this.
+        for it, ((cx, cy), r) in zip(pv["gitems"], spots):
+            under = [i for i in cv.find_overlapping(cx * S, cy * S, cx * S, cy * S)
+                     if cv.type(i) == "image" and not set(cv.gettags(i)) & {"glow", "cover", "tip", "ghost"}]
+            if under: cv.tag_raise(it, under[-1])
+            else: cv.tag_raise(it)
+        if cv.find_withtag("tip"): cv.tag_raise("tip")
+        if cv.find_withtag("ghost"): cv.tag_raise("ghost")
     def glow_kick():
         if not pv["gjob"]: glow_tick()
+    _draw_base = draw
+    def draw():                                        # every redraw re-places the glow in the same pass
+        _draw_base()
+        try: glow_sync()
+        except Exception as ex: log("Glow: %r" % ex)
     def playing_marks():
         return                                         # replaced by the glow layer (glow_tick)
         import math
@@ -1596,17 +1756,18 @@ def pool_editor(parent, user, save):
         playing_marks()
         if hov and not drag:
             p = pools()
-            if hov[0] in ("chip", "x") and len(p[CIV_LIST[hov[1]][0]]) > 1:
+            if ed["page"] == "overview": pass
+            elif hov[0] in ("chip", "x") and len(p[CIV_LIST[hov[1]][0]]) > (1 if ed["age"] == "imperial" else 0):
                 cx, cy = chip_xy(hov[1], hov[2]); xc = C["acc"] if hov[0] == "x" else "#3a3a3a"
-                cv.create_oval((cx + 6) * S, (cy - 18) * S, (cx + 18) * S, (cy - 6) * S, fill=xc, outline=C["bg"], width=max(1, int(1.5 * S)))
-                text(cx + 12, cy - 12.5, "\u00d7", 10, C["tx"], True, "center")
-            elif hov[0] == "undo" and p[CIV_LIST[hov[1]][0]] != default_pool(base, CIV_LIST[hov[1]][0]):
+                cv.create_oval((cx + 5) * S, (cy - 17) * S, (cx + 17) * S, (cy - 5) * S, fill=xc, outline=C["bg"], width=max(1, int(1.5 * S)))
+                text(cx + 11, cy - 11.5, "\u00d7", 10, C["tx"], True, "center")
+            elif hov[0] == "undo" and p[CIV_LIST[hov[1]][0]] != song_sorted(default_pool(base, CIV_LIST[hov[1]][0])):
                 y = row_y(hov[1]) + RH / 2
                 if LT <= y <= BOT: undo_glyph(547, y, C["tx"])
-            elif hov[0] == "reset" and (user.get("intro_pools") or {}).get(ed["age"]):
-                rr(548, 40, 580, 66, 13, "#2a2a2a", "#3a3a3a"); undo_glyph(564, 53, C["tx"])
+            elif hov[0] == "reset" and age_custom():
+                undo_glyph(578, 58, C["tx"])
             elif hov[0] in ("tray", "plus"):
-                cx, cy = tray_xy(hov[1] if hov[0] == "tray" else len(SONGS)); R_ = tray_r() + 3
+                ii = hov[1] if hov[0] == "tray" else len(SONGS); cx, cy = tray_xy(ii); R_ = tray_rad(ii) + 3
                 cv.create_oval((cx - R_) * S, (cy - R_) * S, (cx + R_) * S, (cy + R_) * S, outline=C["acc"], width=max(1, int(1.5 * S)))
         hov = hov if st.get("tipok") else None
         p = pools()
@@ -1615,12 +1776,9 @@ def pool_editor(parent, user, save):
             s = SONGS[hov[1]] if hov[0] == "tray" else SONG_BY_URI.get(p[CIV_LIST[hov[1]][0]][hov[2]])
             if s:
                 cx, cy = tray_xy(hov[1]) if hov[0] == "tray" else chip_xy(hov[1], hov[2])
-                tip = ("%s \u2014 %s  (click to %s%s)" % (s[1], s[2], "pause" if pv["song"] == s[0] else "play",
-                       ", right-click to remove" if hov[0] == "tray" and s[0].startswith("c_") else ""), cx, cy + 26)
-                if hov[0] == "chip" and len(p[CIV_LIST[hov[1]][0]]) == 1: tip = (tip[0] + "  (at least one song)", tip[1], tip[2])
-        if not drag and hov and hov[0] == "plus": tip = ("Add your own Spotify song", tray_xy(len(SONGS))[0], 136)
-        if not drag and hov and hov[0] == "reset": tip = ("Reset %s to the default songs" % ed["age"].capitalize(), 470, 72)
-        if not drag and hov and hov[0] == "tabtog": tip = ("Turn the %s intro %s" % (hov[1].capitalize(), "off" if ages_on()[hov[1]] else "on"), 300, 72)
+                tip = ("%s \u2014 %s" % (s[1], s[2]), cx, cy + 26)
+                if hov[0] == "chip" and ed["age"] == "imperial" and len(p[CIV_LIST[hov[1]][0]]) == 1: tip = (tip[0] + "  (at least one song)", tip[1], tip[2])
+        if st.get("press") and not st.get("released", True): tip = None       # mouse button down: no tooltips
         if st["msg"]: tip = st["msg"]
         if tip:
             tw = len(tip[0]) * 6.3 + 16; x0 = min(max(8, tip[1] - tw / 2), W - 8 - tw)
@@ -1631,12 +1789,14 @@ def pool_editor(parent, user, save):
     tipjob = {"id": None}
     def set_hover(h):
         """Hover changed: update the overlay now, show the tooltip after a short delay."""
+        redraw = ed["page"] == "overview" and (st["hov"] or ("",))[0] in ("card", "cardtog") or (h or ("",))[0] in ("card", "cardtog")
         st["hov"] = h; st["msg"] = None; st["tipok"] = False
+        if redraw and ed["page"] == "overview": draw()                 # card hover highlight
         if tipjob["id"]: win.after_cancel(tipjob["id"]); tipjob["id"] = None
         if h and h[0] in ("tray", "chip"):
             tipjob["id"] = win.after(300, lambda: (st.update(tipok=True), tipjob.update(id=None), overlay()))
         overlay()
-        cur = "hand2" if h and h[0] in ("tray", "chip", "x", "undo", "reset", "plus", "tab", "tabtog") else ""
+        cur = "hand2" if h and h[0] in ("tray", "chip", "x", "undo", "reset", "plus", "tabtog", "card", "cardtog", "back") else ""
         if cv.cget("cursor") != cur: cv.config(cursor=cur)
     def L(e): return e.x / S, e.y / S
     def on_motion(e):
@@ -1645,7 +1805,7 @@ def pool_editor(parent, user, save):
         st["mt"] = max(st.get("mt", 0), time.perf_counter() - t0)     # slowest motion handler (tests)
     def on_press(e):
         cv.focus_set()                                     # keep keyboard focus here (Ctrl+Z / Ctrl+Y)
-        x, y = L(e); h = hit(x, y); st["press"] = (x, y, h)
+        x, y = L(e); h = hit(x, y); st["press"] = (x, y, h); st["released"] = False
         if h and h[0] == "tray": st["drag"] = {"src": h, "song": h[1], "xy": None}
         elif h and h[0] == "chip" and pools()[CIV_LIST[h[1]][0]][h[2]] in SONG_BY_URI:
             uri = pools()[CIV_LIST[h[1]][0]][h[2]]
@@ -1665,7 +1825,7 @@ def pool_editor(parent, user, save):
         if st["sc"] == sc0 and st["drop"] == drop0 and cv.find_withtag("ghost"): cv.coords("ghost", x * S, y * S)
         else: draw()
     def on_release(e):
-        d, st["drag"] = st["drag"], None; drop, st["drop"] = st["drop"], None
+        st["released"] = True; d, st["drag"] = st["drag"], None; drop, st["drop"] = st["drop"], None
         x, y = L(e); h = hit(x, y); p = pools()
         if d and d["xy"] is not None:
             uri = SONGS[d["song"]][3]
@@ -1680,17 +1840,19 @@ def pool_editor(parent, user, save):
         ph = st["press"][2] if st["press"] else None
         if d and ph and ph[0] in ("tray", "chip") and h == ph:                 # click on a chip: preview
             preview(d["song"], tray_xy(ph[1]) if ph[0] == "tray" else chip_xy(ph[1], ph[2]))
+        elif h and h[0] == "card": open_page(h[1]); return
+        elif h and h[0] == "cardtog": set_age_on(h[1], not ages_on()[h[1]])
+        elif h and h[0] == "back": open_page("overview"); return
         elif h and h[0] == "x": remove(h[1], h[2])
         elif h and h[0] == "undo":
-            p = pools(); p[CIV_LIST[h[1]][0]] = default_pool(base, CIV_LIST[h[1]][0]); commit(p)
-        elif h and h[0] == "reset": commit({c: default_pool(base, c) for c, _ in CIV_LIST})
-        elif h and h[0] == "tab": ed["age"] = h[1]
+            p = pools(); p[CIV_LIST[h[1]][0]] = row_default(CIV_LIST[h[1]][0]); commit(p)
+        elif h and h[0] == "reset": commit({c: row_default(c) for c, _ in CIV_LIST})
         elif h and h[0] == "tabtog": set_age_on(h[1], not ages_on()[h[1]])
         elif h and h[0] == "plus": win.after_idle(add_dialog)
         st["hov"] = hit(x, y); draw()
     def remove(i, j):
         p = pools(); civ = CIV_LIST[i][0]
-        if len(p[civ]) <= 1: st["msg"] = ("Each civ needs at least one song", *chip_xy(i, j)[:1], chip_xy(i, j)[1] + 26); draw(); return
+        if ed["age"] == "imperial" and len(p[civ]) <= 1: st["msg"] = ("Each civ needs at least one song", *chip_xy(i, j)[:1], chip_xy(i, j)[1] + 26); draw(); return
         p[civ].pop(j); commit(p)
     def on_right(e):
         h = hit(*L(e))
@@ -1701,28 +1863,38 @@ def pool_editor(parent, user, save):
             try: m.tk_popup(e.x_root, e.y_root)
             finally: m.grab_release()
     def on_wheel(e):
+        if ed["page"] == "overview": return
         st["sc"] = max(0, min(max_sc(), st["sc"] - (e.delta / 120) * 46)); st["hov"] = hit(*L(e)); draw()
     cv.bind("<Motion>", on_motion); cv.bind("<ButtonPress-1>", on_press); cv.bind("<B1-Motion>", on_drag)
     cv.bind("<ButtonRelease-1>", on_release); cv.bind("<Button-3>", on_right); cv.bind("<MouseWheel>", on_wheel)
     cv.bind("<Leave>", lambda e: set_hover(None) if not st["drag"] else None)
+    win.bind("<Escape>", lambda e: open_page("overview") if ed["page"] != "overview" else None)
+    win.bind("<BackSpace>", lambda e: open_page("overview") if ed["page"] != "overview" else None)
     set_app_icon(win)
     draw()
     pvpump()
-    win._ed = {"pv": pv, "cv": cv, "st": st, "pools": pools, "tray_xy": tray_xy, "chip_xy": chip_xy, "row_y": row_y, "S": S, "draw": draw,
-               "ed": ed, "ages_on": ages_on, "add_custom": add_custom, "remove_custom": remove_custom, "add_dialog": add_dialog, "hist": hist}  # tests
+    win._ed = {"undo_redo": undo_redo, "pv": pv, "cv": cv, "st": st, "pools": pools, "tray_xy": tray_xy, "chip_xy": chip_xy, "row_y": row_y, "S": S, "draw": draw,
+               "ed": ed, "ages_on": ages_on, "add_custom": add_custom, "remove_custom": remove_custom, "add_dialog": add_dialog, "hist": hist, "glow_kick": glow_kick,
+               "open_page": open_page, "set_age_on": set_age_on, "tray_rad": tray_rad, "CARD_Y": CARD_Y}  # tests
     reveal(win, over=parent); note_window("editor", win); win.lift(); win.focus_force()
     return win
 
 # ---- shared glow renderer (also used standalone for the frame strip)
 GLOW_N = 54                                        # frames per breathing cycle (54 x 33 ms = 1.8 s)
-def render_glow(r, S, phase, env, Q=4):
+def chip_px(r, S): return int(round((2 * r + 4) * S))   # chip image size; the glow shares its parity
+
+def render_glow(r, S, phase, env, Q=4, badge=True):
     """One frame of the 'now playing' glow around a round chip of logical radius r (RGBA PIL image).
     Feathered radial halo (opacity ~35%..75%, breathing scale), crisp thin inner ring, tiny equalizer badge."""
     import math
     from PIL import Image, ImageDraw
     t = 0.5 - 0.5 * math.cos(2 * math.pi * phase / GLOW_N)          # ease-in-out sine 0..1..0
-    pad = 16; D = int(round(2 * (r + pad) * S)); B = D * Q; c = B / 2; k = S * Q
+    # Same parity as the chip image: Tk centres an image at coord - size//2, so an odd chip with an even
+    # glow (or vice versa) lands half a pixel off. D = chip + 2*pad keeps both centres on the same pixel.
+    D = chip_px(r, S) + 2 * int(round(16 * S)); B = D * Q; c = B / 2; k = S * Q
     im = Image.new("RGBA", (B, B), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+    def box(rad):                         # integer, inclusive box symmetric about the image centre (PIL rounds otherwise)
+        R = int(round(rad)); C = B // 2; return [C - R, C - R, C + R - 1, C + R - 1]
     g = (29, 185, 84)
     a_max = (0.35 + 0.40 * t) * env
     r0 = r * k; r1 = (r + 9 + 7 * t) * k                             # halo from chip edge out to r1 (breathes)
@@ -1730,18 +1902,19 @@ def render_glow(r, S, phase, env, Q=4):
     for s in range(steps, -1, -1):                                   # outer -> inner, each ring overwrites
         f = s / steps; rad = r0 + (r1 - r0) * f
         a = a_max * (1 - f) ** 2.2                                   # smooth falloff, no hard edge
-        d.ellipse([c - rad, c - rad, c + rad, c + rad], fill=g + (int(255 * a),))
-    ri = (r - 0.5) * k; d.ellipse([c - ri, c - ri, c + ri, c + ri], fill=(0, 0, 0, 0))   # keep the portrait clean
+        d.ellipse(box(rad), fill=g + (int(255 * a),))
+    ri = (r - 0.5) * k; d.ellipse(box(ri), fill=(0, 0, 0, 0))   # keep the portrait clean
     br = 0.25 + 0.35 * t                                              # ring brightness modulation
     rc = tuple(int(g[i] + (255 - g[i]) * br * 0.6) for i in range(3))
     rr_ = (r + 1.6) * k; w = max(1, int(1.4 * k))
-    d.ellipse([c - rr_, c - rr_, c + rr_, c + rr_], outline=rc + (int(235 * env),), width=w)
-    bx, by, br_ = c + r * 0.74 * k, c + r * 0.74 * k, 7.5 * k       # equalizer badge
+    d.ellipse(box(rr_), outline=rc + (int(235 * env),), width=w)
+    if not badge: return im.resize((D, D), Image.LANCZOS)
+    bx, by, br_ = c + r * 0.86 * k, c + r * 0.86 * k, 6.0 * k       # equalizer badge: small, bottom-right, off the face
     d.ellipse([bx - br_, by - br_, bx + br_, by + br_], fill=(18, 18, 18, int(255 * env)), outline=g + (int(255 * env),), width=max(1, int(1.2 * k)))
     for i in range(3):
-        h = (2.5 + 5.5 * (0.5 + 0.5 * math.sin(2 * math.pi * (2 * phase / GLOW_N + i * 0.37) + i))) * k
-        x = bx + (i - 1) * 3.2 * k; bw = 1.1 * k
-        d.rounded_rectangle([x - bw, by + 3.6 * k - h, x + bw, by + 3.6 * k], bw, fill=g + (int(255 * env),))
+        h = (1.8 + 3.6 * (0.5 + 0.5 * math.sin(2 * math.pi * (2 * phase / GLOW_N + i * 0.37) + i))) * k
+        x = bx + (i - 1) * 2.6 * k; bw = 0.85 * k
+        d.rounded_rectangle([x - bw, by + 2.7 * k - h, x + bw, by + 2.7 * k], bw, fill=g + (int(255 * env),))
     return im.resize((D, D), Image.LANCZOS)
 
 LATEST_API = "https://api.github.com/repos/Capstar1/aoe4-spotify/releases/latest"
@@ -1801,13 +1974,13 @@ def save_user(u):
     os.replace(tmp, USER_CONFIG)
 
 def panel():
-    if not single_window("panel", "AoE4 Spotify Control Panel"): return
+    if not single_window("panel", "AoE4 Spotify"): return
     import tkinter as tk, subprocess, webbrowser as wb
     try: import ctypes; ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception: pass
     C = dict(bg="#121212", card="#1f1f1f", tx="#f2f2f2", mu="#9a9a9a", off="#3a3a3a", line="#2a2a2a",
              ib="#2a2a2a", idle="#8a8a8a", red="#e5484d", acc="#1DB954", dis="#555555", org="#f0a030")
-    root = tk.Tk(); dark_window(root, C["bg"]); root.title("AoE4 Spotify Control Panel"); root.resizable(False, False)
+    root = tk.Tk(); dark_window(root, C["bg"]); root.title("AoE4 Spotify"); root.resizable(False, False)
     S = root.winfo_fpixels("1i") / 96.0
     W, H = 430, 420
     M = 16; R_ = W - M                              # content left / right edge
@@ -1896,29 +2069,56 @@ def panel():
     # Each tag is bound once; draw() only updates the handler table. (Re-binding inside a click
     # would free the running Tcl callback and crash Tk.) Handlers run after the event finishes.
     handlers, bound = {}, set()
-    hl_bound = set()
-    def hover_hl(i):                                # subtle highlight behind age label + playlist name
-        if i in hl_bound: return
-        hl_bound.add(i)
-        cv.tag_bind("opn%d" % i, "<Enter>", lambda e, i=i: cv.itemconfigure("hl%d" % i, state="normal"), add="+")
-        cv.tag_bind("opn%d" % i, "<Leave>", lambda e, i=i: cv.itemconfigure("hl%d" % i, state="hidden"), add="+")
-    def row_hover(e=None):                          # Change button only shows on the hovered playlist row
-        try: x, y = (cv.winfo_pointerx() - cv.winfo_rootx()) / S, (cv.winfo_pointery() - cv.winfo_rooty()) / S
-        except Exception: return
-        row = None
-        if ui.get("open") and not ui.get("menu") and M <= x <= R_:
+    def hover_hl(i): pass                           # (row highlight is handled by on_pointer)
+    hov = {"cursor": "", "row": None, "hl": None, "tip": None, "n": 0}   # what the pointer is over right now
+    def on_pointer(e=None, force=False):
+        """Single hover handler: everything is derived from the pointer position, and the cursor / Change
+        button / highlight / tooltip are only touched when they actually change (no Enter/Leave ping-pong)."""
+        if e is not None:
+            px, py = e.x, e.y
+            if str(e.type) in ("Motion", "6") and not (int(getattr(e, "state", 0) or 0) & 0x100): hov["down"] = False
+            hov["xy"] = None if str(e.type) in ("Leave", "8") else (px, py)
+        elif hov.get("xy"): px, py = hov["xy"]                # redraw: re-apply hover at the last known pointer spot
+        else:
+            try: px, py = cv.winfo_pointerx() - cv.winfo_rootx(), cv.winfo_pointery() - cv.winfo_rooty()
+            except Exception: return
+        inside = 0 <= px < cv.winfo_width() and 0 <= py < cv.winfo_height()
+        tags = set()
+        if inside:
+            for it in cv.find_overlapping(px, py, px, py):
+                if cv.itemcget(it, "state") != "hidden": tags.update(cv.gettags(it))
+        x, y = px / S, py / S; row = None
+        if inside and ui.get("open") and not ui.get("menu") and M + 22 <= x <= R_:
             for i in range(len(AGES)):
                 if 216 + i * 50 <= y <= 258 + i * 50: row = i
-        cv.itemconfigure("chgx", state="hidden")
-        if row is not None: cv.itemconfigure("chg%d" % row, state="normal")
-    cv.bind("<Motion>", row_hover, add="+"); cv.bind("<Leave>", lambda e: cv.itemconfigure("chgx", state="hidden"), add="+")
+        if force: hov.update(row="?", hl="?")                 # (cursor/tooltip kept unless they really change)
+        if row != hov["row"]:                       # Change button: hover-only, its space is always reserved
+            cv.itemconfigure("chgx", state="hidden")
+            if row is not None: cv.itemconfigure("chg%d" % row, state="normal")
+            hov["row"] = row
+        hl = next((int(t[3:]) for t in tags if t.startswith("opn") and t[3:].isdigit()), None)
+        if hl != hov["hl"]:
+            if isinstance(hov["hl"], int): cv.itemconfigure("hl%d" % hov["hl"], state="hidden")
+            if hl is not None: cv.itemconfigure("hl%d" % hl, state="normal")
+            hov["hl"] = hl
+        cur = "hand2" if any(t in handlers for t in tags) else ""
+        if cur != cv.cget("cursor"): cv.config(cursor=cur); hov["n"] += 1
+        ctrl = any(t.startswith(CTRL_TAGS) for t in tags)     # switches, slider, buttons, gear, menu
+        tg = None if (ctrl or hov.get("down")) else next((t for t in sorted(tags) if tips.get(t)), None)
+        if tg != hov["tip"]:
+            hov["tip"] = tg; hide_tip()
+            if tg: show_tip_later(tg)
+    root._hov = hov                                   # (tests)
+    CTRL_TAGS = ("rev", "chg", "fade", "en", "boss", "gear", "upd", "m_", "plh", "menubg", "spot")
+    def _down(e, v): hov["down"] = v; on_pointer(e)
+    cv.bind("<Motion>", on_pointer, add="+"); cv.bind("<Leave>", lambda e: on_pointer(e), add="+")
+    cv.bind("<ButtonPress-1>", lambda e: _down(e, True), add="+"); cv.bind("<ButtonRelease-1>", lambda e: _down(e, False), add="+")
+    cv.bind("<B1-Motion>", on_pointer, add="+")
     def click(tag, fn):
         handlers[tag] = fn
         if tag in bound: return
         bound.add(tag)
         cv.tag_bind(tag, "<Button-1>", lambda e, t=tag: root.after_idle(lambda: handlers[t]() if t in handlers else None), add="+")
-        cv.tag_bind(tag, "<Enter>", lambda e, t=tag: cv.config(cursor="hand2" if t in handlers else ""), add="+")
-        cv.tag_bind(tag, "<Leave>", lambda e: cv.config(cursor=""), add="+")
 
     base = load_config(user=False); user = load_user()
     defaults = base.get("default_playlists") or base.get("playlists", {})
@@ -1980,26 +2180,16 @@ def panel():
             tipst["shown"] = False
             try: tipw.withdraw()
             except tk.TclError: pass
-    def tip(tag, msg):
-        tips[tag] = msg
-        if tag in tipbound: return
-        tipbound.add(tag)
-        def enter(e, tag=tag):
-            if tipst["tag"] == tag: return                       # moved between items of the same control
-            hide_tip(); tipst["tag"] = tag
-            def show():
-                tipst["job"] = None
-                if tipst["tag"] != tag or not tips.get(tag): return
-                if not tipw.winfo_exists(): return
-                tipl.config(text=tips[tag]); x, y = root.winfo_pointerxy()
-                tipw.geometry("+%d+%d" % (x + 10, y + 14)); tipw.deiconify(); tipw.lift(); tipst["shown"] = True
-            tipst["job"] = root.after(300, show)
-        def leave(e, tag=tag):
-            def check():                                         # still over another item with this tag? keep it
-                cur = cv.find_withtag("current")
-                if not (cur and tag in cv.gettags(cur[0])): hide_tip() if tipst["tag"] == tag else None
-            root.after_idle(check)
-        cv.tag_bind(tag, "<Enter>", enter, add="+"); cv.tag_bind(tag, "<Leave>", leave, add="+")
+    def tip(tag, msg): tips[tag] = msg              # shown by on_pointer after a short delay
+    def show_tip_later(tag):
+        tipst["tag"] = tag
+        def show():
+            tipst["job"] = None
+            if tipst["tag"] != tag or not tips.get(tag): return
+            if not tipw.winfo_exists(): return
+            tipl.config(text=tips[tag]); x, y = root.winfo_pointerxy()
+            tipw.geometry("+%d+%d" % (x + 10, y + 14)); tipw.deiconify(); tipw.lift(); tipst["shown"] = True
+        tipst["job"] = root.after(300, show)
 
     def draw():
         cv.delete("all"); handlers.clear(); cfg = cur(); en = bool(cfg.get("enabled", True))
@@ -2025,7 +2215,7 @@ def panel():
         if upd["info"] and ph in ("avail", "error"): oval_(P(R_ - 8, 10, R_ + 2, 20), fill=C["acc"], outline=C["bg"], width=2 * S, tags="gear")
         click("gear", lambda: (ui.update(menu=not ui.get("menu")), draw()))
         cv.create_line(*P(M, 62, R_, 62), fill=C["line"])
-        root.after_idle(row_hover)
+
         # enabled (power icon vertically centered on the card)
         rr(M, 72, R_, 120, 12, C["card"], tag="encard"); cy = 96
         cv.create_image(*P(M + 24, cy), image=power_img, anchor="center", tags="encard")
@@ -2052,21 +2242,22 @@ def panel():
         text(M + 16, 190, "Playlists", 13, b=True, tag="plh")
         cv.create_image(*P(R_ - 18, 190), image=chev_up if ui["open"] else chev_down, anchor="center", tags="plh")
         click("plh", lambda: (ui.update(open=not ui["open"]), draw()))
+        X = M + 22                                         # age rows sit indented under the Playlists header
         for i, (k, lab) in enumerate(AGES if ui["open"] else []):
             rx = R_ - 12 - 30; y = 216 + i * 50; uri = cfg["playlists"].get(k, ""); is_def = uri == defaults.get(k)
-            rr(M, y, R_, y + 42, 10, C["card"]); pid = uri.split(":")[-1]
+            rr(X, y, R_, y + 42, 10, C["card"]); pid = uri.split(":")[-1]
             cimg = cover_img(covers.get(pid) or (cover_file(pid) if pid else None))
             if cimg:                                       # playlist cover: click = open in Spotify
-                cv.create_image(*P(M + 24, y + 21), image=cimg, anchor="center", tags="cov%d" % i)
+                cv.create_image(*P(X + 24, y + 21), image=cimg, anchor="center", tags="cov%d" % i)
                 click("cov%d" % i, lambda pid=pid: open_playlist(pid)); tip("cov%d" % i, "Open in Spotify")
             else:
-                rr(M + 9, y + 6, M + 39, y + 36, 6, C["ib"]); icon(i, M + 24, y + 21, C["acc"])
-            rr(M + 44, y + 7, rx - 76, y + 35, 8, C["card"], tag="opn%d" % i)          # hit area (gaps between texts)
-            rr(M + 44, y + 7, rx - 76, y + 35, 8, "#2c2c2c", tag="hl%d" % i); cv.itemconfigure("hl%d" % i, state="hidden")
-            text(M + 48, y + 21, lab, 13, b=True, tag="opn%d" % i)
-            oval_(P(M+118, y+17, M+126, y+25), fill=C["acc"] if uri else C["idle"], outline="", tags="opn%d" % i)
-            nm = pl_name(uri); nm = nm if len(nm) <= 17 else nm[:16] + "…"
-            text(M + 132, y + 21, nm, 12, C["mu"], tag="opn%d" % i)
+                rr(X + 9, y + 6, X + 39, y + 36, 6, C["ib"]); icon(i, X + 24, y + 21, C["acc"])
+            rr(X + 38, y + 7, rx - 76, y + 35, 8, C["card"], tag="opn%d" % i)          # hit area (gaps between texts)
+            rr(X + 38, y + 7, rx - 76, y + 35, 8, "#2c2c2c", tag="hl%d" % i); cv.itemconfigure("hl%d" % i, state="hidden")
+            text(X + 48, y + 21, lab, 13, b=True, tag="opn%d" % i)
+            oval_(P(X+118, y+17, X+126, y+25), fill=C["acc"] if uri else C["idle"], outline="", tags="opn%d" % i)
+            nm = pl_name(uri); nm = nm if len(nm) <= 15 else nm[:14] + "\u2026"
+            text(X + 132, y + 21, nm, 12, C["mu"], tag="opn%d" % i)
             if pid:
                 click("opn%d" % i, lambda pid=pid: open_playlist(pid)); tip("opn%d" % i, "Open in Spotify"); hover_hl(i)
             rx = R_ - 12 - 30
@@ -2222,8 +2413,9 @@ def panel():
         from tkinter import messagebox
         un = os.path.join(HERE, "unins000.exe")
         if not os.path.exists(un): messagebox.showinfo("Uninstall", "Uninstaller not found (not installed?)."); return
-        if messagebox.askyesno("Uninstall AoE4 Spotify", "Remove AoE4 Spotify from this PC?\nYour Steam launch option is restored."):
-            subprocess.Popen([un], env=child_env()); root.destroy()
+        steam = " Steam will close for a moment and reopen by itself." if steam_running() else ""
+        if messagebox.askyesno("Uninstall AoE4 Spotify?", "Removes the app, its shortcuts and settings, and puts the game's launch options and music volume back." + steam):
+            subprocess.Popen([un, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], env=child_env()); root.destroy()   # one click: no further boxes
 
     def fetch_names():
         def go():
@@ -2247,9 +2439,8 @@ def panel():
     _draw = draw
     def draw():                                    # full redraw (state changes only, never on hover)
         t0 = time.perf_counter(); _draw(); ui["dt"] = time.perf_counter() - t0
-        if tipst["tag"]:                           # the hovered control may be gone after a redraw
-            cur = cv.find_withtag("current")
-            if not (cur and tipst["tag"] in cv.gettags(cur[0])): hide_tip()
+        tg = hov["tip"]; on_pointer(force=True)      # re-apply hover state to the new items
+        if tg and hov["tip"] == tg and not tipst["shown"]: pass
     def refresh_now():
         def go():
             s = {"spotify": os.path.exists(TOKEN), "game": aoe_running()}

@@ -23,7 +23,7 @@ runs `steam.exe -shutdown`, waits up to 30 s, force-closes only as a last resort
 Steam afterwards; a `.aoe4spotify.bak` copy is made first, and existing options are kept after ours).
 Steam then starts the app with the game command; the app starts the game, follows the log and exits
 ~10s after RelicCardinal.exe closes. Uninstall restores the previous launch option exactly.
-App flags: `--panel` (control panel window; the Desktop and Start Menu shortcuts use it),
+App flags: `--panel` (the app window; the Desktop and Start Menu shortcuts use it),
 `--set-launch-option`, `--remove-launch-option`; no arguments = Spotify login only.
 Panel settings are saved to `%APPDATA%\AoE4Spotify\config.json` and overlay the install `config.json`
 (`default_playlists` there are what Revert restores).
@@ -54,5 +54,5 @@ The app is built with PyInstaller `--onedir` (`dist\AoE4 Spotify\AoE4 Spotify.ex
 
 ## Playlist covers and previews
 
-The panel fetches each playlist's name, images and snapshot_id (`GET /playlists/{id}`), downloads the smallest image at least ~1.5x the 30 px thumbnail and caches it in `%APPDATA%\AoE4Spotify\covers\<playlist id>_<snapshot>.jpg` (older snapshots are deleted; offline uses the cache, else the age icon). In the editor a click (no drag, < 4 px movement) on a chip plays that track via the app's login (`Spotify.preview`/`pause`). Tests: `ctest.py` (covers, simulated API), `etest.py` (editor incl. preview), `ptest.py`, `utest.py`, `wtest.py`, `e2e.ps1` (installer with a fake Steam).
+The panel fetches each playlist's name, images and snapshot_id (`GET /playlists/{id}`), downloads the smallest image at least ~1.5x the 30 px thumbnail and caches it in `%APPDATA%\AoE4Spotify\covers\<playlist id>_<snapshot>.jpg` (older snapshots are deleted; offline uses the cache, else the age icon). In the editor a click (no drag, < 4 px movement) on a chip plays that track via the app's login (`Spotify.preview`/`pause`). Tests: `ctest.py` (covers, simulated API), `etest.py` (editor incl. preview), `ptest.py`, `utest.py`, `wtest.py`, `vtest.py` (Age Intros v2: overview/age pages, migration, empty civs, match replay), `itest.py`, `htest.py`, `mtest.py <sample .lua>`, `fcap.py` (no blink), `e2e.ps1` (TEST installer with a fake Steam; silent only). Every Python test runs with a throwaway `%APPDATA%`, never your real settings.
 
