@@ -19,123 +19,111 @@
     "pools": {
       "french": [
         "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
       ],
       "hre": [
         "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K"
       ],
       "templar": [
         "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K"
       ],
       "french_ha_01": [
         "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K"
       ],
       "abbasid": [
         "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:7KIapIqUFMEvN3FraugpE7"
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp"
       ],
       "abbasid_ha_01": [
         "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:7KIapIqUFMEvN3FraugpE7"
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k"
       ],
       "byzantine": [
         "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:7KIapIqUFMEvN3FraugpE7"
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
       ],
       "malian": [
         "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
-        "spotify:track:1NiVLozT1hFs8kTlZIVpbe",
-        "spotify:track:6rrYlL764Y64WDrXeqcJDJ"
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
       ],
       "sultanate": [
         "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
-        "spotify:track:1NiVLozT1hFs8kTlZIVpbe",
-        "spotify:track:6rrYlL764Y64WDrXeqcJDJ"
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY"
       ],
       "ottoman": [
         "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
-        "spotify:track:1NiVLozT1hFs8kTlZIVpbe",
-        "spotify:track:6rrYlL764Y64WDrXeqcJDJ"
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
       ],
       "english": [
         "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:7dvOs8YFcXJ0tqXzxTg0an"
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k"
       ],
       "hre_ha_01": [
         "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:7dvOs8YFcXJ0tqXzxTg0an"
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo"
       ],
       "lancaster": [
         "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:7dvOs8YFcXJ0tqXzxTg0an"
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC",
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k"
       ],
       "mongol": [
         "spotify:track:6hdfIg76lNerf0bLt7ppAo",
-        "spotify:track:6rrYlL764Y64WDrXeqcJDJ",
-        "spotify:track:2aD8OyfNrAcuONAUiPYwtm"
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
       ],
       "mongol_ha_gol": [
         "spotify:track:6hdfIg76lNerf0bLt7ppAo",
-        "spotify:track:6rrYlL764Y64WDrXeqcJDJ",
-        "spotify:track:2aD8OyfNrAcuONAUiPYwtm"
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
       ],
       "rus": [
         "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:0RiwXmTRYvQgZY9H2d9mxH"
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
       ],
       "chinese_ha_01": [
         "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:0RiwXmTRYvQgZY9H2d9mxH"
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY"
       ],
       "chinese": [
         "spotify:track:3LxsqAQ0rXaLEHonDax63B",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:0eF9Z9vv4Fb1lwqSCaLHxd"
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
       ],
       "japanese": [
         "spotify:track:3LxsqAQ0rXaLEHonDax63B",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:0eF9Z9vv4Fb1lwqSCaLHxd"
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
       ],
       "jin_dynasty": [
         "spotify:track:3LxsqAQ0rXaLEHonDax63B",
-        "spotify:track:3d80bouLhySElI9NYD1Ffh",
-        "spotify:track:0eF9Z9vv4Fb1lwqSCaLHxd"
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo"
       ],
       "japanese_ha_sen": [
         "spotify:track:5X8te47Qx2kIeAqAicMrgC",
-        "spotify:track:6WwQn6c45kIP9CjevshKaa",
-        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo"
       ],
       "sultanate_ha_tug": [
         "spotify:track:5X8te47Qx2kIeAqAicMrgC",
-        "spotify:track:6WwQn6c45kIP9CjevshKaa",
-        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp"
       ],
       "byzantine_ha_mac": [
         "spotify:track:5X8te47Qx2kIeAqAicMrgC",
-        "spotify:track:6WwQn6c45kIP9CjevshKaa",
-        "spotify:track:2vkvPJsQmDd82E1f2v1OYm"
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY"
       ]
     },
     "default": [
-      "spotify:track:3d80bouLhySElI9NYD1Ffh",
-      "spotify:track:6rrYlL764Y64WDrXeqcJDJ"
+      "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+      "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+      "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+      "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+      "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+      "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
+      "spotify:track:3LxsqAQ0rXaLEHonDax63B",
+      "spotify:track:5X8te47Qx2kIeAqAicMrgC"
     ]
   }
 }

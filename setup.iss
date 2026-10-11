@@ -3,7 +3,7 @@
 [Setup]
 AppId={{6F2B8C1E-4A7D-4E0B-9C33-A0E4F5B71D42}
 AppName={#AppName}
-AppVersion=1.3
+AppVersion=1.4
 AppPublisher=Capstar
 LicenseFile=LICENSE
 DefaultDirName={localappdata}\Programs\{#AppName}
