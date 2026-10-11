@@ -3,6 +3,6 @@ rem Build the app exe and the installer from this folder. Needs Python 3.11+ and
 python -m venv .venv
 .venv\Scripts\python -m pip install pyinstaller pillow
 .venv\Scripts\python make_icon.py
-.venv\Scripts\pyinstaller --noconfirm --onefile --windowed --name "AoE4 Spotify" --icon app.ico aoe4_spotify.py
+.venv\Scripts\pyinstaller --noconfirm --onefile --windowed --name "AoE4 Spotify" --icon app.ico --add-data "app.ico;." --add-data "gtg_frames;gtg_frames" aoe4_spotify.py
 "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" setup.iss
 echo Done: out\AoE4 Spotify Setup.exe

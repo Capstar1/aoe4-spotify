@@ -3,7 +3,7 @@
 [Setup]
 AppId={{6F2B8C1E-4A7D-4E0B-9C33-A0E4F5B71D42}
 AppName={#AppName}
-AppVersion=0.1
+AppVersion=0.2
 AppPublisher=Capstar
 LicenseFile=LICENSE
 SetupIconFile=app.ico

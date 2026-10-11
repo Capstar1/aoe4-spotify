@@ -34,3 +34,8 @@ The login token is written to `%APPDATA%\AoE4Spotify\token.json` and must never 
 
 Testing the Steam close/reopen without touching real Steam: run Setup with
 `/STEAMPROC=<dummy.exe> /STEAMEXE=<path to dummy>` and set `AOE4SPOTIFY_STEAM_PATH` to a fake Steam folder.
+
+## Good-to-go window art
+
+`gtg_frames\` holds the animated face shown after login (9 small JPEGs, bundled into the exe with `--add-data`). They were made with `make_gtg_frames.py source.gif`: only the opening face frames are kept, the face is cropped and the watermark corner painted over.
+

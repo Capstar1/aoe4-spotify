@@ -1,4 +1,4 @@
-"""AoE4 -> Spotify age playlist switcher. Python stdlib only. MIT licensed (see LICENSE).
+"""AoE4 -> Spotify age playlist switcher. Python stdlib + Pillow (panel). MIT licensed (see LICENSE).
 
 How it works, in short:
 - AoE4: while RelicCardinal.exe runs, it reads Documents/My Games/Age of Empires IV/warnings.log,
@@ -20,6 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
+ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled files (app.ico, gtg_frames/) inside the exe
 DATA = os.path.join(os.environ.get("APPDATA") or HERE, "AoE4Spotify")
 os.makedirs(DATA, exist_ok=True)
 TOKEN = os.path.join(DATA, "token.json")   # private Spotify login token; never shared or packaged
@@ -638,6 +639,238 @@ def remove_launch_option():
             open(f, "wb").write(t2.encode("utf-8", "surrogateescape")); log("%s: launch option removed" % f)
     if os.path.exists(STATE): os.remove(STATE)
 
+def launch_option_is_set():
+    """True/False whether AoE4's Steam launch option starts us; None if Steam isn't found."""
+    files = localconfigs()
+    if not files: return None
+    pre = our_prefix().lower()
+    for f in files:
+        try: toks = vdf_tokens(open(f, "rb").read().decode("utf-8", "surrogateescape"))
+        except OSError: continue
+        for k, tok in enumerate(toks):
+            if tok[0] == "s" and tok[1].lower() == "launchoptions" and k + 1 < len(toks) and toks[k+1][0] == "s" \
+                    and vunesc(toks[k+1][1]).lower().startswith(pre):
+                return True
+    return False
+
+def steam_running():
+    import subprocess
+    try:
+        out = subprocess.run(["tasklist", "/fi", "imagename eq steam.exe", "/nh"], capture_output=True,
+                             text=True, creationflags=0x08000000).stdout
+        return "steam.exe" in out.lower()
+    except Exception: return False
+
+def steam_exe():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as k:
+            return winreg.QueryValueEx(k, "SteamExe")[0]
+    except OSError: return None
+
+def with_steam_closed(fn):
+    """Steam rewrites localconfig.vdf while running: close it gracefully, run fn, reopen it if it was open."""
+    import subprocess
+    was = steam_running(); exe = steam_exe()
+    if was:
+        log("Closing Steam to edit the launch option")
+        if exe: subprocess.Popen([exe, "-shutdown"])
+        for _ in range(30):
+            time.sleep(1)
+            if not steam_running(): break
+        else:
+            log("Steam did not close in 30s - force closing")
+            subprocess.run(["taskkill", "/im", "steam.exe", "/f"], capture_output=True, creationflags=0x08000000)
+            time.sleep(2)
+    try: fn()
+    finally:
+        if was and exe: subprocess.Popen([exe, "-silent"]); log("Reopened Steam")
+
+def spotify_installed():
+    return (os.path.isfile(os.path.join(os.environ.get("APPDATA", ""), "Spotify", "Spotify.exe"))
+            or os.path.isdir(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", STORE_APP))
+            or _spotify_protocol_registered())
+
+def setup_status(sp):
+    """What the 'You're good to go' window shows."""
+    st = {"ok": bool(sp and sp.tok), "name": None, "steam": None, "spotify_app": spotify_installed()}
+    if st["ok"]:
+        c, r = sp._api("GET", "/me")
+        if c == 200 and isinstance(r, dict): st["name"] = r.get("display_name") or r.get("id")
+    try: st["steam"] = launch_option_is_set()
+    except Exception as e: log("Launch option check failed: %r" % e)
+    return st
+
+def open_panel_process():
+    import subprocess
+    cmd = [sys.executable, "--panel"] if FROZEN else [sys.executable, os.path.abspath(__file__), "--panel"]
+    subprocess.Popen(cmd)
+
+# ---------------------------------------------------------------- "You're good to go" window
+def good_to_go(status, parent=None, on_open_panel=None, on_retry=None, fix=None):
+    """Panel-style result window after Spotify login. status from setup_status().
+    parent: an existing Tk root (from the panel) or None (own window, blocks until closed)."""
+    import tkinter as tk
+    from PIL import Image, ImageDraw, ImageTk
+    try: import ctypes; ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception: pass
+    C = dict(bg="#121212", card="#1f1f1f", tx="#f2f2f2", mu="#9a9a9a", acc="#1DB954", red="#e5484d", warn="#f5a524")
+    win = tk.Toplevel(parent) if parent else tk.Tk()
+    win.title("AoE4 Spotify"); win.configure(bg=C["bg"]); win.resizable(False, False)
+    S = win.winfo_fpixels("1i") / 96.0
+    W = 400
+    cv = tk.Canvas(win, width=int(W * S), height=10, bg=C["bg"], highlightthickness=0); cv.pack()
+    imgs = []
+    def F(sz, b=False): return ("Segoe UI", -int(sz * S), "bold" if b else "normal")
+    def pil(w, h, paint):                         # 4x supersampled, anti-aliased
+        m = 4; im = Image.new("RGBA", (int(w * S * m), int(h * S * m)), (0, 0, 0, 0)); paint(ImageDraw.Draw(im), S * m)
+        ph = ImageTk.PhotoImage(im.resize((max(1, int(w * S)), max(1, int(h * S))), Image.LANCZOS), master=win)
+        imgs.append(ph); return ph
+    def rr(x0, y0, x1, y1, r, fill, outline=None, tag=None):
+        ph = pil(x1 - x0, y1 - y0, lambda d, k: d.rounded_rectangle([0, 0, (x1-x0)*k - 1, (y1-y0)*k - 1], r * k, fill=fill,
+                                                                   outline=outline, width=int(2 * k) if outline else 0))
+        cv.create_image(x0 * S, y0 * S, image=ph, anchor="nw", tags=tag or ())
+    def mark(cx, cy, size, kind, tag=None):       # filled circle with a check / cross / !
+        col = {"ok": C["acc"], "bad": C["red"], "warn": C["warn"]}[kind]
+        def paint(d, k):
+            z = size * k; d.ellipse([0, 0, z - 1, z - 1], fill=col); w = max(2, int(z * 0.11))
+            if kind == "ok": d.line([(z*.28, z*.52), (z*.44, z*.68), (z*.73, z*.36)], fill="#121212", width=w, joint="curve")
+            elif kind == "bad":
+                d.line([(z*.32, z*.32), (z*.68, z*.68)], fill="#121212", width=w); d.line([(z*.68, z*.32), (z*.32, z*.68)], fill="#121212", width=w)
+            else:
+                d.line([(z*.5, z*.24), (z*.5, z*.58)], fill="#121212", width=w); d.ellipse([z*.44, z*.68, z*.56, z*.80], fill="#121212")
+        cv.create_image(cx * S, cy * S, image=pil(size, size, paint), anchor="center", tags=tag or ())
+    def text(x, y, s, sz, c=None, b=False, anchor="w", tag=None):
+        cv.create_text(x * S, y * S, text=s, font=F(sz, b), fill=c or C["tx"], anchor=anchor, tags=tag or ())
+    actions = {}
+    def button(x0, y0, x1, y1, label, primary, fn, tag):
+        rr(x0, y0, x1, y1, (y1 - y0) / 2, C["acc"] if primary else C["card"], None if primary else C["mu"], tag)
+        text((x0 + x1) / 2, (y0 + y1) / 2, label, 12, "#121212" if primary else C["tx"], True, "center", tag)
+        actions[tag] = fn
+        cv.tag_bind(tag, "<Button-1>", lambda e, t=tag: win.after_idle(actions[t]))
+        cv.tag_bind(tag, "<Enter>", lambda e: cv.config(cursor="hand2")); cv.tag_bind(tag, "<Leave>", lambda e: cv.config(cursor=""))
+    def close():
+        try: win.destroy()
+        except tk.TclError: pass
+    # Animated avatar: bundled face frames (gtg_frames/), soft round mask, thin green ring, check badge.
+    R = 62                                        # avatar radius
+    faces = []
+    def load_faces():
+        from PIL import ImageFilter, ImageChops
+        D = int(2 * R * S)
+        m = Image.new("L", (D * 4, D * 4), 0); ImageDraw.Draw(m).ellipse([0, 0, D * 4 - 1, D * 4 - 1], fill=255)
+        m = m.resize((D, D), Image.LANCZOS)
+        fade = Image.new("L", (D, D), 0); e = max(2, int(5 * S)); ImageDraw.Draw(fade).ellipse([e, e, D - e, D - e], fill=255)
+        mask = ImageChops.multiply(m, fade.filter(ImageFilter.GaussianBlur(4.5 * S)))
+        files = sorted(glob.glob(os.path.join(ASSETS, "gtg_frames", "face_*.jpg")), key=lambda p: int(re.findall(r"\d+", os.path.basename(p))[0]))
+        frames = []
+        for p in files:
+            try: f = Image.open(p).convert("RGB").resize((D, D), Image.LANCZOS)
+            except Exception as ex: log("Face frame %s: %r" % (p, ex)); continue
+            im = Image.new("RGB", (D, D), C["bg"]); im.paste(f, (0, 0), mask)
+            frames.append(ImageTk.PhotoImage(im, master=win))
+        return frames + frames[-2:0:-1]          # ping-pong loop
+    anim = {"i": 0}
+    def animate():
+        if not win.winfo_exists(): return
+        it = cv.find_withtag("avatar")
+        if it and faces:
+            anim["i"] = (anim["i"] + 1) % len(faces); cv.itemconfig(it[0], image=faces[anim["i"]])
+        win.after(90, animate)
+    def draw():
+        cv.delete("all"); imgs.clear(); actions.clear()
+        ok = status["ok"]
+        if ok:
+            CY = 22 + R
+            if faces: cv.create_image(W / 2 * S, CY * S, image=faces[anim["i"] % len(faces)], anchor="center", tags="avatar")
+            else: mark(W / 2, CY, 2 * R, "ok")
+            rg = R + 3
+            cv.create_image(W / 2 * S, CY * S, anchor="center", image=pil(2 * rg + 2, 2 * rg + 2,
+                lambda d, k: d.ellipse([k, k, (2 * rg + 1) * k, (2 * rg + 1) * k], outline=C["acc"], width=int(1.5 * k))))
+            bx, by = W / 2 + R * 0.72, CY + R * 0.72
+            cv.create_image(bx * S, by * S, anchor="center", image=pil(34, 34, lambda d, k: d.ellipse([0, 0, 34 * k - 1, 34 * k - 1], fill=C["bg"])))
+            mark(bx, by, 28, "ok")
+            y = CY + R + 30
+        else:
+            mark(W / 2, 54, 64, "bad"); y = 112
+        text(W / 2, y, "You're good to go" if ok else "Spotify login didn't finish", 19, b=True, anchor="center")
+        y += 28
+        if ok:
+            app_ok = status.get("spotify_app", True)
+            sub = ("Connected as %s" % status["name"]) if status.get("name") else "Connected"
+            rows = [("ok" if app_ok else "warn", "Spotify", sub if app_ok else "Spotify app not installed", None)]
+            st = status.get("steam")
+            if st: rows.append(("ok", "Age of Empires IV", "Starts with the game", None))
+            elif st is False: rows.append(("warn", "Age of Empires IV", "Launch option missing", "fix"))
+            else: rows.append(("warn", "Age of Empires IV", "Steam not found", None))
+            rows.append(("warn", "Skill", "Issue detected", None))     # the joke row (always)
+            for kind, lab, detail, act in rows:
+                rr(20, y, W - 20, y + 40, 10, C["card"])
+                mark(42, y + 20, 18, kind); text(60, y + 20, lab, 12, b=True)
+                if act == "fix":
+                    text(W - 92, y + 20, detail, 11, C["mu"], anchor="e")
+                    button(W - 84, y + 8, W - 30, y + 32, "Fix", True, do_fix, "b_fix")
+                else: text(W - 32, y + 20, detail, 11, C["mu"], anchor="e")
+                y += 48
+            y += 6
+            button(20, y, W / 2 - 6, y + 40, "Open panel", False, open_panel, "b_panel")
+            button(W / 2 + 6, y, W - 20, y + 40, "Done", True, close, "b_done")
+        else:
+            text(W / 2, y + 4, "Log in to Spotify and click Agree.", 12, C["mu"], anchor="center"); y += 30
+            button(20, y, W / 2 - 6, y + 40, "Close", False, close, "b_done")
+            button(W / 2 + 6, y, W - 20, y + 40, "Try again", True, retry, "b_retry")
+        cv.config(height=int((y + 60) * S))
+    def do_fix():
+        if not fix: return
+        text(W / 2, 20, "Steam closes and reopens...", 10, C["mu"], anchor="center")
+        done = []
+        def go():
+            try: fix()
+            except Exception as e: log("Fix launch option failed: %r" % e)
+            try: done.append(launch_option_is_set())
+            except Exception: done.append(None)
+        def poll():                               # Tk must only be touched from this thread
+            if done: status.update(steam=done[0]); draw()
+            else: win.after(200, poll)
+        threading.Thread(target=go, daemon=True).start(); poll()
+    def open_panel():
+        (on_open_panel or open_panel_process)(); close()
+    def retry():
+        close()
+        if on_retry: on_retry()
+    def badge(d, k):                              # same app badge as app.ico / the panel
+        m = 32 * k; d.ellipse([0, 0, m - 1, m - 1], fill=C["acc"])
+        for o, hh in ((-0.2, 0.2), (0, 0.3), (0.2, 0.2)):
+            x = m * (0.5 + o); d.rounded_rectangle([x - m*.05, m*(.5-hh), x + m*.05, m*(.5+hh)], radius=m*.05, fill="#121212")
+    set_app_icon(win)
+    faces.extend(load_faces())
+    draw(); animate()
+    win._gtg = {"cv": cv, "status": status, "actions": actions, "draw": draw}   # for tests
+    win.lift(); win.attributes("-topmost", True); win.after(300, lambda: win.attributes("-topmost", False))
+    if parent is None: win.mainloop()
+    return win
+
+def set_app_icon(win):
+    """Title-bar icon = app.ico (bundled), so it matches the exe and shortcuts."""
+    ico = os.path.join(ASSETS, "app.ico")
+    try:
+        if os.path.exists(ico): win.iconbitmap(ico); win.iconbitmap(default=ico); return
+    except Exception as e: log("Icon: %r" % e)
+
+def login_flow(cfg):
+    """No-arg start (installer Finish page): log in if needed, then show the result window."""
+    if os.environ.get("AOE4SPOTIFY_GTG_DEMO"):    # testing/screenshots only: show the window with sample data
+        good_to_go({"ok": True, "name": "Capstar", "steam": True, "spotify_app": True}); return
+    sp = Spotify(cfg)
+    while True:
+        if not sp.tok:
+            try: sp.login()
+            except BaseException as e: log("Login failed: %r" % e)
+        st = setup_status(sp)
+        again = []
+        good_to_go(st, on_retry=lambda: again.append(1), fix=lambda: with_steam_closed(set_launch_option))
+        if not again: return
+
 def remove_old_startup_shortcut():
     lnk = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup", "AoE4 Spotify.lnk")
     if os.path.exists(lnk): os.remove(lnk); log("Removed old Startup shortcut")
@@ -645,7 +878,7 @@ def remove_old_startup_shortcut():
 # ---------------------------------------------------------------- main
 def main():
     args = sys.argv[1:]
-    if args[:1] == ["--set-launch-option"]: set_launch_option(); return
+    if args[:1] == ["--set-launch-option"]: with_steam_closed(set_launch_option); return   # no-op close if Setup already closed Steam
     if args[:1] == ["--remove-launch-option"]: remove_launch_option(); return
     if args[:1] == ["--panel"]: panel(); return
     cfg = load_config()
@@ -664,10 +897,8 @@ def main():
     remove_old_startup_shortcut()
     sp = Spotify(cfg)
     if not args:
-        # Started by hand / installer Finish page: just log in to Spotify, then exit.
-        if sp.tok: log("Already logged in to Spotify. Start AoE4 from Steam and the music follows your ages.")
-        else: sp.login()
-        return
+        # Started by hand / installer Finish page: log in to Spotify, show "You're good to go", exit.
+        login_flow(cfg); return
     # Started by Steam with the game command (%command%) as args: start the game first.
     import subprocess
     game_dir = os.path.dirname(args[0]) if os.path.isfile(args[0]) else None
@@ -783,6 +1014,7 @@ def panel():
     ui = {"open": os.environ.get("AOE4SPOTIFY_PANEL_OPEN") == "1"}   # env var: screenshots/testing only
     power_img = _icon(int(30 * S), _power); fade_img = _icon(int(24 * S), _fade)
     root.iconphoto(True, ImageTk.PhotoImage(badge(64)), ImageTk.PhotoImage(badge(32)))
+    set_app_icon(root)
     def text(x, y, s, sz, c=None, b=False, anchor="w", tag=None):
         return cv.create_text(*P(x, y), text=s, font=F(sz, b), fill=c or C["tx"], anchor=anchor, tags=tag)
     # Each tag is bound once; draw() only updates the handler table. (Re-binding inside a click
@@ -846,7 +1078,7 @@ def panel():
         # header
         cv.create_image(*P(20, 16), image=logo, anchor="nw")
         text(64, 32, "AoE4 Spotify", 22, b=True)
-        rr(238, 22, 284, 42, 10, C["card"]); text(261, 32, "v0.1", 10, C["mu"], anchor="center")
+        rr(238, 22, 284, 42, 10, C["card"]); text(261, 32, "v0.2", 10, C["mu"], anchor="center")
         cv.create_line(*P(20, 62, 500, 62), fill=C["line"])
         # enabled
         rr(20, 74, 500, 128, 12, C["card"])
@@ -952,9 +1184,13 @@ def panel():
 
     def login():
         def go():
-            try: Spotify(load_config()).login()
-            except BaseException as e: log("Login failed: %r" % e)
+            sp = Spotify(load_config())
+            try: sp.login()
+            except BaseException as e: log("Login failed: %r" % e); sp.tok = None
+            st = setup_status(sp)
             refresh_now(); fetch_names()
+            post(lambda: good_to_go(st, parent=root, on_open_panel=lambda: None, on_retry=login,
+                                    fix=lambda: with_steam_closed(set_launch_option)))
         threading.Thread(target=go, daemon=True).start()
 
     def open_log():

@@ -1,6 +1,6 @@
 # AoE4 Spotify
 
-**Version 0.1 (early release).** Age-based music for **Age of Empires IV** on Windows.
+**Version 0.2 (early release).** Age-based music for **Age of Empires IV** on Windows.
 
 ## Features
 
@@ -17,6 +17,7 @@
   this PC automatically.
 - **Steam launch option:** runs only alongside the game. Steam starts AoE4 through AoE4 Spotify, which
   exits about 10 seconds after the game closes. Nothing runs when you're not playing.
+- **You're good to go:** after the Spotify login a small window confirms Spotify is connected and AoE4 starts with the game (with a Fix button if the Steam launch option is missing).
 - **Control panel** (Desktop / Start Menu shortcut *AoE4 Spotify*): on/off switch, Spotify and game
   status, change or revert each age's playlist, Age 4 Intro theme toggle, fade slider, Log in, Updates,
   Open log, Uninstall. Your settings are saved in `%APPDATA%\AoE4Spotify\config.json`.
