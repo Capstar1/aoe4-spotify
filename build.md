@@ -51,3 +51,8 @@ Testing the Steam close/reopen without touching real Steam: run Setup with
 ## Folder build
 
 The app is built with PyInstaller `--onedir` (`dist\AoE4 Spotify\AoE4 Spotify.exe` + `_internal\`), and the installer copies the whole folder. A one-file exe unpacks itself to `%TEMP%\_MEI*` on every start and can fail to clean it up when it starts other processes. Upgrading over an old one-file install replaces the exe and adds `_internal`. Child processes get a clean environment (`PYINSTALLER_RESET_ENVIRONMENT=1`, no `_MEI`/`_PYI` variables).
+
+## Playlist covers and previews
+
+The panel fetches each playlist's name, images and snapshot_id (`GET /playlists/{id}`), downloads the smallest image at least ~1.5x the 30 px thumbnail and caches it in `%APPDATA%\AoE4Spotify\covers\<playlist id>_<snapshot>.jpg` (older snapshots are deleted; offline uses the cache, else the age icon). In the editor a click (no drag, < 4 px movement) on a chip plays that track via the app's login (`Spotify.preview`/`pause`). Tests: `ctest.py` (covers, simulated API), `etest.py` (editor incl. preview), `ptest.py`, `utest.py`, `wtest.py`, `e2e.ps1` (installer with a fake Steam).
+

@@ -15,9 +15,10 @@
 - **Imperial Age Intro editor:** a tier-list style editor (opened from the Imperial Age Intro row in the
   Control Panel) with every civ's flag. Drag character chips from the tray onto a civ to add a theme;
   drag out, right-click or click x to remove (every civ keeps at least one). Undo per civ or Reset all.
+  Click a chip to hear that theme on Spotify (a green pulse marks it; click again to pause).
   Changes apply from the next match.
 - **Control Panel** (Desktop / Start Menu shortcut *AoE4 Spotify Control Panel*): on/off switch,
-  Spotify chip (click to log in) and game status, change or revert each age's playlist, Imperial Age
+  Spotify chip (click to log in) and game status, change or revert each age's playlist (each row shows the playlist's cover; click it to open the playlist in Spotify), Imperial Age
   Intro toggle and editor, fade slider. The gear menu has *Open log* and *Uninstall*. Settings are saved
   in `%APPDATA%\AoE4Spotify\config.json`.
 - **One-click updates:** when a newer release exists, the gear gets a green dot and a green

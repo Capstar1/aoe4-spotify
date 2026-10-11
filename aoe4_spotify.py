@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "0.3"
+VERSION = "0.3.1"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled files (app.ico, gtg_frames/, assets/): _internal next to the exe
 
 def child_env():
@@ -271,6 +271,16 @@ class Spotify:
         if code not in (200, 202, 204):
             log("Spotify error %s: %s" % (code, body)); return False
         return True
+
+    def preview(self, track):
+        """Play one track right now (editor preview, no fade). Starts Spotify / picks this PC like the switcher."""
+        q = "?device_id=" + self.device_id if self.device_id else ""
+        return self._play(track, {"uris": [track]}, q)
+
+    def pause(self):
+        q = "?device_id=" + self.device_id if self.device_id else ""
+        code, _ = self._api("PUT", "/me/player/pause" + q)
+        return code in (200, 202, 204)
 
     # ---- fading switch (runs in a background thread)
     def _set_vol(self, v):
@@ -581,8 +591,14 @@ def single_instance():
 APPID = "1466860"   # Age of Empires IV on Steam
 STATE = os.path.join(HERE, "launch_option_backup.json")
 
+def test_env(name):
+    """Test-only overrides (fake Steam etc.): honoured from source, or in the exe only with AOE4SPOTIFY_TEST=1,
+    so a stray variable can never redirect a real install."""
+    if FROZEN and os.environ.get("AOE4SPOTIFY_TEST") != "1": return None
+    return os.environ.get(name) or None
+
 def steam_path():
-    if os.environ.get("AOE4SPOTIFY_STEAM_PATH"): return os.environ["AOE4SPOTIFY_STEAM_PATH"]  # testing only
+    if test_env("AOE4SPOTIFY_STEAM_PATH"): return test_env("AOE4SPOTIFY_STEAM_PATH")
     import winreg
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as k:
         return winreg.QueryValueEx(k, "SteamPath")[0]
@@ -717,14 +733,14 @@ def launch_option_is_set():
 def steam_running():
     import subprocess
     try:
-        name = os.environ.get("AOE4SPOTIFY_STEAM_PROC") or "steam.exe"     # env var: testing only (dummy Steam)
+        name = test_env("AOE4SPOTIFY_STEAM_PROC") or "steam.exe"         # override: testing only (dummy Steam)
         out = subprocess.run(["tasklist", "/fi", "imagename eq " + name, "/nh"], capture_output=True,
                              text=True, creationflags=0x08000000).stdout
         return name.lower() in out.lower()
     except Exception: return False
 
 def steam_exe():
-    if os.environ.get("AOE4SPOTIFY_STEAM_EXE"): return os.environ["AOE4SPOTIFY_STEAM_EXE"]   # testing only
+    if test_env("AOE4SPOTIFY_STEAM_EXE"): return test_env("AOE4SPOTIFY_STEAM_EXE")
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as k:
@@ -743,7 +759,7 @@ def with_steam_closed(fn):
             if not steam_running(): break
         else:
             log("Steam did not close in 30s - force closing")
-            subprocess.run(["taskkill", "/im", os.environ.get("AOE4SPOTIFY_STEAM_PROC") or "steam.exe", "/f"], capture_output=True, creationflags=0x08000000)
+            subprocess.run(["taskkill", "/im", test_env("AOE4SPOTIFY_STEAM_PROC") or "steam.exe", "/f"], capture_output=True, creationflags=0x08000000)
             time.sleep(2)
     try: fn()
     finally:
@@ -1071,6 +1087,50 @@ def main():
 # overlay the install config (which is never edited).
 RELEASES_URL = "https://github.com/Capstar1/aoe4-spotify/releases"
 NAMES_CACHE = os.path.join(DATA, "playlist_names.json")
+COVERS = os.path.join(DATA, "covers")              # playlist cover thumbnails: <playlist id>_<snapshot>.jpg
+
+def http_get(url, timeout=15):
+    with urllib.request.urlopen(url, timeout=timeout) as r: return r.read()
+
+def pick_image(images, need):
+    """Smallest Spotify image that is at least `need` px wide (else the largest one)."""
+    imgs = [i for i in (images or []) if isinstance(i, dict) and i.get("url")]
+    if not imgs: return None
+    sized = sorted(imgs, key=lambda i: i.get("width") or 10 ** 6)
+    for i in sized:
+        if (i.get("width") or 10 ** 6) >= need: return i["url"]
+    return sized[-1]["url"]
+
+def cover_file(pid):
+    """Cached cover for a playlist (newest snapshot), or None."""
+    try: fs = [f for f in os.listdir(COVERS) if f.startswith(pid + "_")]
+    except OSError: return None
+    if not fs: return None
+    return max((os.path.join(COVERS, f) for f in fs), key=os.path.getmtime)
+
+def update_cover(sp, pid, need=96):
+    """GET name + images + snapshot; download the cover if this snapshot isn't cached. Returns (name, path)."""
+    c, r = sp._api("GET", "/playlists/%s?fields=name,images,snapshot_id" % pid)
+    if c != 200 or not isinstance(r, dict): return None, cover_file(pid)
+    snap = re.sub(r"[^A-Za-z0-9]", "", str(r.get("snapshot_id") or "0"))[:16] or "0"
+    path = os.path.join(COVERS, "%s_%s.jpg" % (pid, snap))
+    url = pick_image(r.get("images"), need)
+    if url and not os.path.exists(path):
+        try:
+            data = http_get(url); os.makedirs(COVERS, exist_ok=True)
+            open(path + ".part", "wb").write(data); os.replace(path + ".part", path)
+            for f in os.listdir(COVERS):                          # drop older snapshots of this playlist
+                if f.startswith(pid + "_") and os.path.join(COVERS, f) != path:
+                    try: os.remove(os.path.join(COVERS, f))
+                    except OSError: pass
+        except Exception as e: log("Cover download failed: %r" % e)
+    return r.get("name"), (path if os.path.exists(path) else cover_file(pid))
+
+def open_playlist(pid):
+    """Open a playlist in the Spotify app; fall back to the web player."""
+    try: os.startfile("spotify:playlist:" + pid); return "app"
+    except Exception:
+        webbrowser.open("https://open.spotify.com/playlist/" + pid); return "web"
 AGES = [("dark", "Dark"), ("feudal", "Feudal"), ("castle", "Castle"), ("imperial", "Imperial")]
 RE_PLAYLIST = re.compile(r"(?:open\.spotify\.com/(?:intl-[a-z]+/)?playlist/|spotify:playlist:)([A-Za-z0-9]{22})")
 
@@ -1244,9 +1304,65 @@ def pool_editor(parent, user, save):
             gx, gy = drag["xy"]; s = SONGS[drag["song"]]
             cv.create_image(gx * S, gy * S, image=art.chip(s[0], 19), tags="ghost")
         overlay()
+    # click a chip (no drag) = play that theme on Spotify now; click it again = pause
+    pv = {"song": None, "busy": False, "phase": 0, "sp": None, "q": [], "msgjob": None}
+    def hint(msg, x, y):
+        st["msg"] = (msg, x, y + 26)
+        if pv["msgjob"]: win.after_cancel(pv["msgjob"])
+        def clear():
+            pv["msgjob"] = None
+            if st["msg"] and st["msg"][0] == msg: st["msg"] = None; overlay()
+        pv["msgjob"] = win.after(2600, clear); overlay()
+    def preview(i, xy):
+        if pv["busy"]: return
+        action = "pause" if pv["song"] == SONGS[i][0] else "play"
+        pv["busy"] = True; pv["xy"] = xy
+        def go():
+            try:
+                if pv["sp"] is None: pv["sp"] = Spotify(load_config())
+                sp = pv["sp"]
+                if not sp.tok: res = "login"
+                else: res = bool(sp.preview(SONGS[i][3]) if action == "play" else sp.pause())
+            except Exception as e:
+                log("Preview failed: %r" % e); res = False
+            pv["q"].append((action, i, res))
+        threading.Thread(target=go, daemon=True).start()
+    def pvpump():
+        changed = False
+        while pv["q"]:
+            action, i, res = pv["q"].pop(0); pv["busy"] = False; changed = True
+            if res == "login": hint("Log in to Spotify in the Control Panel to preview", *pv["xy"])
+            elif action == "play":
+                if res: pv["song"] = SONGS[i][0]; log("Preview: %s" % SONGS[i][1])
+                else: hint("Couldn't play - is Spotify (Premium) running?", *pv["xy"])
+            else: pv["song"] = None
+        if pv["song"]: pv["phase"] = (pv["phase"] + 1) % 24
+        if pv["song"] or changed: overlay()
+        try: win.after(80, pvpump)
+        except Exception: pass
+    def playing_marks():
+        if not pv["song"] or st["drag"]: return
+        import math
+        k = 1.5 + 1.5 * math.sin(pv["phase"] / 24 * 2 * math.pi)            # gentle pulse
+        lw = max(1, int(2 * S))
+        spots = [(tray_xy(i), 20) for i, s in enumerate(SONGS) if s[0] == pv["song"]]
+        p = pools()
+        for i, (civ, _) in enumerate(CIV_LIST):
+            y = row_y(i)
+            if y + RH < LT or y > BOT: continue
+            for j, uri in enumerate(p[civ]):
+                if SONG_BY_URI.get(uri, ("",))[0] == pv["song"]: spots.append((chip_xy(i, j), 15))
+        for (cx, cy), r in spots:
+            R = r + 3 + k
+            cv.create_oval((cx - R) * S, (cy - R) * S, (cx + R) * S, (cy + R) * S, outline=C["acc"], width=lw)
+            bx, by = cx + r * 0.72, cy + r * 0.72                             # small speaker badge
+            cv.create_oval((bx - 7) * S, (by - 7) * S, (bx + 7) * S, (by + 7) * S, fill=C["acc"], outline=C["bg"], width=lw)
+            text(bx, by - 0.5, "\u266a", 9, "#121212", True, "center")
+
     def overlay():
         """Hover-only layer (highlights, x badge, tooltip): redrawn alone, so hovering never re-renders the list."""
         cv.delete("ovl"); mark = max(cv.find_all() or (0,)); hov = st["hov"]; drag = st["drag"]
+        playing_marks()
         if hov and not drag:
             p = pools()
             if hov[0] in ("chip", "x") and len(p[CIV_LIST[hov[1]][0]]) > 1:
@@ -1268,7 +1384,7 @@ def pool_editor(parent, user, save):
             s = SONGS[hov[1]] if hov[0] == "tray" else SONG_BY_URI.get(p[CIV_LIST[hov[1]][0]][hov[2]])
             if s:
                 cx, cy = tray_xy(hov[1]) if hov[0] == "tray" else chip_xy(hov[1], hov[2])
-                tip = ("%s \u2014 %s" % (s[1], s[2]), cx, cy + 26)
+                tip = ("%s \u2014 %s  (click to %s)" % (s[1], s[2], "pause" if pv["song"] == s[0] else "play"), cx, cy + 26)
                 if hov[0] == "chip" and len(p[CIV_LIST[hov[1]][0]]) == 1: tip = (tip[0] + "  (at least one song)", tip[1], tip[2])
         if st["msg"]: tip = st["msg"]
         if tip:
@@ -1302,7 +1418,7 @@ def pool_editor(parent, user, save):
         d = st["drag"]
         if not d: return
         x, y = L(e); px, py, _ = st["press"]
-        if d["xy"] is None and abs(x - px) + abs(y - py) < 5: return
+        if d["xy"] is None and abs(x - px) + abs(y - py) < 4: return       # < 4 px = a click (preview)
         d["xy"] = (x, y)
         if y > BOT - 24 and st["sc"] < max_sc(): st["sc"] = min(max_sc(), st["sc"] + 8)     # auto-scroll while dragging
         elif LT < y < LT + 24 and st["sc"] > 0: st["sc"] = max(0, st["sc"] - 8)
@@ -1325,7 +1441,10 @@ def pool_editor(parent, user, save):
             elif d["src"][0] == "row" and not (h and h[0] in ("row", "chip", "x", "undo") and h[1] == d["src"][1]):
                 remove(d["src"][1], d["src"][2])        # dragged out of its row
             st["hov"] = hit(x, y); draw(); return
-        if h and h[0] == "x": remove(h[1], h[2])
+        ph = st["press"][2] if st["press"] else None
+        if d and ph and ph[0] in ("tray", "chip") and h == ph:                 # click on a chip: preview
+            preview(d["song"], tray_xy(ph[1]) if ph[0] == "tray" else chip_xy(ph[1], ph[2]))
+        elif h and h[0] == "x": remove(h[1], h[2])
         elif h and h[0] == "undo": user.get("boss_pools", {}).pop(CIV_LIST[h[1]][0], None); commit(pools())
         elif h and h[0] == "reset": user.pop("boss_pools", None); commit(pools())
         st["hov"] = hit(x, y); draw()
@@ -1343,7 +1462,8 @@ def pool_editor(parent, user, save):
     cv.bind("<Leave>", lambda e: set_hover(None) if not st["drag"] else None)
     set_app_icon(win)
     draw()
-    win._ed = {"cv": cv, "st": st, "pools": pools, "tray_xy": tray_xy, "chip_xy": chip_xy, "row_y": row_y, "S": S, "draw": draw}  # tests
+    pvpump()
+    win._ed = {"pv": pv, "cv": cv, "st": st, "pools": pools, "tray_xy": tray_xy, "chip_xy": chip_xy, "row_y": row_y, "S": S, "draw": draw}  # tests
     reveal(win, over=parent); note_window("editor", win); win.lift(); win.focus_force()
     return win
 
@@ -1540,6 +1660,21 @@ def panel():
         pid = uri.split(":")[-1]
         return names.get(pid) or "Playlist"
 
+    covers = {}; cover_cache = {}
+    def cover_img(path):
+        """Rounded, anti-aliased 30 px thumbnail of a cached cover file (None if missing/broken)."""
+        if not path or not os.path.exists(path): return None
+        k = (path, os.path.getmtime(path))
+        if k not in cover_cache:
+            try:
+                px = int(round(30 * S)); Q = 4
+                im = Image.open(path).convert("RGB").resize((px, px), Image.LANCZOS)
+                m = Image.new("L", (px * Q, px * Q), 0)
+                ImageDraw.Draw(m).rounded_rectangle([0, 0, px * Q - 1, px * Q - 1], 6 * S * Q, fill=255)
+                im.putalpha(m.resize((px, px), Image.LANCZOS)); cover_cache[k] = ImageTk.PhotoImage(im)
+            except Exception as e:
+                log("Cover image: %r" % e); cover_cache[k] = None
+        return cover_cache[k]
     tips, tipbound = {}, set()
     tipw = tk.Toplevel(root); tipw.withdraw(); tipw.overrideredirect(True); tipw.configure(bg=C["line"])
     tipl = tk.Label(tipw, text="", bg=C["line"], fg=C["tx"], font=F(10), padx=6, pady=2); tipl.pack()
@@ -1625,7 +1760,13 @@ def panel():
         click("plh", lambda: (ui.update(open=not ui["open"]), draw()))
         for i, (k, lab) in enumerate(AGES if ui["open"] else []):
             y = 216 + i * 50; uri = cfg["playlists"].get(k, ""); is_def = uri == defaults.get(k)
-            rr(M, y, R_, y + 42, 10, C["card"]); rr(M + 9, y + 6, M + 39, y + 36, 6, C["ib"]); icon(i, M + 24, y + 21, C["acc"])
+            rr(M, y, R_, y + 42, 10, C["card"]); pid = uri.split(":")[-1]
+            cimg = cover_img(covers.get(pid) or (cover_file(pid) if pid else None))
+            if cimg:                                       # playlist cover: click = open in Spotify
+                cv.create_image(*P(M + 24, y + 21), image=cimg, anchor="center", tags="cov%d" % i)
+                click("cov%d" % i, lambda pid=pid: open_playlist(pid)); tip("cov%d" % i, "Open in Spotify")
+            else:
+                rr(M + 9, y + 6, M + 39, y + 36, 6, C["ib"]); icon(i, M + 24, y + 21, C["acc"])
             text(M + 48, y + 21, lab, 13, b=True)
             oval_(P(M+118, y+17, M+126, y+25), fill=C["acc"] if uri else C["idle"], outline="")
             nm = pl_name(uri); nm = nm if len(nm) <= 17 else nm[:16] + "…"
@@ -1715,7 +1856,7 @@ def panel():
         set_user("playlists", pls); fetch_names()
 
     def revert(k):
-        pls = dict(user.get("playlists") or {}); pls.pop(k, None); set_user("playlists", pls)
+        pls = dict(user.get("playlists") or {}); pls.pop(k, None); set_user("playlists", pls); fetch_names()
 
     def login():
         def go():
@@ -1772,10 +1913,12 @@ def panel():
                 changed = False
                 for uri in set(cfg["playlists"].values()) | set(defaults.values()):
                     pid = uri.split(":")[-1]
-                    if not pid or pid in names: continue
-                    c, r = sp._api("GET", "/playlists/%s?fields=name" % pid)
-                    if c == 200 and isinstance(r, dict) and r.get("name"): names[pid] = r["name"]; changed = True
+                    if not pid: continue
+                    nm, path = update_cover(sp, pid, int(round(30 * S * 1.5)))
+                    if nm and names.get(pid) != nm: names[pid] = nm; changed = True
+                    if path and covers.get(pid) != path: covers[pid] = path; changed = True
                 if changed:
+                    os.makedirs(DATA, exist_ok=True)
                     json.dump(names, open(NAMES_CACHE, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
                     post(draw)
             except Exception as e: log("Playlist names: %r" % e)

@@ -1,6 +1,6 @@
 ; Inno Setup script for AoE4 Spotify. Build: ISCC.exe setup.iss (after building the dist\AoE4 Spotify\ folder)
 #ifndef AppVer
-#define AppVer "0.3"
+#define AppVer "0.3.1"
 #endif
 #ifdef TEST
 ; test build (ISCC /DTEST): separate AppId/name/folder so it never touches a real install
@@ -25,7 +25,9 @@ PrivilegesRequired=lowest
 OutputDir=out
 OutputBaseFilename={#AppName} Setup
 UninstallDisplayName={#AppName}
-UninstallDisplayIcon={app}\AoE4 Spotify.exe
+UninstallDisplayIcon={app}\_internal\app.ico
+; refresh Explorer's icon cache at the end (new icon shows on shortcuts / Installed apps right away)
+ChangesAssociations=yes
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -49,8 +51,8 @@ Source: "app.png"; DestDir: "{app}\source"
 
 [Icons]
 ; control panel (settings window)
-Name: "{userdesktop}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"
-Name: "{userprograms}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"
+Name: "{userdesktop}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\app.ico"
+Name: "{userprograms}\{#AppName} Control Panel"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\app.ico"
 
 [InstallDelete]
 ; app is a PyInstaller folder build (exe + _internal); drop stale libraries from an older build first
@@ -90,7 +92,9 @@ var SP, P, Want: String; FR: TFindRec; Body: AnsiString;
 begin
   Result := False;
   SP := ExpandConstant('{param:STEAMPATH|}');
+#ifdef TEST
   if SP = '' then SP := GetEnv('AOE4SPOTIFY_STEAM_PATH');
+#endif
   if SP = '' then
     if not RegQueryStringValue(HKCU, 'Software\Valve\Steam', 'SteamPath', SP) then Exit;
   StringChangeEx(SP, '/', '\', True);
@@ -112,14 +116,18 @@ end;
 function SteamProc(): String;
 begin
   Result := ExpandConstant('{param:STEAMPROC|}');
+#ifdef TEST
   if Result = '' then Result := GetEnv('AOE4SPOTIFY_STEAM_PROC');   { test runs (dummy Steam) }
+#endif
   if Result = '' then Result := 'steam.exe';
 end;
 
 function SteamExe(): String;
 begin
   Result := ExpandConstant('{param:STEAMEXE|}');
+#ifdef TEST
   if Result = '' then Result := GetEnv('AOE4SPOTIFY_STEAM_EXE');
+#endif
   if Result = '' then
     if not RegQueryStringValue(HKCU, 'Software\Valve\Steam', 'SteamExe', Result) then Result := '';
 end;
