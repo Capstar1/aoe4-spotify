@@ -1,0 +1,14 @@
+{
+  "client_id": "025bc354ba624ce4ba0b98a5b74f8539",
+  "playlists": {
+    "dark": "spotify:playlist:3suhOyH8k2za0LbWbwJdaM",
+    "feudal": "spotify:playlist:5nKpTJWyJbiLHsu5eaRvG9",
+    "castle": "spotify:playlist:6W8iwAy9LVOiZHc95F0N0J",
+    "imperial": "spotify:playlist:3IofYhHHJJ10WyvSFnXDjb"
+  },
+  "device_id": "",
+  "log_path": "",
+  "fade_seconds": 2,
+  "shuffle": true,
+  "repeat": true
+}

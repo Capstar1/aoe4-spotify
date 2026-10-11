@@ -1,0 +1,10 @@
+token.json
+*.log
+build/
+dist/
+out/
+*.exe
+*.spec
+__pycache__/
+.venv/
+launch_option_backup.json
