@@ -6,8 +6,8 @@ and Spotify switches to your Feudal, Castle and Imperial playlists the moment **
 Switches fade out/in smoothly, start on a random track, shuffle, and loop the playlist.
 
 **Boss intro:** when you reach Imperial Age, one civ-themed boss intro from the OCTOPATH TRAVELER
-soundtrack plays first (one of the 8 short *For ...* themes, e.g. *For Freedom* for Japanese, *For Light*
-for French), then your Imperial playlist continues. Each civ has its own theme plus 1-2 related ones,
+soundtrack plays first (one of the 8 short *For ...* themes, e.g. *For Light* for French, *For Master* for Japanese,
+*For Freedom* only for desert civs), then your Imperial playlist continues. Each civ has its own theme plus 1-2 related ones,
 and never gets the same one twice in a row.
 
 Windows only. Python standard library only. MIT licensed.

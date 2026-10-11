@@ -19,7 +19,7 @@
     "pools": {
       "french": [
         "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
-        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K"
       ],
       "hre": [
         "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
@@ -32,14 +32,16 @@
       ],
       "french_ha_01": [
         "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
-        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
-        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K"
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+        "spotify:track:0JhmuCu4N8XT9nRVFsngS9"
       ],
       "abbasid": [
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
         "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
         "spotify:track:4RmbTKOJGdfKVEnwTUAobp"
       ],
       "abbasid_ha_01": [
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
         "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
         "spotify:track:5sEHThQpQWTZZVIbmFIx4k"
       ],
@@ -54,7 +56,8 @@
       ],
       "sultanate": [
         "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
-        "spotify:track:0iBkJlkxLIZvw64YMJEhpY"
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
       ],
       "ottoman": [
         "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
@@ -75,7 +78,7 @@
       ],
       "mongol": [
         "spotify:track:6hdfIg76lNerf0bLt7ppAo",
-        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
       ],
       "mongol_ha_gol": [
         "spotify:track:6hdfIg76lNerf0bLt7ppAo",
@@ -84,23 +87,23 @@
       ],
       "rus": [
         "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
-        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo"
       ],
       "chinese_ha_01": [
         "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
         "spotify:track:0iBkJlkxLIZvw64YMJEhpY"
       ],
       "chinese": [
-        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
-        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC",
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY"
       ],
       "japanese": [
-        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
-        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC",
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo"
       ],
       "jin_dynasty": [
-        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
-        "spotify:track:6hdfIg76lNerf0bLt7ppAo"
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
       ],
       "japanese_ha_sen": [
         "spotify:track:5X8te47Qx2kIeAqAicMrgC",
@@ -108,7 +111,8 @@
       ],
       "sultanate_ha_tug": [
         "spotify:track:5X8te47Qx2kIeAqAicMrgC",
-        "spotify:track:4RmbTKOJGdfKVEnwTUAobp"
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
       ],
       "byzantine_ha_mac": [
         "spotify:track:5X8te47Qx2kIeAqAicMrgC",
@@ -122,7 +126,6 @@
       "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
       "spotify:track:6hdfIg76lNerf0bLt7ppAo",
       "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
-      "spotify:track:3LxsqAQ0rXaLEHonDax63B",
       "spotify:track:5X8te47Qx2kIeAqAicMrgC"
     ]
   }
