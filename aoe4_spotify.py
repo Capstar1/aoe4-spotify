@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "0.4.3"
+VERSION = "0.5.1"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
 def child_env():
@@ -33,7 +33,7 @@ os.makedirs(DATA, exist_ok=True)
 TOKEN = os.path.join(DATA, "token.json")   # private Spotify login token; never shared or packaged
 LOGFILE = os.path.join(DATA, "aoe4_spotify.log")
 REDIRECT = "http://127.0.0.1:8888/callback"
-SCOPES = "user-modify-playback-state user-read-playback-state"
+SCOPES = "user-modify-playback-state user-read-playback-state playlist-read-private playlist-read-collaborative user-library-read"
 def documents_dir():
     """The real Documents folder (handles OneDrive / moved Documents)."""
     try:
@@ -43,6 +43,51 @@ def documents_dir():
     except Exception: pass
     return os.path.join(os.path.expanduser("~"), "Documents")
 DEFAULT_LOG = os.path.join(documents_dir(), "My Games", "Age of Empires IV", "warnings.log")
+
+def atomic_write(path, text, mode="w"):
+    """Write-then-rename (never a half-written file). Retries os.replace: on Windows it fails while another
+    process has the target open for a moment (PermissionError)."""
+    tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+    with open(tmp, mode, **({} if "b" in mode else {"encoding": "utf-8"})) as f: f.write(text)
+    for i in range(20):
+        try: os.replace(tmp, path); return True
+        except PermissionError:
+            if i == 19:
+                try: os.remove(tmp)
+                except OSError: pass
+                raise
+            time.sleep(0.05)
+
+class FileLock:
+    """Cross-process lock (a byte-range lock on <path>.lock) - also excludes threads of this process."""
+    _tl = threading.Lock()
+    def __init__(self, path, timeout=20.0): self.path, self.timeout, self.f = path + ".lock", timeout, None
+    def __enter__(self):
+        FileLock._tl.acquire(); t0 = time.time()
+        try:
+            self.f = open(self.path, "a+b")
+            while True:
+                try:
+                    if sys.platform == "win32":
+                        import msvcrt; self.f.seek(0); msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl; fcntl.flock(self.f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except OSError:
+                    if time.time() - t0 > self.timeout: return self      # never deadlock: proceed unlocked
+                    time.sleep(0.05)
+        except Exception:
+            FileLock._tl.release(); raise
+    def __exit__(self, *a):
+        try:
+            if sys.platform == "win32":
+                import msvcrt; self.f.seek(0); msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl; fcntl.flock(self.f.fileno(), fcntl.LOCK_UN)
+        except Exception: pass
+        try: self.f.close()
+        except Exception: pass
+        FileLock._tl.release()
 
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
@@ -74,17 +119,43 @@ def load_user_settings():
 def apply_user(cfg, u):
     pls = u.get("playlists") if isinstance(u.get("playlists"), dict) else {}
     cfg["playlists"] = {**cfg.get("playlists", {}),
-                        **{k: v for k, v in pls.items() if isinstance(v, str) and v.startswith("spotify:playlist:")}}
+                        **{k: v for k, v in pls.items() if isinstance(v, str) and (v.startswith("spotify:playlist:") or is_custom(v))}}
     if isinstance(u.get("enabled"), bool): cfg["enabled"] = u["enabled"]
     for k in ("access_webhook", "access_key"):                       # request-access endpoint: overridable per user
         if isinstance(u.get(k), str) and u[k]: cfg[k] = u[k]
     if isinstance(u.get("fade_seconds"), (int, float)): cfg["fade_seconds"] = max(0.0, min(5.0, float(u["fade_seconds"])))
     if isinstance(u.get("boss_intro_enabled"), bool): cfg.setdefault("boss_intro", {})["enabled"] = u["boss_intro_enabled"]
+    if isinstance(u.get("after_match"), dict): cfg["after_match"] = u["after_match"]
     cfg["intros"] = build_intros(cfg, u)
     cfg["boss_intro"]["pools"] = cfg["intros"]["imperial"]["pools"]          # (older readers)
     return cfg
 
 INTRO_AGES = ("dark", "feudal", "castle", "imperial")
+# ---- "After match" setting: what to do with the music when a match ends (user settings key after_match)
+AFTER_MODES = ("stop", "playlist", "resume")
+# ---- custom lists: app-only song lists ("aoe4s:list:<id>"), kept in the user settings under custom_lists
+CUSTOM_PREFIX = "aoe4s:list:"; CUSTOM_MAX = 100
+def is_custom(uri): return isinstance(uri, str) and uri.startswith(CUSTOM_PREFIX)
+def is_playable(uri): return isinstance(uri, str) and (uri.startswith("spotify:") or is_custom(uri)) and "PASTE" not in uri
+def custom_get(uri, u=None):
+    if not is_custom(uri): return None
+    lst = (load_user_settings() if u is None else u).get("custom_lists")
+    v = lst.get(uri[len(CUSTOM_PREFIX):]) if isinstance(lst, dict) else None
+    return v if isinstance(v, dict) else None
+def custom_tracks(uri, u=None):
+    return [t["uri"] for t in ((custom_get(uri, u) or {}).get("tracks") or [])
+            if isinstance(t, dict) and str(t.get("uri", "")).startswith("spotify:track:")][:CUSTOM_MAX]
+def custom_cover(uri): return os.path.join(COVERS, "list_%s.png" % uri[len(CUSTOM_PREFIX):])
+RE_AM_URI = re.compile(r"(spotify:(playlist|track):[A-Za-z0-9]{22}|aoe4s:list:[A-Za-z0-9]{1,32})$")
+def after_match_cfg(cfg):
+    a = cfg.get("after_match") if isinstance(cfg.get("after_match"), dict) else {}
+    def u(k):
+        v = a.get(k); return v if isinstance(v, str) and RE_AM_URI.match(v) else ""
+    old_wl = a.get("mode") == "winloss"                          # 0.4.5: Win / Loss was a choice -> now toggle on + Stop
+    mode = a.get("mode") if a.get("mode") in AFTER_MODES else ("resume" if "mode" not in a else "stop")   # never picked -> Resume; old keep/fade/dark -> Stop
+    return {"mode": mode,
+            "wl": bool(a["winloss_on"]) if isinstance(a.get("winloss_on"), bool) else old_wl,
+            "playlist": u("playlist") if (u("playlist").startswith("spotify:playlist:") or is_custom(u("playlist"))) else "", "win": u("win"), "loss": u("loss")}
 def user_intro_pools(u, base_pools=None):
     """Per-age civ pools edited in the Age Intros editor; migrates the 0.3.x Imperial-only "boss_pools".
     Semantics (v2): Imperial = defaults + your changes; Dark/Feudal/Castle = only what you put there
@@ -180,8 +251,10 @@ def decode_preset(code):
     if not m: return None, "Not an AoE4 Spotify code"
     if int(m.group(1)) != PRESET_VER: return None, "Made with a newer version - update AoE4 Spotify"
     try:
-        b = m.group(2); raw = zlib.decompress(base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)), bufsize=1 << 16)
-        if len(raw) > 1 << 18: return None, "Code is too big"
+        b = m.group(2)
+        if len(b) > 1 << 18: return None, "Code is too big"
+        dz = zlib.decompressobj(); raw = dz.decompress(base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)), (1 << 18) + 1)
+        if len(raw) > 1 << 18 or dz.unconsumed_tail: return None, "Code is too big"     # hard cap: a zip bomb never inflates
         d = json.loads(raw.decode("utf-8"))
     except Exception: return None, "Code is incomplete or damaged"
     if not isinstance(d, dict): return None, "Code is incomplete or damaged"
@@ -224,14 +297,39 @@ def preset_songs(base_cfg, p):
 # ---------------------------------------------------------------- Spotify desktop app launch
 STORE_APP = r"SpotifyAB.SpotifyMusic_zpdnekdrzrea0"
 
-def spotify_running():
+def proc_running(exe):
+    """Is a process with this image name running? In-process Toolhelp snapshot (~1 ms) instead of spawning
+    tasklist.exe (~40 ms CPU + a process launch). Falls back to tasklist off Windows / on error."""
+    exe = exe.lower()
+    if sys.platform == "win32":
+        try:
+            import ctypes, ctypes.wintypes as wt
+            class PE(ctypes.Structure):
+                _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD), ("th32ProcessID", wt.DWORD),
+                            ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wt.DWORD), ("cntThreads", wt.DWORD),
+                            ("th32ParentProcessID", wt.DWORD), ("pcPriClassBase", ctypes.c_long), ("dwFlags", wt.DWORD),
+                            ("szExeFile", ctypes.c_wchar * 260)]
+            k = ctypes.windll.kernel32
+            k.CreateToolhelp32Snapshot.restype = wt.HANDLE
+            h = k.CreateToolhelp32Snapshot(2, 0)              # TH32CS_SNAPPROCESS
+            if h in (None, wt.HANDLE(-1).value): raise OSError("snapshot failed")
+            try:
+                pe = PE(); pe.dwSize = ctypes.sizeof(PE); ok = k.Process32FirstW(wt.HANDLE(h), ctypes.byref(pe))
+                while ok:
+                    if pe.szExeFile.lower() == exe: return True
+                    ok = k.Process32NextW(wt.HANDLE(h), ctypes.byref(pe))
+                return False
+            finally: k.CloseHandle(wt.HANDLE(h))
+        except Exception: pass
     import subprocess
     try:
-        out = subprocess.run(["tasklist", "/fi", "imagename eq Spotify.exe", "/nh"], capture_output=True,
+        out = subprocess.run(["tasklist", "/fi", "imagename eq %s" % exe, "/nh"], capture_output=True,
                              text=True, creationflags=0x08000000).stdout
-        return "spotify.exe" in out.lower()
+        return exe in out.lower()
     except Exception:
         return False
+
+def spotify_running(): return proc_running("Spotify.exe")
 
 def _spotify_protocol_registered():
     try:
@@ -274,8 +372,7 @@ def local_guard(v, last=None):
             if os.path.exists(p): os.remove(p)
         else:
             os.makedirs(DATA, exist_ok=True)
-            with open(p + ".part", "w") as f: f.write(json.dumps({"v": float(v), "last": None if last is None else float(last)}))
-            os.replace(p + ".part", p)
+            atomic_write(p, json.dumps({"v": float(v), "last": None if last is None else float(last)}))
     except Exception: pass
 
 def local_guard_restore():
@@ -293,16 +390,31 @@ def local_guard_restore():
 class SpotifySession:
     """Windows per-app volume of Spotify.exe (Core Audio session). Smooth and instant; local only."""
     def __init__(self, vols): self.vols = vols
+    _warned = None
     @staticmethod
     def find():
         if sys.platform != "win32" or test_env("AOE4SPOTIFY_NO_LOCAL_FADE"): return None
-        try:
-            from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
-            vols = [x._ctl.QueryInterface(ISimpleAudioVolume) for x in AudioUtilities.GetAllSessions()
-                    if x.Process and x.Process.name().lower() == "spotify.exe"]
-            return SpotifySession(vols) if vols else None
-        except Exception as e:
-            log("Local fade unavailable: %s" % type(e).__name__); return None
+        err = None
+        for attempt in range(2):                     # one retry: audio endpoints can be mid-change
+            try:
+                try:                                 # every worker thread needs COM; harmless if already set up
+                    import comtypes; comtypes.CoInitializeEx(getattr(comtypes, "COINIT_MULTITHREADED", 0))
+                except Exception: pass
+                from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+                vols = []
+                for x in AudioUtilities.GetAllSessions():   # fresh every call: never a stale session after Spotify restarts
+                    try:
+                        if x.Process and x.Process.name().lower() == "spotify.exe":
+                            vols.append(x._ctl.QueryInterface(ISimpleAudioVolume))
+                    except Exception: continue       # one dead/protected session must not sink the rest
+                SpotifySession._warned = None
+                return SpotifySession(vols) if vols else None
+            except Exception as e:
+                err = e; time.sleep(0.15)
+        msg = "%s: %s" % (type(err).__name__, err)
+        if SpotifySession._warned != msg:            # full reason once, not every age-up
+            log("Local fade unavailable (%s)" % msg); SpotifySession._warned = msg
+        return None
     def get(self):
         return float(self.vols[0].GetMasterVolume())
     def set(self, v):
@@ -363,7 +475,14 @@ class Spotify:
         if "refresh_token" not in tok and self.tok: tok["refresh_token"] = self.tok.get("refresh_token")
         tok["expires_at"] = time.time() + tok.get("expires_in", 3600) - 60
         self.tok = tok
-        with open(TOKEN, "w", encoding="utf-8") as f: json.dump(tok, f)
+        atomic_write(TOKEN, json.dumps(tok))
+
+    @staticmethod
+    def _disk_tok():
+        try:
+            with open(TOKEN, encoding="utf-8") as f: t = json.load(f)
+            return t if isinstance(t, dict) and t.get("refresh_token") else None
+        except Exception: return None
 
     def _token_req(self, data):
         req = urllib.request.Request("https://accounts.spotify.com/api/token",
@@ -408,18 +527,29 @@ class Spotify:
 
     def access(self):
         # Never opens the login page by itself: background calls (panel, game) just fail quietly.
-        if not self.tok: raise RuntimeError("not logged in to Spotify")
+        if not self.tok:
+            self.tok = self._disk_tok()                  # logged in from the panel meanwhile
+            if not self.tok: raise RuntimeError("not logged in to Spotify")
         if time.time() > self.tok.get("expires_at", 0):
-            try:
-                self._save(self._token_req({"grant_type": "refresh_token",
-                    "refresh_token": self.tok["refresh_token"], "client_id": self.cid}))
-            except urllib.error.HTTPError as e:
-                if e.code in (400, 401):      # refresh token revoked/expired: forget it, user must log in again
-                    log("Spotify login expired - open AoE4 Spotify and click Log in")
-                    self.tok = None
-                    try: os.remove(TOKEN)
-                    except OSError: pass
-                raise
+            # The panel and the game process share token.json, and a refresh can rotate the refresh token:
+            # refresh under a cross-process lock, and first adopt a newer token another process already saved.
+            with FileLock(TOKEN):
+                d = self._disk_tok()
+                if d and time.time() <= d.get("expires_at", 0) and d.get("access_token"):
+                    self.tok = d; return d["access_token"]
+                if d and d.get("refresh_token") != self.tok.get("refresh_token"): self.tok = d
+                used = self.tok.get("refresh_token")
+                try:
+                    self._save(self._token_req({"grant_type": "refresh_token", "refresh_token": used, "client_id": self.cid}))
+                except urllib.error.HTTPError as e:
+                    if e.code in (400, 401):      # refresh token revoked/expired: forget it, user must log in again
+                        d = self._disk_tok()
+                        if d and d.get("refresh_token") != used: self.tok = d; raise   # someone saved a newer one: keep it
+                        log("Spotify login expired - open AoE4 Spotify and click Log in")
+                        self.tok = None
+                        try: os.remove(TOKEN)
+                        except OSError: pass
+                    raise
         return self.tok["access_token"]
 
     def _api(self, method, path, body=None, _retry=True):
@@ -441,6 +571,7 @@ class Spotify:
                         except Exception: pass
                         self._kconn = None                     # stale keep-alive socket: reconnect once
                         if attempt: raise
+            if method != "GET": self._pcache = None           # anything we change invalidates the cached player state
             if status == 429:
                 try: self._retry_after = float(r.getheader("Retry-After") or 1)
                 except Exception: self._retry_after = 1.0
@@ -460,20 +591,53 @@ class Spotify:
 
     def play(self, uri):
         q = "?device_id=" + self.device_id if self.device_id else ""
+        if is_custom(uri):                                  # app-only list: play the songs directly (no Spotify context)
+            tr = custom_tracks(uri)
+            if not tr: log("Custom list %s is empty" % uri); return False
+            if self.shuffle: tr = tr[:]; random.shuffle(tr)      # app-side shuffle = random start + random order
+            self._custom = (uri, tr)
+            ok = self._play(uri, {"uris": tr}, q)
+            if ok: self.set_mode(shuffle=False, repeat="context" if self.repeat else None)
+            return ok
         payload = {"context_uri": uri}
         if self.shuffle and uri.startswith("spotify:playlist:"):
-            c, pl = self._api("GET", "/playlists/%s?fields=tracks.total" % uri.split(":")[-1])
-            try: n = int(pl["tracks"]["total"]) if c == 200 else 0
-            except Exception: n = 0
+            n = playlist_total(self, uri.split(":")[-1])
             payload["offset"] = {"position": random.randrange(n) if n > 0 else 0}
         ok = self._play(uri, payload, q)
-        if ok and self.shuffle:
-            dq = "&device_id=" + self.device_id if self.device_id else ""
-            self._api("PUT", "/me/player/shuffle?state=true" + dq)
-        if ok and self.repeat:
-            dq = "&device_id=" + self.device_id if self.device_id else ""
-            self._api("PUT", "/me/player/repeat?state=context" + dq)
+        if ok: self.set_mode(shuffle=True if self.shuffle else None, repeat="context" if self.repeat else None)
         return ok
+
+    # ---- your shuffle / repeat: saved the first time the app changes them, put back when it hands control back
+    def take_over(self):
+        if getattr(self, "_user_mode", None) is not None: return
+        c, st = self._api("GET", "/me/player")
+        if c == 200 and isinstance(st, dict) and st.get("item"):
+            self._user_mode = {"shuffle": bool(st.get("shuffle_state")), "repeat": st.get("repeat_state") or "off"}
+            log("Saved your Spotify shuffle=%s repeat=%s" % (self._user_mode["shuffle"], self._user_mode["repeat"]))
+        else: self._user_mode = {}                        # nothing was loaded: nothing to put back
+        self._app_mode = {}
+
+    def set_mode(self, shuffle=None, repeat=None):
+        """The only place the app changes shuffle / repeat (remembers what it set, to tell your own changes apart)."""
+        self.take_over(); dq = "&device_id=" + self.device_id if self.device_id else ""
+        if shuffle is not None: self._api("PUT", "/me/player/shuffle?state=%s%s" % ("true" if shuffle else "false", dq)); self._app_mode["shuffle"] = bool(shuffle)
+        if repeat in ("off", "context", "track"): self._api("PUT", "/me/player/repeat?state=%s%s" % (repeat, dq)); self._app_mode["repeat"] = repeat
+
+    def hand_back(self, why, mode=None):
+        """Put your shuffle / repeat back (volume has its own logic). Skipped if you changed them yourself meanwhile.
+        mode: values to restore instead of the saved ones (Resume: the pre-match state)."""
+        um = mode if mode is not None else getattr(self, "_user_mode", None); am = getattr(self, "_app_mode", None) or {}
+        self._user_mode = None; self._app_mode = {}
+        if not um: return False
+        c, st = self._api("GET", "/me/player")
+        if c != 200 or not isinstance(st, dict): return False
+        sh, rp = bool(st.get("shuffle_state")), st.get("repeat_state") or "off"
+        if ("shuffle" in am and sh != am["shuffle"]) or ("repeat" in am and rp != am["repeat"]):
+            log("%s: you changed shuffle/repeat yourself - keeping yours" % why); return False
+        dq = "&device_id=" + self.device_id if self.device_id else ""
+        if sh != um.get("shuffle", sh): self._api("PUT", "/me/player/shuffle?state=%s%s" % ("true" if um["shuffle"] else "false", dq))
+        if rp != um.get("repeat", rp) and um.get("repeat") in ("off", "context", "track"): self._api("PUT", "/me/player/repeat?state=%s%s" % (um["repeat"], dq))
+        log("%s: your shuffle=%s repeat=%s restored" % (why, um.get("shuffle"), um.get("repeat"))); return True
 
     def ensure_device(self, wait=20):
         """Find this PC's Spotify device (type Computer); start Spotify if needed and wait for it."""
@@ -498,6 +662,10 @@ class Spotify:
 
     def _play(self, uri, payload, q):
         code, body = self._api("PUT", "/me/player/play" + q, payload)
+        if code == 429 or code >= 500:               # rate limited / Spotify hiccup: one paced retry
+            wait = min(float(getattr(self, "_retry_after", 1) or 1), 5.0) if code == 429 else 0.6
+            log("Spotify %s on play - retrying in %.1fs" % (code, wait)); time.sleep(wait)
+            code, body = self._api("PUT", "/me/player/play" + q, payload)
         if code == 404:  # no active device (Spotify closed/idle): start it and target this PC by device_id
             self.device_id = None
             if not self.ensure_device(): return False
@@ -506,6 +674,7 @@ class Spotify:
             log("Spotify 403: playback control needs Spotify Premium (%s)" % body); return False
         if code not in (200, 202, 204):
             log("Spotify error %s: %s" % (code, body)); return False
+        self._paused_by_us = False
         return True
 
     def warm(self):
@@ -524,6 +693,14 @@ class Spotify:
         """Play one track right now (editor preview, no fade). Starts Spotify / picks this PC like the switcher."""
         q = "?device_id=" + self.device_id if self.device_id else ""
         return self._play(track, {"uris": [track]}, q)
+
+    def player_state(self, max_age=0.0):
+        """GET /me/player, reusing a result at most max_age s old (only when nothing was changed since)."""
+        pc = getattr(self, "_pcache", None)
+        if max_age > 0 and pc and time.time() - pc[0] <= max_age: return pc[1], pc[2]
+        c, st = self._api("GET", "/me/player")
+        self._pcache = (time.time(), c, st) if c == 200 else None
+        return c, st
 
     def pause(self):
         q = "?device_id=" + self.device_id if self.device_id else ""
@@ -556,7 +733,7 @@ class Spotify:
             if c == 200 and isinstance(st, dict) and st.get("is_playing") and (st.get("item") or {}).get("uri") != old_item \
                     and (st.get("progress_ms") or 0) > 0:
                 return True
-            time.sleep(0.12)
+            time.sleep(0.25)
         return False
 
     # Volume ownership: we never keep an "original" beyond one switch. The level is read right before the fade;
@@ -581,10 +758,19 @@ class Spotify:
     def _vol_ctl(self, mode, orig, sess=None):
         ctl = {"mode": mode, "orig": orig, "last": None, "user": None, "pacer": None}
         if mode == "local":
+            # Spotify can close mid-fade: its audio session then throws COM errors. Never let that kill the switch.
             def set_(v):
-                sess.set(v); ctl["last"] = v; local_guard(orig, v); return True
-            ctl.update(set=set_, get=lambda: sess.get(), near=lambda c: abs(c - ctl["last"]) <= 0.02, every=0.0, fps=60,
-                       read=lambda: sess.get(), put=lambda v: sess.set(v))
+                try: sess.set(v)
+                except Exception as e: log("Local fade: Spotify audio session gone (%s)" % type(e).__name__); return False
+                ctl["last"] = v; local_guard(orig, v); return True
+            def get_():
+                try: return sess.get()
+                except Exception: return None
+            def put_(v):
+                try: sess.set(v); return True
+                except Exception: return False
+            ctl.update(set=set_, get=get_, near=lambda c: ctl["last"] is not None and abs(c - ctl["last"]) <= 0.02, every=0.0, fps=60,
+                       read=get_, put=put_)
         else:
             pacer = ApiVolumePacer(self); ctl["pacer"] = pacer; recent = []
             def set_(v):
@@ -599,30 +785,48 @@ class Spotify:
             ctl.update(set=set_, get=get_, near=near, every=0.5, fps=1.0 / pacer.step, read=get_, put=lambda v: self._set_vol(v))
         return ctl
 
+    def _tls(self):
+        if not hasattr(self, "_tl"): self._tl = threading.local()
+        return self._tl
+
     def switch(self, uri, fade=2.0, player=None):
         player = player or self.play
         if not hasattr(self, "_glock"):
             self._glock = threading.Lock(); self._gen = 0
         with self._glock:
-            self._gen += 1; gen = self._gen
+            self._gen += 1; gen = self._gen; self._tls().gen = gen
+            self._busy = getattr(self, "_busy", 0) + 1     # our own switch: a stopped player now is NOT a user pause
             st = None
             if fade > 0:
-                code, st = self._api("GET", "/me/player")
+                code, st = self.player_state(max_age=1.0)      # the age-up's user_paused() check just read it
                 st = st if code == 200 and isinstance(st, dict) else None
             dev = (st or {}).get("device")
             playing = bool(st and st.get("is_playing"))
             old_item = ((st or {}).get("item") or {}).get("uri")
             loc = self._fader(dev) if (playing and fade > 0) else None
             mode = cur = None
-            if loc: mode, cur = "local", loc.get()           # Windows app volume; Spotify's own volume is never touched
-            elif fade > 0 and playing and dev and dev.get("volume_percent") is not None and dev.get("supports_volume", True):
+            if loc:
+                try: cur = loc.get()                        # Windows app volume; Spotify's own volume is never touched
+                except Exception: loc = None                # audio session already gone (Spotify closing)
+                else: mode = "local"
+            if not mode and fade > 0 and playing and dev and dev.get("volume_percent") is not None and dev.get("supports_volume", True):
                 mode, cur = "api", float(dev["volume_percent"])
             live = getattr(self, "_live", None)          # a fade a newer age-up just interrupted
             orig = cur
             if live and mode and live["mode"] == mode and live["last"] is not None and live["near"](cur):
                 orig = live["orig"]                      # still dipped by us: go back to the level before that dip
             ctl = self._vol_ctl(mode, orig, loc) if mode else None
+            orphan = live if (live and live["last"] is not None and live["user"] is None
+                              and not (ctl and orig is live["orig"])) else None   # a dip nobody will undo now
             self._live = ctl
+        if orphan and not ctl:                        # superseded fade whose level this switch doesn't inherit: undo it
+            try:
+                time.sleep(0.12)                          # let the old fader see the new generation and stop
+                cur_ = orphan["read"]()
+                if cur_ is None or orphan["near"](cur_):
+                    orphan["put"](orphan["orig"]); log("Put the volume back after an interrupted fade")
+                if orphan["mode"] == "local": local_guard(None)
+            except Exception as e: log("Volume restore after interrupted fade failed: %r" % e)
         try:
             if not ctl:
                 return player(uri)
@@ -642,16 +846,56 @@ class Spotify:
             return ok
         finally:
             with self._glock:
-                if ctl and gen == self._gen:
-                    if ctl["user"] is None and ctl["last"] is not None:
-                        cur = ctl["read"]()              # only undo OUR dip, never a newer user choice
-                        if cur is None or ctl["near"](cur):
-                            if ctl["pacer"] and not ctl["pacer"].fail: ctl["pacer"].target(ctl["orig"]); ctl["pacer"].flush()
-                            else: ctl["put"](ctl["orig"])
-                        else: log("Volume changed during the fade: keeping your level")
-                    if ctl["mode"] == "local": local_guard(None)
-                    self._live = None
-                if ctl and ctl["pacer"]: ctl["pacer"].stop()
+                self._busy = max(0, getattr(self, "_busy", 1) - 1); self._quiet_until = time.time() + 3.0
+                try:
+                    if ctl and gen == self._gen:
+                        if ctl["user"] is None and ctl["last"] is not None:
+                            cur = ctl["read"]()              # only undo OUR dip, never a newer user choice
+                            if cur is None or ctl["near"](cur):
+                                if ctl["pacer"] and not ctl["pacer"].fail: ctl["pacer"].target(ctl["orig"]); ctl["pacer"].flush()
+                                else: ctl["put"](ctl["orig"])
+                            else: log("Volume changed during the fade: keeping your level")
+                        if ctl["mode"] == "local": local_guard(None)
+                        self._live = None
+                except Exception as e: log("Volume restore failed: %r" % e); self._live = None
+                finally:
+                    if ctl and ctl["pacer"]: ctl["pacer"].stop()
+
+    # ---- user pause: never start music while YOU paused Spotify; hold the age playlist until you press play
+    def user_paused(self):
+        """True when Spotify has something loaded but is paused, and not because of our own switch/fade
+        (fades only dip volume; the short gap while a new track starts is covered by _busy/_quiet_until)."""
+        if getattr(self, "_busy", 0) or time.time() < getattr(self, "_quiet_until", 0): return False
+        c, st = self.player_state()
+        if c != 200 or not isinstance(st, dict) or not st.get("item"): return False   # idle / no session: just play
+        if st.get("is_playing"): self._paused_by_us = False; return False
+        return not getattr(self, "_paused_by_us", False)          # paused by our After match Fade/Stop: not you
+
+    def hold(self, key, uri, fade=2.0):
+        """Remember the newest age playlist (no intro) and start it with the normal fade once you resume."""
+        if not hasattr(self, "_hlock"): self._hlock = threading.Lock(); self._pending = None
+        log("Spotify paused by user - holding %s until resume" % key)
+        with self._hlock:
+            new_watch = self._pending is None
+            self._pending = (key, uri, fade)
+        if new_watch: threading.Thread(target=self._watch_resume, daemon=True).start()
+
+    def clear_hold(self):
+        if hasattr(self, "_hlock"):
+            with self._hlock: self._pending = None
+
+    def _watch_resume(self, every=1.5):
+        while True:
+            time.sleep(every)
+            with self._hlock:
+                if self._pending is None: return                   # superseded by a normal switch
+            c, st = self._api("GET", "/me/player")
+            if c != 200 or not isinstance(st, dict) or not st.get("is_playing"): continue
+            with self._hlock:
+                pend, self._pending = self._pending, None
+            if pend:
+                log("Spotify resumed - switching to held %s playlist" % pend[0]); self.switch(pend[1], pend[2])
+            return
 
     # ---- Age 4 Intro theme (config key boss_intro): play one track, then the age playlist (runs in a background thread)
     def boss_then(self, track, playlist, fade=2.0):
@@ -659,9 +903,10 @@ class Spotify:
             self._glock = threading.Lock(); self._gen = 0
         dq = "?device_id=" + self.device_id if self.device_id else ""
         # intro must not loop: repeat off, then play it as a single-track list
-        self._api("PUT", "/me/player/repeat?state=off" + dq.replace("?", "&"))
+        self.set_mode(repeat="off")
         ok = self.switch_uris(track, fade)
-        gen = self._gen
+        gen = getattr(self._tls(), "gen", self._gen)       # OUR switch's generation (not a newer one's)
+        if gen != self._gen: return                         # superseded (age-up / match end): never play the old age
         if not ok: return self.switch(playlist, fade)
         _, tr = self._api("GET", "/tracks/" + track.split(":")[-1])
         dur = (tr or {}).get("duration_ms", 240000) if isinstance(tr, dict) else 240000
@@ -676,7 +921,9 @@ class Spotify:
             if started and item != track: break             # ended or skipped by the user
             if item == track and st.get("progress_ms", 0) >= dur - 2500: break   # about to end
             if started and not st.get("is_playing") and st.get("progress_ms", 1) == 0: break
+            if started and item == track and not st.get("is_playing"): t0 += 2   # paused by you: don't run the clock
         if gen != self._gen: return
+        if self.user_paused(): return self.hold("playlist after intro", playlist, fade)
         log("Age 4 Intro theme done -> playlist")
         self.switch(playlist, fade)
 
@@ -684,6 +931,66 @@ class Spotify:
         """Like switch(), but plays a single track (uris) instead of a playlist context."""
         q = "?device_id=" + self.device_id if self.device_id else ""
         return self.switch(track, fade, player=lambda _u: self._play(track, {"uris": [track]}, q))
+
+    # ---- After match
+    def snapshot(self):
+        """What is playing right now (context + track + position + shuffle/repeat), for After match: Resume."""
+        c, st = self._api("GET", "/me/player")
+        if c != 200 or not isinstance(st, dict) or not isinstance(st.get("item"), dict): return None
+        snap = {"ctx": (st.get("context") or {}).get("uri"), "track": st["item"].get("uri"), "pos": int(st.get("progress_ms") or 0),
+                "playing": bool(st.get("is_playing")), "shuffle": bool(st.get("shuffle_state")), "repeat": st.get("repeat_state") or "off"}
+        cu = getattr(self, "_custom", None)                 # one of our custom lists: remember the list + its order
+        if not snap["ctx"] and cu and snap["track"] in cu[1]: snap.update(custom=cu[0], order=list(cu[1]))
+        return snap
+
+    def _snap_payload(self, snap):
+        ctx, tr, pos = snap.get("ctx"), snap.get("track"), snap.get("pos", 0)
+        if snap.get("order"): return snap["custom"], {"uris": snap["order"], "offset": {"uri": tr}, "position_ms": pos}, {"uris": snap["order"]}
+        if ctx and tr and not ctx.startswith("spotify:artist:"): return ctx, {"context_uri": ctx, "offset": {"uri": tr}, "position_ms": pos}, {"context_uri": ctx}
+        if ctx: return ctx, {"context_uri": ctx}, None
+        return tr, {"uris": [tr], "position_ms": pos}, None
+
+    def pause_ours(self):
+        self._paused_by_us = True; return self.pause()
+
+    def fade_pause(self, fade=2.0):
+        """Fade out, pause, put the volume back (while paused). Our pause never counts as yours."""
+        self._paused_by_us = True
+        return self.switch("pause", fade, player=lambda _u: (setattr(self, "_paused_by_us", True), self.pause())[1])
+
+    def play_any(self, uri, fade=2.0):
+        return self.switch_uris(uri, fade) if uri.startswith("spotify:track:") else self.switch(uri, fade)
+
+    def restore_paused(self, snap, fade=2.0):
+        """Pre-match music was loaded but paused: fade out what plays now, load it back at its spot, leave it paused."""
+        q = "?device_id=" + self.device_id if self.device_id else ""
+        key, payload, fb = self._snap_payload(snap)
+        self.fade_pause(fade)
+        sess = None
+        try: sess = SpotifySession.find()                          # mute the tiny blip while it loads (local Spotify)
+        except Exception: sess = None
+        v0 = sess.get() if sess else None
+        try:
+            if sess: sess.set(0.0)
+            ok = self._play(key, payload, q) or (bool(fb) and self._play(key, fb, q))
+            if ok and snap.get("order"): self._custom = (snap["custom"], snap["order"])
+            if ok: time.sleep(0.35); self.pause_ours()
+        finally:
+            if sess and v0 is not None: time.sleep(0.25); sess.set(v0)
+        if ok: self.hand_back("Resume", {"shuffle": bool(snap.get("shuffle")), "repeat": snap.get("repeat") or "off"})
+        return ok
+
+    def restore(self, snap, fade=2.0):
+        """Play the saved pre-match music again where it was (falls back to its start / the track alone)."""
+        q = "?device_id=" + self.device_id if self.device_id else ""
+        key, payload, fb = self._snap_payload(snap)
+        def player(_u):
+            ok_ = self._play(key, payload, q) or (bool(fb) and self._play(key, fb, q))
+            if ok_ and snap.get("order"): self._custom = (snap["custom"], snap["order"])
+            return ok_
+        ok = self.switch(key, fade, player=player)
+        if ok: self.hand_back("Resume", {"shuffle": bool(snap.get("shuffle")), "repeat": snap.get("repeat") or "off"})
+        return ok
 
 # ---------------------------------------------------------------- log parsing
 RE_HUMAN   = re.compile(r"GAME -- Human Player: (\d+) (.+) (\d+) (\d+) (\S+)$")
@@ -694,6 +1001,7 @@ RE_START   = re.compile(r"GAME -- Starting mission")
 RE_REPLAY  = re.compile(r"PlaybackSynchronization::")
 RE_UPSTART = re.compile(r"Age up started from (\w+) to (\w+) for player id (\d+)")
 RE_UPDONE  = re.compile(r"Age up complete from (\w+) for player id (\d+)")
+RE_RESULT  = re.compile(r"Report sent for profileID\[(\d+)\] -> race=\[\d+\], result=\[(\d+)\]")   # 1 win, 0 loss, 3 not final
 RE_END     = re.compile(r"MOD -- Game Over at frame|GameObj::ShutdownGameObj")
 NEXT = {"dark_age": "feudal_age", "feudal_age": "castle_age", "castle_age": "imperial_age"}
 KEY  = {"dark_age": "dark", "feudal_age": "feudal", "castle_age": "castle", "imperial_age": "imperial"}
@@ -707,14 +1015,26 @@ class Tracker:
         self.crc_dir = None; self.my_slot = None; self.begin_t = 0; self.catching_up = False
         self.fixed_id = cfg.get("player_id")          # optional manual override (int)
         self.in_match = self.replay = False
-        self.my_id = None; self.started = {}; self.ages = {}; self.recent = []
+        self.my_id = None; self.started = {}; self.ages = {}; self.recent = []; self.humans = []; self.my_hidx = None
         self.lock = threading.Lock()
+        self.result = None; self.match_n = 0; self.on_start = self.on_end = None   # After match hooks
+        self.first_human = None; self.start_delay = 0.0; self.replay_session = False
+
+    def is_player(self):
+        """Conservative: only a match we are confidently IN. You matched a lobby 'Human Player' line (profile id or name),
+        or a manual player_id is set, or you are the only human (vs AI) and no profile id says otherwise.
+        Anything else (spectating, casting, a replay of someone else, unknown identity) = leave the music alone."""
+        if isinstance(self.fixed_id, int) or self.my_slot is not None: return True
+        if len(self.humans) == 1 and not self.me_profile and getattr(self, "first_human", None):
+            sl, civ = self.first_human; self.my_slot, self.my_civ, self.my_hidx = sl, civ, 0
+            log("Only human in the lobby - that's you (slot %d)" % sl); return True
+        return False
 
     def reset(self):
-        self.in_match = True; self.replay = False
+        self.in_match = True; self.replay = False; self.result = None; self.match_n += 1
         self.my_id = self.fixed_id if isinstance(self.fixed_id, int) else None
         self.my_slot = None; self.begin_t = 0 if self.catching_up else time.time()
-        self.started.clear(); self.ages.clear(); self.recent.clear()
+        self.started.clear(); self.ages.clear(); self.recent.clear(); self.humans = []; self.my_hidx = None; self.first_human = None
 
     def feed(self, line):
         with self.lock: self._feed(line.rstrip("\r\n"))
@@ -725,12 +1045,22 @@ class Tracker:
         m = RE_PROFILE.search(line)
         if m and not self.me_profile:
             self.me_profile = m.group(1); log("Local AoE4 profile id: %s" % self.me_profile)
+        m = RE_RESULT.search(line)
+        if m:
+            if m.group(1) == self.me_profile:
+                self.result = int(m.group(2)); log("Match result for you: %s" % {1: "victory", 0: "defeat"}.get(self.result, "not final (%d)" % self.result))
+            return
         if RE_BEGIN.search(line):
             self.reset(); log("Match loading - state reset")
             return
         m = RE_HUMAN.search(line)
+        if m and m.group(3) not in self.humans:
+            self.humans.append(m.group(3))
+            if len(self.humans) == 1: self.first_human = (int(m.group(1)), m.group(5))
         if m and (m.group(3) == self.me_profile or (not self.me_profile and m.group(2) == self.me_name)):
-            self.my_slot = int(m.group(1)); self.my_civ = m.group(5)
+            self.my_slot = int(m.group(1)); self.my_civ = m.group(5); self.my_hidx = self.humans.index(m.group(3)) if m.group(3) in self.humans else None
+            if not self.me_profile and m.group(3).isdigit() and m.group(3) != "0":   # matched by Steam name: learn the profile id
+                self.me_profile = m.group(3); log("Local AoE4 profile id (from lobby): %s" % self.me_profile)   # (Win / Loss result lines use it)
             log("You are lobby slot %s (%s), team %s" % (m.group(1), m.group(5), m.group(4)))
             return
         if RE_REPLAY.search(line) and self.in_match:
@@ -738,11 +1068,20 @@ class Tracker:
             return
         if RE_START.search(line):
             if not self.in_match: self.reset()
+            if self.replay or self.replay_session:
+                self.replay = True; log("Replay - leaving the music alone"); return
+            if not self.is_player():
+                self.replay = True; log("Not confidently a player in this match (observing / unknown) - leaving the music alone")
+                return
             self.resolve_id()
-            log("Match started -> Dark Age playlist")
-            self.play("dark", getattr(self, "my_civ", None)); return
+            if self.start_delay > 0 and not self.catching_up:      # replay markers can trail the start line: wait briefly
+                n = self.match_n; threading.Timer(self.start_delay, self._late_start, args=(n,)).start(); return
+            self._begin_music()
+            return
         if RE_END.search(line) and self.in_match:
-            self.in_match = False; log("Match over"); return
+            self.in_match = False; log("Match over")
+            if self.on_end and not self.catching_up and not self.replay: self.on_end(self.match_n)
+            return
         m = RE_UPSTART.search(line)
         if m:
             pid = int(m.group(3)); new = m.group(2)
@@ -766,6 +1105,18 @@ class Tracker:
             elif pid == self.my_id and new in KEY:
                 log("YOU reached %s -> %s playlist" % (new, KEY[new])); self.play(KEY[new], getattr(self, "my_civ", None))
 
+    def _late_start(self, n):
+        with self.lock:
+            if self.match_n != n or not self.in_match or self.replay: log("Match start cancelled (replay / ended)"); return
+            self._begin_music()
+
+    def _begin_music(self):
+        log("Match started -> Dark Age playlist")
+        if self.on_start and not self.catching_up and not self.replay:
+            try: self.on_start()
+            except Exception as e: log("After match snapshot failed: %r" % e)
+        self.play("dark", getattr(self, "my_civ", None))
+
     def resolve_id(self):
         """Map lobby slot -> sim player id via the playermap in LogFiles/DataCRC*.txt,
         which the game writes for every match while it loads (setupindex -> simid, id = simid-1000)."""
@@ -776,7 +1127,7 @@ class Tracker:
             newest = max(files, key=os.path.getmtime)
             if self.begin_t and os.path.getmtime(newest) < self.begin_t - 5:
                 log("DataCRC file for this match not written yet"); return
-            self.my_id = slot_to_id(newest).get(self.my_slot)
+            self.my_id = pick_id(slot_to_id(newest), self.my_slot, getattr(self, "my_hidx", None))
             log("Identified you as player id %s (slot %d, from %s)" % (self.my_id, self.my_slot, os.path.basename(newest)))
         except Exception as e:
             log("Could not read DataCRC player map: %s" % e)
@@ -803,7 +1154,7 @@ def pick_boss_track(cfg, civ, age="imperial"):
     choices = [u for u in pool if u != state.get(civ)] or pool      # never the same as last time
     uri = random.choice(choices)
     state[civ] = uri
-    try: json.dump(state, open(BOSS_STATE, "w", encoding="utf-8"), indent=1)
+    try: atomic_write(BOSS_STATE, json.dumps(state, indent=1))
     except Exception as e: log("Could not save boss state: %r" % e)
     return uri
 
@@ -817,12 +1168,27 @@ def boss_age(cfg, key):
     return bool(b.get("enabled", True)) and key in INTRO_AGES and bool(intro_of(cfg, key)["enabled"])
 
 def slot_to_id(path):
+    """{setupindex: sim player id} from the playermap block (tolerant of spacing and field order)."""
     with open(path, encoding="utf-8", errors="replace") as f: t = f.read()
-    i = t.index("playermap:"); blk = t[i:t.index("}", i)]
-    return {int(s): int(m) - 1000 for s, m in
-            re.findall(r"setupindex: \[ (\d+) \]\s*simid: \[ (\d+) \]", blk)}
+    i = t.index("playermap:"); j = t.find("{", i); blk = t[i:t.index("}", j if j >= 0 else i)]
+    out, cur = {}, None
+    for k, v in re.findall(r"(setupindex|simid)\s*:\s*\[\s*(-?\d+)\s*\]", blk):
+        if k == "setupindex": cur = int(v)
+        elif cur is not None: out[cur] = int(v) - 1000; cur = None
+    return out
+
+def pick_id(pmap, slot, hidx=None):
+    """Lobby slot -> sim id. The playermap only lists HUMAN players, numbered 0.. in lobby order, so
+    with AI in the lobby your slot (e.g. 1) is not your setupindex (0). Use your index among the
+    "Human Player" lines first, then the raw slot, then the only entry."""
+    if not pmap: return None
+    if hidx is not None and hidx in pmap: return pmap[hidx]
+    if slot in pmap: return pmap[slot]
+    if len(pmap) == 1: return next(iter(pmap.values()))
+    return None
 
 # ---------------------------------------------------------------- tailing
+CATCHUP_MAX = 2 * 1024 * 1024
 def tail(path, tracker, stop=None):
     """Read the whole current log silently (catch-up: learn who you are / current match state),
     then follow new lines live. Handles the log being recreated or truncated."""
@@ -842,6 +1208,12 @@ def tail(path, tracker, stop=None):
             log("Log was recreated/truncated (game restarted) - reading from start")
             pos = 0
         ino = key
+        if not caught_up and pos == 0 and st.st_size > CATCHUP_MAX:
+            # Huge log: who you are is near the top; the current match is in the tail. Read only those parts.
+            with open(path, "rb") as f:
+                head = f.read(256 * 1024); f.seek(st.st_size - CATCHUP_MAX); f.readline(); pos = f.tell()
+            for line in head.decode("utf-8", errors="replace").splitlines():
+                if RE_STEAM.search(line) or RE_PROFILE.search(line): tracker.feed(line)
         if st.st_size > pos:
             with open(path, "rb") as f:
                 f.seek(pos); data = f.read()
@@ -883,7 +1255,7 @@ def music_write(v):
     if not m: return False
     if not os.path.exists(p + ".aoe4spotify.bak"): shutil.copyfile(p, p + ".aoe4spotify.bak")
     new = data[:m.start(2)] + (b"%.5f" % v) + data[m.end(2):]
-    if new != data: open(p + ".tmp", "wb").write(new); os.replace(p + ".tmp", p)
+    if new != data: atomic_write(p, new, "wb")
     return True
 
 def music_saved():
@@ -899,7 +1271,7 @@ def music_sync(enabled, running=None):
         if enabled:
             if v > 0:
                 os.makedirs(os.path.dirname(MUSIC_STATE), exist_ok=True)
-                json.dump({"level": v}, open(MUSIC_STATE, "w")); music_write(0.0); log("Game music muted (your level %.2f saved)" % v)
+                atomic_write(MUSIC_STATE, json.dumps({"level": v})); music_write(0.0); log("Game music muted (your level %.2f saved)" % v)
         else:
             lv = music_saved()
             if lv and v == 0: music_write(lv); log("Game music restored to %.2f" % lv)
@@ -910,14 +1282,7 @@ def music_sync(enabled, running=None):
     except Exception as e:
         log("Game music: %r" % e); return False
 
-def aoe_running():
-    import subprocess
-    try:
-        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq RelicCardinal.exe", "/NH"],
-                             capture_output=True, text=True, creationflags=NOWIN).stdout
-        return "RelicCardinal.exe" in out
-    except Exception:
-        return False
+def aoe_running(): return proc_running("RelicCardinal.exe")
 
 _WINDOW_MUTEXES = {}
 def single_window(name, title):
@@ -938,7 +1303,8 @@ def single_window(name, title):
                 w = int(open(_hwnd_file(name)).read()) or None
                 if not u32.IsWindow(ctypes.c_void_p(w)): w = None
             except Exception: w = None
-            w = w or u32.FindWindowW(None, title)
+            if not w and not os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX"):   # tests never touch a real window by title
+                w = u32.FindWindowW(None, title)
             if w:
                 if u32.IsIconic(ctypes.c_void_p(w)): u32.ShowWindow(ctypes.c_void_p(w), 9)   # SW_RESTORE
                 u32.SetForegroundWindow(ctypes.c_void_p(w))
@@ -1081,7 +1447,7 @@ def set_launch_option():
         log("%s: launch option set to %s" % (f, new))
     old_state = json.load(open(STATE)) if os.path.exists(STATE) else {}
     old_state.update(state)
-    json.dump(old_state, open(STATE, "w"), indent=1)
+    atomic_write(STATE, json.dumps(old_state, indent=1))
 
 def remove_launch_option():
     state = json.load(open(STATE)) if os.path.exists(STATE) else {}
@@ -1447,7 +1813,7 @@ def send_access_request(cfg, email, name=None, now=None):
     except urllib.error.HTTPError as e: log("Access request failed: HTTP %s" % e.code); return "error"
     except Exception as e: log("Access request failed: %s" % type(e).__name__); return "error"     # never logs the URL/key
     if not ok_: return "error"
-    u["access_last"] = now; u["access_pending"] = True; save_user(u); log("Access request sent")
+    merge_user({"access_last": now, "access_pending": True}); log("Access request sent")
     return "sent"
 
 def windows_light():
@@ -1486,9 +1852,10 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000):
     from PIL import Image, ImageDraw, ImageTk, ImageFont
     own = parent is None
     win = tk.Tk() if own else tk.Toplevel(parent)
+    if own: install_edit_menu(win)
     if own: win.withdraw()
     th = {"light": windows_light()}; P = lambda: ACCESS_THEMES["light" if th["light"] else "dark"]
-    dark_window(win, P()["bg"]); win.title("AoE4 Spotify - Get access"); win.resizable(False, False)
+    dark_window(win, P()["bg"]); win.title("AoE4 Spotify"); win.resizable(False, False)
     win.bind("<Destroy>", lambda e: release_window("access") if e.widget is win else None, add="+")
     S = win.winfo_fpixels("1i") / 96.0; F = lambda sz, b=True: ("Segoe UI", -int(round(sz * S)), "bold" if b else "normal")
     cfg = load_config(); st = {"sent": False, "job": None, "clip": None, "allowed": False, "hov": None, "focus": False, "b3": "disabled", "b3t": "Send request", "note": None}
@@ -1706,7 +2073,7 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000):
         st["job"] = win.after(recheck_ms, recheck)
     def allowed():
         if st["allowed"]: return
-        st["allowed"] = True; u = load_user_settings(); u.pop("access_pending", None); save_user(u)
+        st["allowed"] = True; merge_user(remove=("access_pending",))
         try: win.destroy()
         except Exception: pass
         if on_allowed: on_allowed()
@@ -1724,6 +2091,11 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000):
     if own:
         win.mainloop() if not test_env("AOE4SPOTIFY_TEST_NOLOOP") else None
     return win
+
+def win_hidden(w):
+    """Minimized or withdrawn: animations and polling can sleep."""
+    try: return w.state() in ("iconic", "withdrawn") or not w.winfo_viewable()
+    except Exception: return True
 
 def ImageColor_rgb(h): return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
 
@@ -1750,7 +2122,364 @@ def remove_old_startup_shortcut():
     if os.path.exists(lnk): os.remove(lnk); log("Removed old Startup shortcut")
 
 # ---------------------------------------------------------------- main
+# ---------------------------------------------------------------- tooltips (one shared system)
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageTk
+class GlassTip:
+    """Dark glass tooltip card with an arrow, in its own layered top-level window (never clipped, per-pixel alpha
+    for smooth corners + soft shadow on Windows). Anchored to an element's screen rectangle, flips above/below so it
+    never covers it, clamped to that monitor's work area. 350 ms delay, instant switch between neighbours,
+    120 ms fade + 2 px slide in, 80 ms fade out. One per Tk root: get_tip(widget)."""
+    DELAY, WARM, FIN, FOUT, MAXW, PAD, SH = 350, 400, 120, 80, 260, 10, 12
+    def __init__(self, root):
+        import tkinter as tk
+        self.root = root; self.w = tk.Toplevel(root); self.w.withdraw(); self.w.overrideredirect(True)
+        self.key = None; self.want = None; self.job = None; self.anim = None; self.shown = False; self.t_hide = 0.0
+        self.hwnd = None; self.layered = False; self.img = None; self.pos = (0, 0); self.label = None
+        self.wd = None; self.cursor = None; self.foreground = None     # (tests may override cursor / foreground)
+        try: self._init_layered()
+        except Exception as ex: log("Tooltip: layered window unavailable (%r)" % ex)
+        if not self.layered:
+            self.label = tk.Label(self.w, bd=0, highlightthickness=0, bg="#010203"); self.label.pack()
+            try: self.w.attributes("-transparentcolor", "#010203")
+            except Exception: pass
+        b = root.bind_all
+        for ev in ("<ButtonPress>", "<MouseWheel>", "<KeyPress>"): b(ev, lambda e: self.hide(), add="+")
+    # -- Windows layered window
+    def _init_layered(self):
+        import ctypes
+        if os.name != "nt": return
+        u = ctypes.windll.user32; self.w.update_idletasks()
+        h = u.GetParent(self.w.winfo_id()) or self.w.winfo_id()
+        GWL_EXSTYLE = -20; ex = u.GetWindowLongW(h, GWL_EXSTYLE)
+        u.SetWindowLongW(h, GWL_EXSTYLE, ex | 0x80000 | 0x20 | 0x08000000 | 0x80)   # LAYERED|TRANSPARENT|NOACTIVATE|TOOLWINDOW
+        self.hwnd = h; self.layered = True
+    def _push(self, alpha):
+        """Blit self.img (RGBA) at self.pos with overall alpha 0..1."""
+        x, y = self.pos
+        if not self.layered:
+            self.w.geometry("+%d+%d" % (x, y))
+            try: self.w.attributes("-alpha", max(0.0, min(1.0, alpha)))
+            except Exception: pass
+            return
+        import ctypes
+        from ctypes import wintypes as wt
+        im = self.img; wd, ht = im.size
+        r, g, b, a = im.split()
+        from PIL import ImageChops
+        pm = Image.merge("RGBA", (ImageChops.multiply(b, a), ImageChops.multiply(g, a), ImageChops.multiply(r, a), a))   # premultiplied BGRA
+        data = pm.tobytes()
+        u, g32 = ctypes.windll.user32, ctypes.windll.gdi32
+        class BIH(ctypes.Structure):
+            _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG), ("biPlanes", wt.WORD), ("biBitCount", wt.WORD),
+                        ("biCompression", wt.DWORD), ("biSizeImage", wt.DWORD), ("biXPelsPerMeter", wt.LONG), ("biYPelsPerMeter", wt.LONG),
+                        ("biClrUsed", wt.DWORD), ("biClrImportant", wt.DWORD)]
+        class BLEND(ctypes.Structure):
+            _fields_ = [("op", ctypes.c_ubyte), ("flags", ctypes.c_ubyte), ("alpha", ctypes.c_ubyte), ("fmt", ctypes.c_ubyte)]
+        bih = BIH(ctypes.sizeof(BIH), wd, -ht, 1, 32, 0, 0, 0, 0, 0, 0)
+        sdc = u.GetDC(0); mdc = g32.CreateCompatibleDC(sdc); bits = ctypes.c_void_p()
+        g32.CreateDIBSection.restype = ctypes.c_void_p
+        hb = g32.CreateDIBSection(mdc, ctypes.byref(bih), 0, ctypes.byref(bits), None, 0)
+        try:
+            ctypes.memmove(bits, data, len(data)); old = g32.SelectObject(mdc, ctypes.c_void_p(hb))
+            pt = wt.POINT(x, y); sz = wt.SIZE(wd, ht); src = wt.POINT(0, 0)
+            bl = BLEND(0, 0, int(255 * max(0.0, min(1.0, alpha))), 1)
+            u.UpdateLayeredWindow(wt.HWND(self.hwnd), sdc, ctypes.byref(pt), ctypes.byref(sz), mdc, ctypes.byref(src), 0, ctypes.byref(bl), 2)
+            g32.SelectObject(mdc, old)
+        finally:
+            g32.DeleteObject(ctypes.c_void_p(hb)); g32.DeleteDC(mdc); u.ReleaseDC(0, sdc)
+    # -- rendering
+    @staticmethod
+    def _font(px, bold):
+        for f in (("seguisb.ttf" if bold else "segoeui.ttf"), "segoeui.ttf", "arial.ttf"):
+            try: return ImageFont.truetype(os.path.join(os.environ.get("WINDIR", r"C:\\Windows"), "Fonts", f), px)
+            except Exception:
+                try: return ImageFont.truetype(f, px)
+                except Exception: pass
+        return ImageFont.load_default()
+    def _lines(self, text, fnt, maxw):
+        """Wrap to max 2 lines; ellipsize the rest."""
+        words = str(text).split(); lines = []; cur = ""
+        for w_ in words:
+            t_ = (cur + " " + w_).strip()
+            if fnt.getlength(t_) <= maxw or not cur: cur = t_
+            else: lines.append(cur); cur = w_
+        if cur: lines.append(cur)
+        if len(lines) > 2: lines = [lines[0], " ".join(lines[1:])]
+        out = []
+        for ln in lines:
+            if fnt.getlength(ln) > maxw:
+                while ln and fnt.getlength(ln + "\\u2026") > maxw: ln = ln[:-1]
+                ln = ln.rstrip() + "\\u2026"
+            out.append(ln)
+        return out or [""]
+    def _render(self, text, scale, arrow_up, ax):
+        Q = 3; s = scale; pad, sh = int(self.PAD * s), int(self.SH * s)
+        fnt = self._font(int(12 * s * Q), True)
+        lines = self._lines(text, self._font(int(12 * s), True), self.MAXW * s)
+        lh = int(17 * s); tw = max(int(self._font(int(12 * s), True).getlength(l)) for l in lines)
+        cw, chh = tw + 2 * pad + int(4 * s), lh * len(lines) + int(14 * s); ah = int(6 * s)
+        W_, H_ = cw + 2 * sh, chh + ah + 2 * sh
+        cy0 = sh + (ah if arrow_up else 0)
+        ax = max(sh + int(14 * s), min(W_ - sh - int(14 * s), ax))
+        def shape(d, k, fill):
+            d.rounded_rectangle([sh * k, cy0 * k, (sh + cw) * k, (cy0 + chh) * k], int(8 * s * k), fill=fill)
+            if arrow_up: d.polygon([((ax - ah) * k, (cy0 + 1) * k), ((ax + ah) * k, (cy0 + 1) * k), (ax * k, (cy0 - ah) * k)], fill=fill)
+            else: d.polygon([((ax - ah) * k, (cy0 + chh - 1) * k), ((ax + ah) * k, (cy0 + chh - 1) * k), (ax * k, (cy0 + chh + ah) * k)], fill=fill)
+        shd = Image.new("L", (W_, H_), 0); shape(ImageDraw.Draw(shd), 1, 120)
+        shd = shd.filter(ImageFilter.GaussianBlur(5 * s)); shd = ImageChops_offset(shd, 0, int(3 * s))
+        im = Image.new("RGBA", (W_ * Q, H_ * Q), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+        shape(d, Q, (255, 255, 255, 30))                                  # hairline edge
+        inner = Image.new("RGBA", im.size, (0, 0, 0, 0)); di = ImageDraw.Draw(inner)
+        di.rounded_rectangle([(sh * Q) + Q, cy0 * Q + Q, (sh + cw) * Q - Q, (cy0 + chh) * Q - Q], int(8 * s * Q) - Q, fill=(36, 36, 38, 246))
+        if arrow_up: di.polygon([((ax - ah) * Q + Q, (cy0 + 1) * Q + Q), ((ax + ah) * Q - Q, (cy0 + 1) * Q + Q), (ax * Q, (cy0 - ah) * Q + 2 * Q)], fill=(36, 36, 38, 246))
+        else: di.polygon([((ax - ah) * Q + Q, (cy0 + chh - 1) * Q - Q), ((ax + ah) * Q - Q, (cy0 + chh - 1) * Q - Q), (ax * Q, (cy0 + chh + ah) * Q - 2 * Q)], fill=(36, 36, 38, 246))
+        im.alpha_composite(inner)
+        for i, ln in enumerate(lines):
+            d.text(((sh + cw / 2) * Q, (cy0 + int(7 * s) + lh * i + lh / 2) * Q), ln, font=fnt, fill=(242, 242, 242, 255), anchor="mm")
+        im = im.resize((W_, H_), Image.LANCZOS)
+        base = Image.new("RGBA", (W_, H_), (0, 0, 0, 0)); base.putalpha(shd); base.alpha_composite(im)
+        if not self.layered:                                              # fallback: no translucency, key colour background
+            flat = Image.new("RGB", (W_, H_), (1, 2, 3)); m = im.split()[3].point(lambda v: 255 if v > 90 else 0)
+            flat.paste(im.convert("RGB"), (0, 0), m); base = flat
+        return base, sh, cy0, chh, ah
+    # -- monitor work area for a point (multi-monitor aware)
+    def _work(self, x, y):
+        try:
+            import ctypes
+            from ctypes import wintypes as wt
+            class MI(ctypes.Structure): _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT), ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+            u = ctypes.windll.user32; u.MonitorFromPoint.restype = ctypes.c_void_p
+            hm = u.MonitorFromPoint(wt.POINT(int(x), int(y)), 2); mi = MI(); mi.cbSize = ctypes.sizeof(MI)
+            if u.GetMonitorInfoW(ctypes.c_void_p(hm), ctypes.byref(mi)):
+                r = mi.rcWork; return r.left, r.top, r.right, r.bottom
+        except Exception: pass
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+    # -- public
+    # -- watchdog: the tooltip may only exist while the pointer is on its anchor in our foreground window
+    def _ptr(self):
+        if self.cursor: return self.cursor()
+        try:
+            import ctypes
+            from ctypes import wintypes as wt
+            pt = wt.POINT(); ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)); return pt.x, pt.y
+        except Exception: return self.root.winfo_pointerxy()
+    def _ours_fg(self):
+        if self.foreground: return self.foreground()
+        try:
+            import ctypes
+            from ctypes import wintypes as wt
+            u = ctypes.windll.user32
+            u.GetForegroundWindow.restype = wt.HWND
+            u.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+            fg = u.GetForegroundWindow()
+            if not fg: return False
+            pid = wt.DWORD(); u.GetWindowThreadProcessId(fg, ctypes.byref(pid)); return pid.value == os.getpid()
+        except Exception as ex:
+            log("Tooltip: foreground check failed (%r)" % ex); return False          # unsure -> hide
+    def ok(self):
+        """Still valid to show: anchor alive + mapped, owner not minimised, our window in front, pointer on the anchor."""
+        if not self.want: return False
+        _, _, (x0, y0, x1, y1), _, w = self.want
+        try:
+            if w is not None:
+                if not w.winfo_exists() or not w.winfo_viewable(): return False
+                if w.winfo_toplevel().state() in ("iconic", "withdrawn"): return False
+            if not self._ours_fg(): return False
+            px, py = self._ptr()
+            return x0 - 2 <= px <= x1 + 2 and y0 - 2 <= py <= y1 + 2
+        except Exception: return False
+    def _visible(self):
+        try: return bool(self.w.winfo_viewable())
+        except Exception: return False
+    def _watch(self):
+        self.wd = None
+        if not (self.shown or self.job or self._visible()): return
+        if (self.shown or self.job) and not self.ok(): self.hide()
+        elif not (self.shown or self.job or self.anim): self._gone()          # visible but nothing owns it: remove
+        self.wd = self.root.after(100, self._watch)
+    def _gone(self):
+        """Withdraw for sure (no fade), cancel timers."""
+        for j in ("job", "anim"):
+            if getattr(self, j):
+                try: self.root.after_cancel(getattr(self, j))
+                except Exception: pass
+                setattr(self, j, None)
+        self.shown = False
+        try: self.w.withdraw()
+        except Exception: pass
+    def request(self, key, text, rect, scale=1.0, widget=None):
+        """Ask for a tooltip for `key` anchored to screen rect (x0, y0, x1, y1) of `widget`."""
+        if not text: self.hide(); return
+        if key == self.key and (self.shown or self.job): self.want = (key, text, rect, scale, widget); return
+        fading = bool(self.anim) and not self.shown
+        self._cancel(); self.key = key; self.want = (key, text, rect, scale, widget)
+        if fading and self._visible(): self._gone()           # a cancelled fade-out must not leave the card behind
+        if not self.ok(): self.want = None; self.key = None; self._gone(); return
+        if not self.wd: self.wd = self.root.after(100, self._watch)
+        warm = self.shown or (time.time() - self.t_hide) * 1000 < self.WARM
+        if warm: self._show(slide=False)
+        else: self.job = self.root.after(self.DELAY, lambda: self._show(slide=True))
+    def _cancel(self):
+        for j in ("job", "anim"):
+            if getattr(self, j):
+                try: self.root.after_cancel(getattr(self, j))
+                except Exception: pass
+                setattr(self, j, None)
+    def _show(self, slide=True):
+        self.job = None
+        if not self.want: return
+        if not self.ok(): self.want = None; self.key = None; self._gone(); return   # re-check hover right before showing
+        key, text, (x0, y0, x1, y1), s, _w = self.want
+        try:
+            if not self.w.winfo_exists(): return
+            wx0, wy0, wx1, wy1 = self._work((x0 + x1) / 2, (y0 + y1) / 2)
+            gap = int(6 * s)
+            probe, sh, cy0, chh, ah = self._render(text, s, True, 0)
+            W_, H_ = probe.size
+            below = y1 + gap + H_ - sh <= wy1                        # flip above when there is no room below
+            cx = (x0 + x1) / 2
+            left = int(min(max(wx0 + 4 - sh, cx - W_ / 2), wx1 - 4 + sh - W_))
+            img, sh, cy0, chh, ah = self._render(text, s, below, cx - left)
+            top = int(y1 + gap - sh) if below else int(y0 - gap - (H_ - sh))
+            top = max(wy0 - sh, min(top, wy1 + sh - H_))
+            self.img = img; self.final = (left, top); dy = int(2 * s) * (1 if below else -1)
+            if self.layered: self.w.geometry("%dx%d+%d+%d" % (W_, H_, left, top))
+            else: self._tkimg = ImageTk.PhotoImage(img); self.label.config(image=self._tkimg)
+            self.w.deiconify(); self.shown = True
+            try:                                                    # owned by the anchor's window (not globally topmost)
+                own = _w.winfo_toplevel() if _w is not None else self.root
+                if str(self.w.transient() or "") != str(own): self.w.transient(own)
+                self.w.lift()
+            except Exception: pass
+            if not slide: self.pos = (left, top); self._push(1.0); return
+            t0 = time.time()
+            def step():
+                k = min(1.0, (time.time() - t0) * 1000 / self.FIN); e = 1 - (1 - k) ** 3
+                self.pos = (left, int(top + dy * (1 - e))); self._push(e)
+                self.anim = self.root.after(15, step) if k < 1 else None
+            step()
+        except Exception as ex: log("Tooltip: %r" % ex)
+    def hide(self, _=None, fade=True):
+        self._cancel(); self.key = None; self.want = None
+        if self.wd:
+            try: self.root.after_cancel(self.wd)
+            except Exception: pass
+            self.wd = None
+        if not self.shown:
+            if self._visible(): self._gone()
+            return
+        self.shown = False; self.t_hide = time.time()
+        try:
+            if not fade or not self.img: self._gone(); return
+            t0 = time.time()
+            def step():
+                self.anim = None
+                if self.shown: return                             # re-shown meanwhile
+                try:
+                    k = min(1.0, (time.time() - t0) * 1000 / self.FOUT)
+                    if k >= 1: self._gone(); return
+                    self._push(1 - k); self.anim = self.root.after(15, step)
+                except Exception: self._gone()
+            step()
+        except Exception: self._gone()
+
+def ImageChops_offset(im, dx, dy):
+    out = Image.new(im.mode, im.size, 0); out.paste(im, (dx, dy)); return out
+
+def get_tip(widget):
+    """The shared tooltip for this widget's Tk root (created on first use). Also hides on minimise/move/focus loss."""
+    root = widget._root()
+    t = getattr(root, "_glass_tip", None)
+    if t is None:
+        t = GlassTip(root); root._glass_tip = t
+    tl = widget.winfo_toplevel()
+    if not getattr(tl, "_tip_hooks", False):
+        tl._tip_hooks = True; last = {"geo": None}
+        def cfg(e):
+            if e.widget is tl:
+                g = (tl.winfo_rootx(), tl.winfo_rooty())
+                if last["geo"] and g != last["geo"]: t.hide(fade=False)
+                last["geo"] = g
+        tl.bind("<Configure>", cfg, add="+"); tl.bind("<Unmap>", lambda e: t.hide(fade=False), add="+")
+        tl.bind("<FocusOut>", lambda e: tl.after(60, lambda: (tl.focus_displayof() is None) and t.hide()), add="+")
+        tl.bind("<Destroy>", lambda e: e.widget is tl and t.hide(fade=False), add="+")
+    return t
+
+def canvas_rect(cv, bbox):
+    """Canvas bbox (px) -> screen rect."""
+    x0, y0, x1, y1 = bbox; rx, ry = cv.winfo_rootx(), cv.winfo_rooty()
+    return (rx + x0, ry + y0, rx + x1, ry + y1)
+
+def after_mouse_up(w, cb, min_ms=150):
+    """Call cb once the left mouse button is released (anywhere, even outside the app) and min_ms passed."""
+    t0 = time.time()
+    def down():
+        try:
+            import ctypes
+            return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+        except Exception: return False
+    def poll():
+        try:
+            if down() or (time.time() - t0) * 1000 < min_ms: w.after(30, poll)
+            else: cb()
+        except Exception: pass                       # window closed meanwhile
+    poll()
+
+def install_crash_log():
+    """Every unhandled error (main thread, worker threads, Tk callbacks) goes to the log with a traceback.
+    Windowed builds have no stderr; Tk's default handler would fail writing there."""
+    import traceback
+    def _w(where, et, ev, tb):
+        try: log("CRASH in %s:\n%s" % (where, "".join(traceback.format_exception(et, ev, tb)).rstrip()))
+        except Exception: pass
+    class _Sink:
+        def write(self, t_):
+            t_ = (t_ or "").rstrip()
+            if t_: log("stderr: " + t_)
+        def flush(self): pass
+    if sys.stderr is None: sys.stderr = _Sink()
+    if sys.stdout is None: sys.stdout = _Sink()
+    sys.excepthook = lambda et, ev, tb: _w("main", et, ev, tb)
+    threading.excepthook = lambda h: _w("thread %s" % getattr(h.thread, "name", "?"), h.exc_type, h.exc_value, h.exc_traceback)
+    try:
+        import tkinter as _tk
+        _tk.Tk.report_callback_exception = lambda self, et, ev, tb: _w("UI callback", et, ev, tb)
+    except Exception: pass
+
+def age_switch(sp, k, civ=None):
+    """Switch to age k's music (intro first if set). Reads the settings fresh: panel changes apply right away."""
+    cur = load_config()
+    if not cur.get("enabled", True):                                      # turned off in the panel mid-match
+        sp.clear_hold(); sp.hand_back("Disabled"); return
+    uri = cur["playlists"].get(k, "")
+    if not is_playable(uri): log("No playlist set for %s" % k); return
+    fade = float(cur.get("fade_seconds", 2))
+    if sp.user_paused():                                                  # you paused: no intro, no switch
+        sp.hold(k, uri, fade); return
+    sp.clear_hold()
+    track = choose_intro(cur, k, civ)
+    if track:
+        log("%s intro for %s: %s" % (k.capitalize(), civ, track))
+        threading.Thread(target=sp.boss_then, args=(track, uri, fade), daemon=True).start()
+    else:
+        threading.Thread(target=sp.switch, args=(uri, fade), daemon=True).start()
+
+def make_switcher(sp):
+    """(play, jobs): play(k, civ) only queues; one worker runs Spotify work in log order, never under the tracker lock."""
+    import queue as _queue
+    jobs = _queue.Queue()
+    def worker():
+        while True:
+            fn, a = jobs.get()
+            try: fn(*a)
+            except Exception as e: log("Switch failed: %r" % e)
+            finally: jobs.task_done()
+    threading.Thread(target=worker, daemon=True).start()
+    def play(k, civ=None): jobs.put((age_switch, (sp, k, civ)))
+    return play, jobs
+
 def main():
+    install_crash_log()
     args = sys.argv[1:]
     if args[:1] == ["--set-launch-option"]:
         with_steam_closed(set_launch_option); music_sync(load_config().get("enabled", True)); return   # no-op close if Setup already closed Steam
@@ -1775,7 +2504,7 @@ def main():
                 t.crc_dir = None; t.feed(line); t.begin_t = 0
                 t._crc = crcs.pop(0); continue
             if RE_START.search(line) and getattr(t, "_crc", None):
-                t.my_id = slot_to_id(t._crc).get(t.my_slot)
+                t.my_id = pick_id(slot_to_id(t._crc), t.my_slot, getattr(t, "my_hidx", None))
                 log("Identified you as player id %s (slot %s, from %s)" % (t.my_id, t.my_slot, os.path.basename(t._crc)))
             t.feed(line)
         return
@@ -1799,24 +2528,1053 @@ def main():
         time.sleep(3)
     log("AoE4 is running")
     threading.Thread(target=sp.ensure_device, daemon=True).start()   # start Spotify now if closed
-    def play(k, civ=None):
-        uri = cfg["playlists"].get(k, "")
-        if not uri.startswith("spotify:") or "PASTE" in uri: log("No playlist set for %s" % k); return
-        fade = float(cfg.get("fade_seconds", 2))
-        cur = load_config()                                                   # editor changes apply right away
-        track = choose_intro(cur, k, civ)
-        if track:
-            log("%s intro for %s: %s" % (k.capitalize(), civ, track))
-            threading.Thread(target=sp.boss_then, args=(track, uri, fade), daemon=True).start()
-        else:
-            threading.Thread(target=sp.switch, args=(uri, fade), daemon=True).start()
+    play, jobs = make_switcher(sp)
     path = os.path.expandvars(cfg.get("log_path") or DEFAULT_LOG)
-    t = Tracker(cfg, play)
+    t = Tracker(cfg, play); t.start_delay = 3.0
+    if any(str(x).lower() in ("-replay", "/replay") for x in args):          # Steam launch option '-replay playback:...'
+        t.replay_session = True; log("Game started to watch a replay - the music is left alone")
     t.crc_dir = os.path.join(os.path.dirname(path), "LogFiles")
-    tail(path, t, stop=lambda: not aoe_running())   # returns ~10s after the game closes
+    install_after_match(t, sp)
+    _on_start = t.on_start
+    t.on_start = lambda: jobs.put((_on_start, ()))                           # snapshot before the Dark Age switch, off the lock
+    def stop_check():
+        if not load_config().get("enabled", True) and getattr(sp, "_user_mode", None): sp.clear_hold(); sp.hand_back("Disabled")
+        return not aoe_running()
+    tail(path, t, stop=stop_check)   # returns ~10s after the game closes
     log("AoE4 closed - exiting")
+    sp.clear_hold()
+    try: sp.hand_back("Game closed")
+    except Exception as e: log("Hand back failed: %r" % e)
     time.sleep(2); music_sync(load_config().get("enabled", True))   # game rewrote its settings on exit: re-mute / restore
     time.sleep(3)                                     # let a running fade finish
+
+def install_after_match(t, sp, wait=6.0):
+    """Hook the After match setting into a Tracker. Resume: the music playing at match start is saved (unless it is
+    one of our age playlists, e.g. back-to-back matches: then the older save is kept). Win/Loss: the result line lands
+    ~40 ms after 'Game Over' (or ~1 s before shutdown when leaving), so wait up to `wait` s for it."""
+    snap = {"v": None}
+    def on_start():
+        cur = load_config()
+        if after_match_cfg(cur)["mode"] != "resume": snap["v"] = None; return
+        s = sp.snapshot(); ours = set(cur["playlists"].values())
+        if s and (s.get("custom") or s.get("ctx")) in ours: return
+        snap["v"] = s if s else None                           # playing or paused: both come back after the match
+        if snap["v"]: log("After match: saved pre-match music for Resume (%s)" % (s.get("ctx") or s.get("track")))
+    def song_end(n, uri, first):
+        """Wait until the Win / Loss pick is done: a song when it ends (or you skip it), a playlist after its first
+        track. False = cancelled: you paused, a new match started, or something else took over the player."""
+        dur = None; started = False; cur = first; t0 = time.time(); ctr = set(custom_tracks(uri)) if is_custom(uri) else set()
+        while True:
+            time.sleep(1.0)
+            if t.match_n != n: log("After match: new match - cancelled"); return False
+            c, st = sp._api("GET", "/me/player")
+            if c != 200 or not isinstance(st, dict): continue
+            item = (st.get("item") or {}); iu = item.get("uri"); ctx = (st.get("context") or {}).get("uri")
+            if dur is None and item.get("duration_ms"): dur = item["duration_ms"]
+            if uri.startswith("spotify:track:"): mine = iu == uri
+            elif is_custom(uri): mine = (iu == cur) if cur else (iu in ctr and not ctx)      # custom list: its first song
+            else: mine = ctx == uri and (cur is None or iu == cur)
+            if mine:
+                started = True; cur = cur or iu
+                if not st.get("is_playing"):
+                    if (st.get("progress_ms") or 0) == 0: return True          # finished and stopped
+                    log("After match: Spotify paused by you - doing nothing"); return False
+                if dur and (st.get("progress_ms") or 0) >= dur - 1500: time.sleep(1.5); return True
+            elif started:
+                return True                                                    # next track / skipped: done
+            elif time.time() - t0 > 15: log("After match: Win / Loss pick did not start"); return True
+            if time.time() - t0 > (dur or 600000) / 1000.0 + 30: return True
+    def run(n):
+        try:
+            sp.clear_hold()                                                # a mid-match pause hold never outlives the match
+            cur = load_config(); am = after_match_cfg(cur); mode = am["mode"]; fade = float(cur.get("fade_seconds", 2))
+            if not cur.get("enabled", True): sp.hand_back("Disabled"); return
+            if am["wl"]:
+                t0 = time.time()
+                while t.result is None and time.time() - t0 < wait and t.match_n == n: time.sleep(0.2)
+            if t.match_n != n: return                                      # a new match already started
+            if sp.user_paused(): sp.clear_hold(); log("After match: Spotify paused by you - doing nothing"); return
+            sp.clear_hold()
+            if am["wl"]:
+                r = t.result; pick = am["win"] if r == 1 else am["loss"] if r == 0 else ""
+                log("After match: %s" % ({1: "victory", 0: "defeat"}.get(r, "no final result")))
+                if pick:
+                    log("After match: play %s first" % pick)
+                    if pick.startswith("spotify:track:"): sp.set_mode(repeat="off")
+                    sp.play_any(pick, fade)
+                    if not song_end(n, pick, None): return
+                    if t.match_n != n: return
+                    fade = min(fade, 1.0)                                      # song already ended: short handover
+            uri = None
+            if mode == "resume":
+                s, snap["v"] = snap["v"], None
+                if s and s.get("playing"): log("After match: resume pre-match music"); sp.restore(s, fade); return
+                if s: log("After match: load pre-match music back, paused"); sp.restore_paused(s, fade); return
+                log("After match: nothing saved to resume")
+            elif mode == "playlist": uri = am["playlist"]
+            if uri and is_playable(uri):
+                log("After match: play %s" % uri); sp.play_any(uri, fade); return
+            log("After match: stop (fade out and pause)"); sp.fade_pause(fade); sp.hand_back("After match")
+        except Exception as e: log("After match failed: %r" % e)
+    t.on_start = on_start
+    t.on_end = lambda n: threading.Thread(target=run, args=(n,), daemon=True).start()
+    return snap
+
+# ---------------------------------------------------------------- custom lists: picker + builder (Change / After match / Victory, Defeat)
+class _Pen:
+    """Icon drawing in a 22-unit space around the centre (supersampled by the caller)."""
+    def __init__(s_, d, m): s_.d = d; s_.k = m / 22.0; s_.c = m / 2.0
+    def p(s_, x, y): return (s_.c + x * s_.k, s_.c + y * s_.k)
+    def rr(s_, x0, y0, x1, y1, r, fill=None, outline=None, w=1.6):
+        s_.d.rounded_rectangle([*s_.p(x0, y0), *s_.p(x1, y1)], radius=r * s_.k, fill=fill, outline=outline, width=max(1, int(w * s_.k)) if outline else 0)
+    def circ(s_, x, y, r, fill=None, outline=None, w=1.6):
+        s_.d.ellipse([*s_.p(x - r, y - r), *s_.p(x + r, y + r)], fill=fill, outline=outline, width=max(1, int(w * s_.k)) if outline else 0)
+    def poly(s_, pts, fill): s_.d.polygon([s_.p(x, y) for x, y in pts], fill=fill)
+    def line(s_, pts, col, w):
+        P_ = [s_.p(x, y) for x, y in pts]; s_.d.line(P_, fill=col, width=max(1, int(w * s_.k)), joint="curve"); r = w * s_.k / 2
+        for x, y in P_: s_.d.ellipse([x - r, y - r, x + r, y + r], fill=col)
+
+def _pen_icon(name, col, bg):
+    def paint(v):
+        if name == "link":
+            v.rr(-9, -4, 1, 4, 4, outline=col, w=1.8); v.rr(-1, -4, 9, 4, 4, outline=col, w=1.8)
+        elif name == "plus": v.line([(-5, 0), (5, 0)], col, 2); v.line([(0, -5), (0, 5)], col, 2)
+        elif name == "drop":                                   # arrow down into a tray
+            v.line([(0, -8), (0, 2)], col, 1.9); v.line([(-4, -2), (0, 2), (4, -2)], col, 1.9)
+            v.line([(-8, 2), (-8, 7), (8, 7), (8, 2)], col, 1.9)
+        elif name == "search": v.circ(-2, -2, 5.2, outline=col, w=1.9); v.line([(2, 2), (6.5, 6.5)], col, 2.1)
+        elif name == "playing":
+            for i, h in enumerate((7, 11, 5)): v.rr(-6.5 + i * 4.6, 5.5 - h, -4.1 + i * 4.6, 5.5, 1.1, fill=col)
+        elif name == "paste": v.rr(-6, -6, 6, 8, 2, outline=col, w=1.7); v.rr(-3, -8.5, 3, -4.5, 1.5, fill=col)
+        elif name == "handle":
+            for yy in (-4, 0, 4):
+                for xx in (-2.2, 2.2): v.circ(xx, yy, 1.3, fill=col)
+        elif name == "x": v.line([(-3.6, -3.6), (3.6, 3.6)], col, 1.7); v.line([(3.6, -3.6), (-3.6, 3.6)], col, 1.7)
+        elif name == "back": v.line([(5, 0), (-5, 0)], col, 2); v.line([(-1, -4.5), (-5.5, 0), (-1, 4.5)], col, 2)
+        elif name == "note":
+            v.circ(-3, 5, 3, fill=col); v.line([(0, 5), (0, -6), (5, -7.5)], col, 1.9)
+    return paint
+
+def _dashed_rr(dr, w, h, r, col, lw, dash, gap):
+    import math
+    pts = []
+    def arc(cx, cy, a0, a1):
+        for i in range(13):
+            a = math.radians(a0 + (a1 - a0) * i / 12.0); pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    x0, y0, x1, y1 = lw, lw, w - lw, h - lw
+    arc(x0 + r, y0 + r, 180, 270); arc(x1 - r, y0 + r, 270, 360); arc(x1 - r, y1 - r, 0, 90); arc(x0 + r, y1 - r, 90, 180); pts.append(pts[0])
+    on, left = True, dash
+    for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+        L = math.hypot(bx - ax, by - ay); t = 0.0
+        while L - t > 1e-6:
+            stp = min(left, L - t)
+            if on: dr.line([(ax + (bx - ax) * t / L, ay + (by - ay) * t / L), (ax + (bx - ax) * (t + stp) / L, ay + (by - ay) * (t + stp) / L)], fill=col, width=max(1, int(lw)))
+            t += stp; left -= stp
+            if left <= 1e-6: on = not on; left = dash if on else gap
+
+def mosaic_image(tracks, px):
+    """2x2 mosaic of the first songs' cached album art (1 song: full art), PIL RGB."""
+    from PIL import Image
+    im = Image.new("RGB", (px, px), "#2a2a2a")
+    tr = [t for t in tracks if os.path.exists(track_cover(t))]
+    if len(tr) == 1:
+        try: return Image.open(track_cover(tr[0])).convert("RGB").resize((px, px), Image.LANCZOS)
+        except Exception: return im
+    h = px // 2
+    for i, t in enumerate((tr * 4)[:4] if tr else []):
+        try: im.paste(Image.open(track_cover(t)).convert("RGB").resize((h, h), Image.LANCZOS), ((i % 2) * h, (i // 2) * h))
+        except Exception: pass
+    return im
+
+def save_mosaic(uri, tracks, px=96):
+    try:
+        os.makedirs(COVERS, exist_ok=True); mosaic_image(tracks, px).save(custom_cover(uri)); return custom_cover(uri)
+    except Exception as e: log("Mosaic cover: %r" % e); return None
+
+def install_edit_menu(w):
+    """Right-click Cut / Copy / Paste / Select all for every Entry and Text in this Tk app."""
+    import tkinter as tk
+    m = tk.Menu(w, tearoff=0, bg="#2a2a2a", fg="#f2f2f2", activebackground="#1DB954", activeforeground="#121212",
+                bd=0, relief="flat", font=("Segoe UI", 10))
+    tgt = {}
+    def do(ev):
+        x = tgt.get("w")
+        if x is not None:
+            try: x.focus_set(); x.event_generate(ev)
+            except tk.TclError: pass
+    def sel_all():
+        x = tgt.get("w")
+        if x is None: return
+        try: x.focus_set(); x.select_range(0, "end"); x.icursor("end")
+        except Exception:
+            try: x.tag_add("sel", "1.0", "end")
+            except Exception: pass
+    m.add_command(label="Cut", command=lambda: do("<<Cut>>")); m.add_command(label="Copy", command=lambda: do("<<Copy>>"))
+    m.add_command(label="Paste", command=lambda: do("<<Paste>>")); m.add_separator(); m.add_command(label="Select all", command=sel_all)
+    def show(e):
+        tgt["w"] = e.widget
+        try: m.tk_popup(e.x_root, e.y_root)
+        finally:
+            try: m.grab_release()
+            except tk.TclError: pass
+    for cls in ("Entry", "Text"): w.bind_class(cls, "<Button-3>", show, add="+")
+
+def list_picker(parent, title, current="", allow_tracks=False, user=None, save=None, start_builder=False):
+    """Modal picker. Returns a Spotify playlist uri, a track uri (allow_tracks), or a custom list uri; None = cancelled.
+    'Paste link' takes a pasted or dropped link; 'Make your own' opens the builder (app-only list, saved in settings)."""
+    import tkinter as tk, tkinter.font as tkfont, threading
+    from PIL import Image, ImageDraw, ImageTk
+    C = dict(bg="#121212", card="#1f1f1f", tx="#f2f2f2", mu="#9a9a9a", acc="#1DB954", line="#2a2a2a", fld="#181818",
+             ib="#2a2a2a", red="#e5675f", dim="#6c6c6c")
+    user = user if user is not None else load_user_settings()
+    d = tk.Toplevel(parent); dark_window(d, C["bg"]); d.title("AoE4 Spotify"); d.resizable(False, False)
+    try: d.transient(parent)
+    except Exception: pass
+    S = d.winfo_fpixels("1i") / 96.0; W = 420
+    cv = tk.Canvas(d, width=int(W * S), height=int(320 * S), bg=C["bg"], highlightthickness=0); cv.pack()
+    def P(*v): return [x * S for x in v]
+    def F(sz, b=False): return ("Segoe UI", -int(sz * S), "bold" if b else "normal")
+    imgs = {}; res = {}; handlers = {}; q = []
+    if not isinstance(user.get("custom_lists"), dict): user["custom_lists"] = {}
+    lists = user["custom_lists"]
+    st = {"page": "pick", "drag": False, "err": "", "tracks": [], "id": None, "sc": 0, "move": None, "search": False,
+          "results": [], "busy": "", "H": 320, "t0": time.time()}
+    def _img(key, w, h, paint):
+        k = (key, w, h)
+        if k not in imgs:
+            Q = 4; im = Image.new("RGBA", (max(1, w) * Q, max(1, h) * Q), (0, 0, 0, 0)); paint(ImageDraw.Draw(im), Q, im)
+            imgs[k] = ImageTk.PhotoImage(im.resize((max(1, w), max(1, h)), Image.LANCZOS))
+        return imgs[k]
+    def rr(x0, y0, x1, y1, r, fill, outline=None, width=1.0, tag=None, dash=False):
+        X0, Y0, X1, Y1 = [int(round(v)) for v in P(x0, y0, x1, y1)]; w, h = X1 - X0, Y1 - Y0
+        def paint(dr, Q, im):
+            if fill: dr.rounded_rectangle([0, 0, w * Q - 1, h * Q - 1], radius=r * S * Q, fill=fill)
+            if outline and dash: _dashed_rr(dr, w * Q, h * Q, r * S * Q, outline, width * S * Q, 5 * S * Q, 4 * S * Q)
+            elif outline: dr.rounded_rectangle([0, 0, w * Q - 1, h * Q - 1], radius=r * S * Q, outline=outline, width=max(1, int(width * S * Q)))
+        return cv.create_image(X0, Y0, image=_img(("rr", r, fill, outline, width, dash), w, h, paint), anchor="nw", tags=tag)
+    def circ(x, y, r, fill, tag=None):
+        n = int(round(2 * r * S))
+        def paint(dr, Q, im): dr.ellipse([0, 0, n * Q - 1, n * Q - 1], fill=fill)
+        return cv.create_image(*P(x, y), image=_img(("c", fill), n, n, paint), anchor="center", tags=tag)
+    def icon(name, x, y, col, bg=None, sz=22, tag=None):
+        px = int(sz * S); px += px % 2
+        def paint(dr, Q, im): _pen_icon(name, col, bg)(_Pen(dr, px * Q))
+        return cv.create_image(*P(x, y), image=_img(("i", name, col, bg), px, px, paint), anchor="center", tags=tag)
+    def text(x, y, s_, sz, c=None, b=False, anchor="w", tag=None):
+        return cv.create_text(*P(x, y), text=s_, font=F(sz, b), fill=c or C["tx"], anchor=anchor, tags=tag)
+    def thumb(path, size, key=None):
+        k = ("th", key or path, size, os.path.getmtime(path) if path and os.path.exists(path) else 0)
+        if k not in imgs:
+            px = int(round(size * S)); Q = 4
+            try:
+                im = (key if isinstance(key, Image.Image) else Image.open(path)).convert("RGB").resize((px, px), Image.LANCZOS)
+            except Exception: im = Image.new("RGB", (px, px), "#2a2a2a")
+            m = Image.new("L", (px * Q, px * Q), 0)
+            ImageDraw.Draw(m).rounded_rectangle([0, 0, px * Q - 1, px * Q - 1], (6 if size >= 40 else 5) * S * Q, fill=255)
+            im.putalpha(m.resize((px, px), Image.LANCZOS)); imgs[k] = ImageTk.PhotoImage(im)
+        return imgs[k]
+    def mosaic(tracks, size):
+        key = ("mos",) + tuple(tracks[:4]) + tuple(os.path.exists(track_cover(t)) for t in tracks[:4])
+        if key not in imgs:
+            px = int(round(size * S)); Q = 4; im = mosaic_image(tracks, px * 2).resize((px, px), Image.LANCZOS)
+            m = Image.new("L", (px * Q, px * Q), 0); ImageDraw.Draw(m).rounded_rectangle([0, 0, px * Q - 1, px * Q - 1], 7 * S * Q, fill=255)
+            im.putalpha(m.resize((px, px), Image.LANCZOS)); imgs[key] = ImageTk.PhotoImage(im)
+        return imgs[key]
+    def click(tag, fn): handlers[tag] = fn
+    def on_click(e):
+        if st["move"] is not None: return
+        if not st.pop("pdown", False) or not st.get("armed"): return   # press started elsewhere (click-through)
+        if st["page"] == "build" and b_release(e): return
+        for it in reversed(cv.find_overlapping(e.x, e.y, e.x, e.y)):
+            for t in cv.gettags(it):
+                if t in handlers: d.after_idle(handlers[t]); return
+    cv.bind("<ButtonRelease-1>", lambda e: (end_move(e) if st["move"] is not None else on_click(e)))
+    def on_motion(e):
+        if st["page"] == "build": b_motion(e); return
+        hit = any(t in handlers or t.startswith("mv") for it in cv.find_overlapping(e.x, e.y, e.x, e.y) for t in cv.gettags(it))
+        cv.config(cursor="hand2" if hit else "")
+        mk = st["page"] == "pick" and any("mk" in cv.gettags(it) for it in cv.find_overlapping(e.x, e.y, e.x, e.y))
+        if mk != bool(st.get("mkh")): st["mkh"] = mk; draw()
+    cv.bind("<Motion>", on_motion)
+    def on_leave(e):
+        get_tip(cv).hide()
+        if st["page"] == "build":
+            if bst["hov"] is not None or bst.get("tip"): bst.update(hov=None, hpart=None, tip=None); draw()
+        elif st.get("mkh"): st["mkh"] = False; draw()
+    cv.bind("<Leave>", on_leave)
+    def trunc(t_, n): return t_ if len(t_) <= n else t_[:n - 1] + "\u2026"
+    # ---- live widgets
+    ent = tk.Entry(cv, bg=C["fld"], fg=C["tx"], insertbackground=C["tx"], relief="flat", bd=0, highlightthickness=0, font=F(11))
+    PH = "Paste or drop a link"
+    def ph_set():
+        if not ent.get(): ent.insert(0, PH); ent.config(fg=C["dim"]); ent._ph = True
+    def ph_clear(_=None):
+        if getattr(ent, "_ph", False): ent.delete(0, "end"); ent.config(fg=C["tx"]); ent._ph = False
+    ent.bind("<FocusIn>", ph_clear); ent.bind("<FocusOut>", lambda e: ph_set()); ent.bind("<Return>", lambda e: ok_link())
+    ent.bind("<<Paste>>", lambda e: (ph_clear(), d.after(10, ok_link_soft)))
+    ph_set()
+    nm = tk.Entry(cv, bg=C["ib"], fg=C["tx"], insertbackground=C["tx"], relief="flat", bd=0, highlightthickness=0, font=F(12, True))
+    se = tk.Entry(cv, bg=C["ib"], fg=C["tx"], insertbackground=C["tx"], relief="flat", bd=0, highlightthickness=0, font=F(11))
+    def parse_link(t_):
+        m = RE_PLAYLIST.search(t_ or "")
+        if m: return "spotify:playlist:" + m.group(1)
+        if allow_tracks:
+            tr = parse_track(t_ or "")
+            if tr: return tr
+        return None
+    def finish(uri): res["uri"] = uri; d.destroy()
+    def ok_link():
+        if getattr(ent, "_ph", False): st["err"] = "Paste a link first"; draw(); return
+        u = parse_link(ent.get().strip())
+        if u: finish(u)
+        else: st["err"] = "Not a Spotify %s link" % ("playlist or song" if allow_tracks else "playlist"); draw()
+    def ok_link_soft():
+        u = parse_link(ent.get().strip())
+        if u: finish(u)
+    # ---- background work (Spotify lookups), results come back through q
+    def post(fn): q.append(fn)
+    def pump():
+        while q:
+            try: q.pop(0)()
+            except Exception as ex: log("Picker update: %r" % ex)
+        try: d.after(80, pump)
+        except tk.TclError: pass
+    def sp_(): return Spotify(load_config())
+    def meta(t):
+        uri, name, artist = store_track(t, 96)
+        return {"uri": uri, "name": name, "artist": artist, "ms": int(t.get("duration_ms") or 0)}
+    # ---- pages
+    def open_builder(uri=None):
+        l = custom_get(uri, user) if uri else None
+        st.update(page="build", id=(uri[len(CUSTOM_PREFIX):] if l else None), tracks=[dict(t) for t in (l or {}).get("tracks", []) if isinstance(t, dict)],
+                  sc=0.0, search=False, results=[], busy="", err="")
+        bst.update(hov=None, press=None, drag=None, ins=None, target=0.0, undo=[], redo=[], sel=0, toast=None)
+        se.delete(0, "end")
+        nm.delete(0, "end"); nm.insert(0, (l or {}).get("name") or "My list"); draw()
+    def save_list():
+        if not st["tracks"]: return
+        import secrets
+        lid = st["id"] or secrets.token_hex(4); uri = CUSTOM_PREFIX + lid
+        name = nm.get().strip()[:40] or "My list"
+        lists[lid] = {"name": name, "tracks": st["tracks"][:CUSTOM_MAX]}
+        if save: save(user)
+        save_mosaic(uri, [t["uri"] for t in st["tracks"]]); finish(uri)
+    # ================================================================ your playlists (Spotify library grid)
+    GX, GY0, GW, GH, COLS, GAP = 28, 92, W - 56, 248, 4, 10
+    GP = 4                                            # inner pad so the selection ring never clips
+    GT = (GW - 12 - GP - GAP * (COLS - 1)) / COLS   # tile size; 12 = scrollbar lane
+    GR = GT + 42                                      # row pitch (tile + name + count)
+    GH = round(2 * GR + GP - 6)                       # exactly two rows; the scroll thumb shows there is more
+    gc = tk.Canvas(cv, width=int(GW * S), height=int(GH * S), bg=C["card"], highlightthickness=0, bd=0)
+    mp = {"state": "load", "items": list(_MYLIB.get("items") or []), "sel": None, "sc": 0.0, "tg": 0.0, "sjob": None,
+          "use": False, "err": "", "covers": {}, "gjob": None, "hov": None}
+    if mp["items"]: mp["state"] = "ok"
+    _cur = LIKED_URI if current == CUSTOM_PREFIX + LIKED_ID else current
+    ghand = {}
+    d._mp = mp                                        # (tests)
+    sq = tk.Entry(cv, bg=C["fld"], fg=C["tx"], insertbackground=C["tx"], relief="flat", bd=0, highlightthickness=0, font=F(10.5))
+    SPH = "Search"
+    def sq_ph():
+        if not sq.get(): sq.insert(0, SPH); sq.config(fg=C["dim"]); sq._ph = True
+    def sq_clr(_=None):
+        if getattr(sq, "_ph", False): sq.delete(0, "end"); sq.config(fg=C["tx"]); sq._ph = False
+    sq.bind("<FocusIn>", sq_clr); sq.bind("<FocusOut>", lambda e: sq_ph())
+    def sq_key(_=None):
+        mp["sc"] = mp["tg"] = 0.0; gdraw()
+    sq.bind("<KeyRelease>", sq_key); sq.bind("<<Paste>>", lambda e: d.after(1, sq_key))
+    sq.bind("<Escape>", lambda e: (sq.delete(0, "end"), sq_key(), "break")[2] if sq.get() and not getattr(sq, "_ph", False) else None)
+    sq_ph()
+    def mp_item(u): return next((it for it in mp["items"] if it["uri"] == u), None)
+    def mp_shown():
+        f_ = "" if getattr(sq, "_ph", False) else sq.get().strip().lower()
+        return [it for it in mp["items"] if not f_ or f_ in it["name"].lower()]
+    def g_max(): return max(0.0, ((len(mp_shown()) + COLS - 1) // COLS) * GR + GP - 6 - GH)
+    def g_img(key, w, h, paint):
+        return _img(key, int(round(w * S)), int(round(h * S)), paint)
+    def tile_img(it):
+        px = int(round(GT * S)); Q = 4; R = 8 * S
+        if it.get("liked"):
+            k = ("tl", "liked", px)
+            if k not in imgs:
+                a_ = Image.new("RGB", (px, px), "#4527d6"); b_ = Image.new("RGB", (px, px), "#9cc3e6")
+                v_ = Image.linear_gradient("L"); g_ = Image.blend(v_, v_.rotate(90), 0.5).resize((px, px), Image.BICUBIC)   # diagonal
+                im = Image.composite(a_, b_, g_.point(lambda v: 255 - v)).convert("RGBA")
+                hz = px * Q; hl = Image.new("L", (hz, hz), 0); dr = ImageDraw.Draw(hl); u = hz / 100.0
+                dr.ellipse([30 * u, 36 * u, 51 * u, 57 * u], fill=255); dr.ellipse([49 * u, 36 * u, 70 * u, 57 * u], fill=255)
+                dr.polygon([(31.2 * u, 50 * u), (50 * u, 69 * u), (68.8 * u, 50 * u), (50 * u, 44 * u)], fill=255)
+                hl = hl.resize((px, px), Image.LANCZOS); im.paste((255, 255, 255, 255), (0, 0), hl)
+            else: im = None
+        else:
+            pth = mp["covers"].get(it["uri"])
+            if pth is None:
+                pth = lib_cover(it, fetch=False) or ""; mp["covers"][it["uri"]] = pth
+            k = ("tl", it["uri"], pth, px)
+            if k not in imgs:
+                try: im = Image.open(pth).convert("RGBA").resize((px, px), Image.LANCZOS) if pth else None
+                except Exception: im = None
+                if im is None:
+                    im = Image.new("RGBA", (px, px), "#2c2c2c")
+                    ImageDraw.Draw(im).text((px // 2 - 4 * S, px // 2 - 7 * S), "\u266a", fill="#5a5a5a")
+            else: im = None
+        if k not in imgs:
+            m = Image.new("L", (px * Q, px * Q), 0); ImageDraw.Draw(m).rounded_rectangle([0, 0, px * Q - 1, px * Q - 1], R * Q, fill=255)
+            im.putalpha(m.resize((px, px), Image.LANCZOS)); imgs[k] = ImageTk.PhotoImage(im)
+        return imgs[k]
+    def ring_img():
+        w = GT + 6
+        def paint(dr, Q, im):
+            n = int(round(w * S)) * Q; dr.rounded_rectangle([0, 0, n - 1, n - 1], radius=10.5 * S * Q, outline=C["acc"], width=max(1, int(2.2 * S * Q)))
+        return g_img(("ring", w), w, w, paint)
+    def badge_img():
+        def paint(dr, Q, im):
+            n = int(round(20 * S)) * Q; dr.ellipse([0, 0, n - 1, n - 1], fill=C["acc"])
+            dr.line([(n * .29, n * .52), (n * .44, n * .66), (n * .72, n * .36)], fill="#121212", width=max(1, int(2.2 * S * Q)), joint="curve")
+        return g_img(("badge",), 20, 20, paint)
+    def gtext(x, y, s_, sz, c, b=False, anchor="w", tag=None):
+        return gc.create_text(x * S, y * S, text=s_, font=F(sz, b), fill=c, anchor=anchor, tags=tag)
+    def gdraw():
+        if mp["gjob"]:
+            try: d.after_cancel(mp["gjob"])
+            except Exception: pass
+            mp["gjob"] = None
+        try: gc.delete("all")
+        except tk.TclError: return
+        ghand.clear()
+        cx, cy = GW / 2, GH / 2 - 14
+        if mp["state"] != "ok":
+            msg, sub, btn = {"load": ("Loading your playlists\u2026", "", None),
+                             "auth": ("Finish in your browser", "Then come back here", None),
+                             "scope": ("Allow your playlists", "One more Spotify permission", ("Reconnect", reconnect)),
+                             "login": ("Log in to Spotify first", "Use Log in in the panel", None),
+                             "off": ("Can't reach Spotify", "", ("Retry", mp_load))}[mp["state"]]
+            gtext(cx, cy, msg, 12.5, C["tx"], True, "center")
+            if sub: gtext(cx, cy + 20, sub, 10.5, C["mu"], False, "center")
+            if btn:
+                bw = 104; x0 = cx - bw / 2; y0 = cy + 40
+                def paint(dr, Q, im, bw=bw):
+                    dr.rounded_rectangle([0, 0, int(round(bw * S)) * Q - 1, int(round(30 * S)) * Q - 1], radius=15 * S * Q, fill=C["acc"])
+                gc.create_image(x0 * S, y0 * S, image=g_img(("gbtn", bw), bw, 30, paint), anchor="nw", tags="gb")
+                gtext(cx, y0 + 15, btn[0], 11, "#121212", True, "center", "gb"); ghand["gb"] = btn[1]
+            return
+        items = mp_shown()
+        if not items:
+            gtext(cx, cy, "No matches", 12, C["mu"], False, "center"); return
+        top = -mp["sc"]
+        for i, it in enumerate(items):
+            r_, c_ = divmod(i, COLS); x = GP + c_ * (GT + GAP); y = GP + r_ * GR + top
+            if y + GR < -2 or y > GH + 2: continue
+            tg = "g%d" % i; ghand[tg] = (lambda u=it["uri"]: g_select(u))
+            gc.create_image(x * S, y * S, image=tile_img(it), anchor="nw", tags=tg)
+            if it["uri"] == mp["sel"]:
+                gc.create_image((x - 3) * S, (y - 3) * S, image=ring_img(), anchor="nw", tags=tg)
+                gc.create_image((x + GT - 6) * S, (y + GT - 6) * S, image=badge_img(), anchor="se", tags=tg)
+            elif mp["hov"] == it["uri"]:
+                def paint(dr, Q, im):
+                    n = int(round(GT * S)) * Q; dr.rounded_rectangle([0, 0, n - 1, n - 1], radius=8 * S * Q, fill=(255, 255, 255, 26))
+                gc.create_image(x * S, y * S, image=g_img(("hov", GT), GT, GT, paint), anchor="nw", tags=tg)
+            gtext(x + 1, y + GT + 13, fit(it["name"], 10.5, True, GT - 2), 10.5, C["tx"], True, "w", tg)
+            n_ = it.get("n") or 0
+            gtext(x + 1, y + GT + 29, "%d song%s" % (n_, "" if n_ == 1 else "s"), 9.5, C["mu"], False, "w", tg)
+        mx = g_max()
+        if mx > 0:                                    # slim scroll thumb in its own lane
+            vis = GH / (GH + mx); th = max(28, GH * vis); ty = (GH - th) * (mp["sc"] / mx)
+            def paint(dr, Q, im, th=th):
+                dr.rounded_rectangle([0, 0, int(round(4 * S)) * Q - 1, int(round(th * S)) * Q - 1], radius=2 * S * Q, fill="#5a5a5a")
+            gc.create_image((GW - 4) * S, ty * S, image=g_img(("sb", int(th)), 4, int(th), paint), anchor="nw")
+    def gdraw_soon():
+        if not mp["gjob"]: mp["gjob"] = d.after(60, gdraw)
+    def g_select(u):
+        mp["sel"] = u; mp["err"] = ""; gdraw(); draw()
+    def g_tag(e):
+        for it_ in reversed(gc.find_overlapping(e.x, e.y, e.x, e.y)):
+            for t in gc.gettags(it_):
+                if t in ghand: return t
+        return None
+    def g_press(e):                                   # acts on press (popup is armed only after the opening release)
+        if not st.get("armed") or mp["use"]: return
+        t = g_tag(e)
+        if t: ghand[t]()
+    def g_double(e):
+        if st.get("armed") and g_tag(e) and str(g_tag(e)).startswith("g") and mp["sel"]: use_sel()
+    def g_motion(e):
+        t = g_tag(e); gc.config(cursor="hand2" if t else "")
+        items = mp_shown(); u = None
+        if t and t.startswith("g") and t[1:].isdigit() and int(t[1:]) < len(items): u = items[int(t[1:])]["uri"]
+        if u != mp["hov"]: mp["hov"] = u; gdraw()
+    def g_leave(e):
+        if mp["hov"]: mp["hov"] = None; gdraw()
+    def g_wheel(e):
+        mp["tg"] = max(0.0, min(g_max(), mp["tg"] - (e.delta / 120) * GR * 0.6))
+        if not mp["sjob"]: g_step()
+    def g_step():
+        dv = mp["tg"] - mp["sc"]
+        if abs(dv) < 0.6: mp["sc"] = mp["tg"]; mp["sjob"] = None; gdraw(); return
+        mp["sc"] += dv * 0.35; gdraw(); mp["sjob"] = d.after(15, g_step)
+    gc.bind("<ButtonPress-1>", g_press); gc.bind("<Double-Button-1>", g_double); gc.bind("<Motion>", g_motion)
+    gc.bind("<Leave>", g_leave); gc.bind("<MouseWheel>", g_wheel)
+    def mp_load():
+        if not mp["items"] or mp["state"] != "ok": mp["state"] = "load"; gdraw()
+        def work():
+            try: stt, items = my_library(sp_())
+            except BaseException as ex: log("Your playlists: %r" % ex); stt, items = "off", []
+            post(lambda: mp_loaded(stt, items))
+            if stt != "ok": return
+            from concurrent.futures import ThreadPoolExecutor
+            def one(it):
+                pth = lib_cover(it)
+                if pth: post(lambda u=it["uri"], p=pth: (mp["covers"].__setitem__(u, p), gdraw_soon()))
+            with ThreadPoolExecutor(4) as ex_: list(ex_.map(one, [it for it in items if it.get("pid")]))
+        threading.Thread(target=work, daemon=True).start()
+    def mp_loaded(stt, items):
+        if stt == "ok":
+            mp["items"] = items; mp["state"] = "ok"; mp["covers"] = {k: v for k, v in mp["covers"].items() if v}
+            if mp["sel"] is None and mp_item(_cur): mp["sel"] = _cur
+        elif not (stt == "off" and mp["items"]): mp["state"] = stt      # offline but cached: keep showing the cache
+        gdraw(); draw()
+    def reconnect():
+        mp["state"] = "auth"; gdraw()
+        def work():
+            try: Spotify(load_config()).login()
+            except BaseException as ex: log("Reconnect: %r" % ex)
+            post(mp_load)
+        threading.Thread(target=work, daemon=True).start()
+    def use_sel():
+        it = mp_item(mp["sel"])
+        if not it or mp["use"]: return
+        if not it.get("liked"): finish(it["uri"]); return
+        mp["use"] = True; draw()
+        def work():
+            tr = []
+            try:
+                for i, t in enumerate(liked_tracks(sp_(), CUSTOM_MAX)):
+                    if i < 4: uri, name, artist = store_track(t, 96)             # covers for the list mosaic
+                    else: uri, name, artist = t.get("uri"), t.get("name") or "Song", ", ".join(a_.get("name", "") for a_ in (t.get("artists") or [])[:2])
+                    tr.append({"uri": uri, "name": name, "artist": artist, "ms": int(t.get("duration_ms") or 0)})
+            except BaseException as ex: log("Liked Songs: %r" % ex)
+            post(lambda: liked_done(tr))
+        threading.Thread(target=work, daemon=True).start()
+    def liked_done(tr):
+        mp["use"] = False
+        if not tr: mp["err"] = "Couldn't load Liked Songs"; draw(); return
+        lists[LIKED_ID] = {"name": "Liked Songs", "tracks": tr[:CUSTOM_MAX]}
+        if save: save(user)
+        try: save_mosaic(CUSTOM_PREFIX + LIKED_ID, [t["uri"] for t in tr])
+        except Exception as ex: log("Liked Songs cover: %r" % ex)
+        finish(CUSTOM_PREFIX + LIKED_ID)
+    if mp["items"] and mp_item(_cur): mp["sel"] = _cur
+    def draw():
+        cv.delete("all"); handlers.clear()
+        (draw_pick if st["page"] == "pick" else draw_build)()
+        if int(cv.cget("height")) != int(st["H"] * S): cv.config(height=int(st["H"] * S))
+    def draw_pick():
+        text(20, 24, title, 15, b=True)
+        # your playlists card (Liked Songs + your Spotify playlists)
+        rr(16, 44, W - 16, GY0 + GH + 12, 12, C["card"])
+        circ(40, 68, 14, "#2a2a2a"); icon("note", 40, 68, C["acc"]); text(64, 68, "Your playlists", 12.5, b=True)
+        sx0 = W - 28 - 150
+        rr(sx0, 54, W - 28, 82, 14, C["fld"], "#4a4a4a", 1.2); icon("search", sx0 + 16, 68, C["mu"], sz=18)
+        cv.create_window(*P(sx0 + 30, 68), window=sq, anchor="w", width=int((150 - 42) * S), height=int(20 * S))
+        cv.create_window(*P(GX, GY0), window=gc, anchor="nw")
+        o = GY0 + GH + 24 - 44                       # everything below moves down by the new card
+        # paste link card
+        rr(16, o + 44, W - 16, o + 172, 12, C["card"])
+        circ(40, o + 68, 14, "#2a2a2a"); icon("link", 40, o + 68, C["acc"]); text(64, o + 68, "Paste link", 12.5, b=True)
+        hl = st["drag"]
+        rr(28, o + 86, W - 28, o + 132, 10, "#1b2a20" if hl else C["fld"], C["acc"] if hl else "#4a4a4a", 1.4, dash=True)
+        icon("drop", 48, o + 109, C["acc"] if hl else C["mu"], sz=22)
+        ent.config(bg="#1b2a20" if hl else C["fld"])
+        cv.create_window(*P(64, o + 109), window=ent, anchor="w", width=int((W - 28 - 64 - 60) * S), height=int(24 * S))
+        rr(W - 80, o + 97, W - 38, o + 121, 12, C["acc"], tag="ok"); text(W - 59, o + 109, "OK", 11, "#121212", True, "center", "ok"); click("ok", ok_link)
+        hint = st["err"] or ("Drop here" if hl else "Paste a link or drag a %s from Spotify" % ("playlist or song" if allow_tracks else "playlist"))
+        text(30, o + 152, hint, 10.5, C["red"] if st["err"] else (C["acc"] if hl else C["mu"]))
+        # make your own card
+        y = o + 184; cur_l = custom_get(current, user) if is_custom(current) else None
+        hv = st.get("mkh"); cy = y + 28                                     # one button: tile, title, grey subline, chevron
+        rr(16, y, W - 16, y + 56, 12, "#22302a" if hv else "#1c241f", C["acc"] if hv else "#2f6b46", 1.2, tag="mk")
+        trs = [t["uri"] for t in (cur_l or {}).get("tracks", [])] if cur_l else []
+        if trs: cv.create_image(*P(28, cy - 18), image=mosaic(trs, 36), anchor="nw", tags="mk")
+        else: rr(28, cy - 18, 64, cy + 18, 9, "#24553a" if hv else "#1f4630", tag="mk"); icon("plus", 46, cy, C["acc"], tag="mk")
+        text(78, cy - 8, ("Edit \u00b7 " + trunc(cur_l.get("name", "My list"), 22)) if cur_l else "Make your own", 12.5, b=True, tag="mk")
+        text(78, cy + 10, "Saved in this app, not Spotify", 10.5, C["mu"], tag="mk")
+        cx = W - 34 + (2 if hv else 0)
+        cv.create_line(*P(cx - 2.5, cy - 5, cx + 2.5, cy, cx - 2.5, cy + 5), fill=C["acc"] if hv else C["mu"], width=max(1, 1.8 * S),
+                       capstyle="round", joinstyle="round", smooth=False, tags="mk")
+        click("mk", lambda: open_builder(current if cur_l else None))
+        # your other lists
+        others = [(k_, v_) for k_, v_ in lists.items() if isinstance(v_, dict) and CUSTOM_PREFIX + k_ != current][-4:]
+        y += 68
+        if others:
+            text(20, y + 8, "Your lists", 10.5, C["mu"], True); y += 20
+            for k_, v_ in others:
+                tg = "ls_" + k_; rr(16, y, W - 16, y + 40, 10, C["card"], tag=tg)
+                cv.create_image(*P(26, y + 6), image=mosaic([t.get("uri", "") for t in v_.get("tracks", [])], 28), anchor="nw", tags=tg)
+                text(64, y + 20, trunc(v_.get("name", "My list"), 28), 12, b=True, tag=tg)
+                text(W - 30, y + 20, "%d songs" % len(v_.get("tracks", [])), 10.5, C["mu"], anchor="e", tag=tg)
+                click(tg, lambda k_=k_: finish(CUSTOM_PREFIX + k_)); y += 46
+        # use button (applies the playlist picked in the grid)
+        sel = mp_item(mp["sel"]); y += 6
+        tg = "use" if sel and not mp["use"] else None
+        rr(16, y, W - 16, y + 48, 24, C["acc"] if sel else "#262626", tag=tg)
+        lab = mp["err"] or (("Loading Liked Songs\u2026" if mp["use"] else "Use " + fit(sel["name"], 13.5, True, W - 110)) if sel else "Pick a playlist")
+        text(W / 2, y + 24, lab, 13.5, ("#121212" if sel else (C["red"] if mp["err"] else C["dim"])), True, "center", tg)
+        if tg: click("use", use_sel)
+        y += 48
+        st["H"] = y + 16
+    # ================================================================ builder (custom list editor)
+    RH, VISN, LT = 48, 7, 138                       # row height, visible rows, list top
+    LB = LT + RH * VISN                             # list bottom
+    bst = {"hov": None, "hpart": None, "press": None, "drag": None, "ins": None, "target": 0.0, "sjob": None,
+           "toast": None, "tjob": None, "undo": [], "redo": [], "sel": 0, "sb": None, "ajob": None, "qjob": None, "tip": None}
+    pv = {"uri": None, "busy": False, "sp": None, "phase": 0, "job": None}
+    d._t = (st, bst, pv); d._draw = lambda: draw()   # (tests)
+    _fonts, _fits = {}, {}
+    def fnt(sz, bold):
+        if (sz, bold) not in _fonts: _fonts[(sz, bold)] = tkfont.Font(font=F(sz, bold))
+        return _fonts[(sz, bold)]
+    def fit(t_, sz, bold, maxw):
+        k = (t_, sz, bold, int(maxw))
+        if k in _fits: return _fits[k]
+        f_ = fnt(sz, bold); mw = maxw * S; o = t_
+        if f_.measure(t_) > mw:
+            while t_ and f_.measure(t_ + "\u2026") > mw: t_ = t_[:-1]
+            o = t_.rstrip() + "\u2026"
+        _fits[k] = o; return o
+    def max_sc(): return max(0.0, len(st["tracks"]) * RH - RH * VISN)
+    # ---- undo / redo
+    def snap(): bst["undo"].append([dict(t) for t in st["tracks"]]); bst["undo"][:] = bst["undo"][-60:]; bst["redo"].clear()
+    def undo_redo(back):
+        a_, b_ = (bst["undo"], bst["redo"]) if back else (bst["redo"], bst["undo"])
+        if not a_: toast("Nothing to undo" if back else "Nothing to redo"); return
+        b_.append([dict(t) for t in st["tracks"]]); st["tracks"] = a_.pop()
+        toast("Undone" if back else "Redone"); draw()
+    def key_undo(e, back):
+        if st["page"] != "build": return
+        f_ = d.focus_get()
+        if f_ is nm or (f_ is se and se.get()): return              # text editing keeps its own keys
+        undo_redo(back); return "break"
+    d.bind("<Control-z>", lambda e: key_undo(e, True)); d.bind("<Control-Z>", lambda e: key_undo(e, True))
+    d.bind("<Control-y>", lambda e: key_undo(e, False)); d.bind("<Control-Y>", lambda e: key_undo(e, False))
+    # ---- toast (status line above the buttons; separate from tooltips)
+    def toast(msg, undo=False, ms=3500):
+        bst["toast"] = {"msg": msg, "undo": undo}
+        if bst["tjob"]:
+            try: d.after_cancel(bst["tjob"])
+            except Exception: pass
+        def clear(): bst["tjob"] = None; bst["toast"] = None; draw()
+        bst["tjob"] = d.after(ms, clear) if ms else None; draw()
+    # ---- preview (same fast path as the Age Intros editor: warm Spotify session, optimistic glow)
+    def _warm():
+        try:
+            if pv["sp"] is None: pv["sp"] = Spotify(load_config())
+            if pv["sp"].tok and hasattr(pv["sp"], "warm"): pv["sp"].warm()
+        except Exception as ex: log("Builder preview warm-up: %r" % ex)
+    threading.Thread(target=_warm, daemon=True).start()
+    def preview(uri):
+        if pv["busy"]: return
+        action = "pause" if pv["uri"] == uri else "play"; prev = pv["uri"]
+        pv["busy"] = True; pv["uri"] = uri if action == "play" else None; draw(); anim()
+        def go():
+            try:
+                if pv["sp"] is None: pv["sp"] = Spotify(load_config())
+                sp = pv["sp"]
+                r_ = "login" if not sp.tok else bool(sp.preview(uri) if action == "play" else sp.pause())
+            except Exception as ex: log("Builder preview: %r" % ex); r_ = False
+            def done():
+                pv["busy"] = False
+                if r_ == "login": pv["uri"] = prev; toast("Log in to Spotify to preview")
+                elif not r_: pv["uri"] = prev if action == "pause" else (None if prev == uri else prev); toast("Couldn't play \u2013 is Spotify running?")
+                draw(); anim()
+            post(done)
+        threading.Thread(target=go, daemon=True).start()
+    def anim():                                        # breathing glow + equalizer while a song previews
+        if pv["job"]: return
+        def tick():
+            pv["job"] = None
+            if st["page"] != "build" or not pv["uri"] or not d.winfo_exists(): return
+            if win_hidden(d): pv["job"] = d.after(500, tick); return     # minimized: no redraws
+            pv["phase"] = (pv["phase"] + 1) % 24
+            if eq_step(pv["phase"]): pv["noglow"] = False
+            elif not pv.get("noglow"):                     # items missing (just changed): one full redraw
+                draw(); pv["noglow"] = not cv.find_withtag("pvglow")   # still none = playing row scrolled away: idle
+            pv["job"] = d.after(70, tick)
+        pv["job"] = d.after(70, tick)
+    glow_c = {}
+    def glow_img(ph):
+        k = int(ph) % 24
+        if k not in glow_c:
+            import math
+            a = int(70 + 70 * (0.5 + 0.5 * math.sin(k / 24 * 2 * math.pi)))
+            n = int(48 * S); Q = 2; L_ = Image.new("L", (n * Q, n * Q), 0)
+            ImageDraw.Draw(L_).rounded_rectangle([8 * S * Q, 8 * S * Q, 40 * S * Q, 40 * S * Q], 8 * S * Q, fill=a)
+            L_ = L_.filter(ImageFilter.GaussianBlur(4 * S * Q)).resize((n, n), Image.LANCZOS)
+            im = Image.new("RGBA", (n, n), (29, 185, 84, 0)); im.putalpha(L_)
+            ImageDraw.Draw(im).rounded_rectangle([6.5 * S, 6.5 * S, 41.5 * S, 41.5 * S], 7.5 * S, outline=(29, 185, 84, 255), width=max(1, int(1.6 * S)))
+            glow_c[k] = ImageTk.PhotoImage(im)
+        return glow_c[k]
+    def eq_badge(x, y, ph):
+        circ(x, y, 9, C["bg"]); circ(x, y, 7.5, C["acc"])
+        import math
+        for i_ in range(3):
+            h_ = 3 + 4 * (0.5 + 0.5 * math.sin((ph + i_ * 7) / 24 * 2 * math.pi))
+            cv.create_rectangle(*P(x - 4 + i_ * 3, y + 3.5 - h_, x - 2.2 + i_ * 3, y + 3.5), fill="#121212", outline="", tags="pveqbar")
+        pv["eqxy"] = (x, y)
+    def eq_step(ph):
+        """One animation frame in place: re-image the glow, move the 3 equalizer bars (no full redraw)."""
+        import math
+        gl = cv.find_withtag("pvglow"); bars = cv.find_withtag("pveqbar")
+        if len(gl) != 1 or len(bars) != 3 or not pv.get("eqxy"): return False
+        cv.itemconfigure(gl[0], image=glow_img(ph)); x, y = pv["eqxy"]
+        for i_, b_ in enumerate(bars):
+            h_ = 3 + 4 * (0.5 + 0.5 * math.sin((ph + i_ * 7) / 24 * 2 * math.pi))
+            cv.coords(b_, *P(x - 4 + i_ * 3, y + 3.5 - h_, x - 2.2 + i_ * 3, y + 3.5))
+        return True
+    def cover_overlay(playing):
+        def paint(dr, Q, im):
+            dr.rounded_rectangle([0, 0, 32 * S * Q - 1, 32 * S * Q - 1], 6 * S * Q, fill=(0, 0, 0, 120))
+            c_ = 16 * S * Q
+            if playing:
+                for dx in (-4, 2): dr.rounded_rectangle([c_ + dx * S * Q, c_ - 5 * S * Q, c_ + (dx + 2.4) * S * Q, c_ + 5 * S * Q], S * Q, fill=(255, 255, 255, 255))
+            else: dr.polygon([(c_ - 3.5 * S * Q, c_ - 5.5 * S * Q), (c_ - 3.5 * S * Q, c_ + 5.5 * S * Q), (c_ + 5.5 * S * Q, c_)], fill=(255, 255, 255, 255))
+        return _img(("cov_ov", playing), int(32 * S), int(32 * S), paint)
+    shadow_c = {}
+    def ghost_shadow(w_, h_):
+        k = (int(w_), int(h_))
+        if k not in shadow_c:
+            m = int(12 * S); W_, H_ = int(w_ * S) + 2 * m, int(h_ * S) + 2 * m; L_ = Image.new("L", (W_, H_), 0)
+            ImageDraw.Draw(L_).rounded_rectangle([m, m + 4 * S, W_ - m, H_ - m + 4 * S], 10 * S, fill=170)
+            im = Image.new("RGBA", (W_, H_), (0, 0, 0, 0)); im.putalpha(L_.filter(ImageFilter.GaussianBlur(6 * S)))
+            shadow_c[k] = ImageTk.PhotoImage(im)
+        return shadow_c[k]
+    def empty_art():
+        def paint(dr, Q, im):
+            for dx, rot, c1, c2 in ((-28, -12, (150, 70, 70), (70, 30, 35)), (28, 12, (90, 150, 80), (35, 70, 35)), (0, 0, (70, 120, 170), (25, 45, 85))):
+                n = int(46 * S * Q); g = Image.new("RGBA", (n, n)); gd = ImageDraw.Draw(g)
+                for yy in range(n):
+                    t_ = yy / n; gd.line([(0, yy), (n, yy)], fill=tuple(int(c1[k] * (1 - t_) + c2[k] * t_) for k in range(3)) + (255,))
+                m = Image.new("L", (n, n), 0); ImageDraw.Draw(m).rounded_rectangle([0, 0, n - 1, n - 1], 8 * S * Q, fill=255); g.putalpha(m)
+                g = g.rotate(rot, resample=Image.BICUBIC, expand=True)
+                im.alpha_composite(g, (int(im.width / 2 + dx * S * Q - g.width / 2), int(40 * S * Q - g.height / 2)))
+            cx_, cy_ = im.width / 2, 74 * S * Q; r_ = 14 * S * Q
+            dr.ellipse([cx_ - r_, cy_ - r_, cx_ + r_, cy_ + r_], fill=(29, 185, 84, 255))
+            lw = int(2.2 * S * Q)
+            dr.line([(cx_, cy_ - 7 * S * Q), (cx_, cy_ + 6 * S * Q)], fill=(18, 18, 18, 255), width=lw)
+            dr.line([(cx_ - 5 * S * Q, cy_ + 1 * S * Q), (cx_, cy_ + 6 * S * Q), (cx_ + 5 * S * Q, cy_ + 1 * S * Q)], fill=(18, 18, 18, 255), width=lw, joint="curve")
+        return _img(("empty_art",), int(140 * S), int(92 * S), paint)
+    # ---- adding songs
+    def add_uris(uris, src=""):
+        have = {t["uri"] for t in st["tracks"]}; new = [u for u in dict.fromkeys(uris) if u not in have]; dup = len(set(uris)) - len(new)
+        room = CUSTOM_MAX - len(st["tracks"])
+        if not new: toast("Already in the list" if dup else "Nothing to add"); return
+        if room <= 0: toast("100 songs max"); return
+        new = new[:room]; toast("Adding\u2026", ms=0)
+        def go():
+            out = []
+            try:
+                sp = pv["sp"] or Spotify(load_config())
+                for k in range(0, len(new), 50):
+                    c, r = sp._api("GET", "/tracks?ids=" + ",".join(u.split(":")[-1] for u in new[k:k + 50]))
+                    if c == 200 and isinstance(r, dict): out += [meta(t) for t in (r.get("tracks") or []) if isinstance(t, dict) and t.get("uri")]
+            except Exception as ex: log("Builder add: %r" % ex)
+            def done():
+                hv = {t["uri"] for t in st["tracks"]}; got = [t for t in out if t["uri"] not in hv][:CUSTOM_MAX - len(st["tracks"])]
+                if got: snap(); st["tracks"] += got; bst["target"] = max_sc(); smooth()
+                n_ = len(got)
+                toast(("Added %d song%s" % (n_, "" if n_ == 1 else "s") + (" \u00b7 %d already in" % dup if dup else "")) if n_ else "Couldn't add")
+            post(done)
+        threading.Thread(target=go, daemon=True).start()
+    def add_playing():
+        toast("Checking what's playing\u2026", ms=0)
+        def go():
+            it = None
+            try: it = now_playing(pv["sp"] or Spotify(load_config()))
+            except Exception as ex: log("Now playing: %r" % ex)
+            post(lambda: add_uris([it["uri"]]) if it else toast("Nothing playing"))
+        threading.Thread(target=go, daemon=True).start()
+    def add_paste():
+        try: t_ = d.clipboard_get()
+        except tk.TclError: t_ = ""
+        u = parse_tracks(t_)
+        if u: add_uris(u)
+        else: toast("No song links in the clipboard")
+    # ---- inline search with a floating results dropdown
+    def do_search(now=False):
+        if bst["qjob"]:
+            try: d.after_cancel(bst["qjob"])
+            except Exception: pass
+            bst["qjob"] = None
+        qq = se.get().strip()
+        if len(qq) < 2: st["results"] = []; st["busy"] = ""; draw(); return
+        def run():
+            bst["qjob"] = None; st["busy"] = "search"; draw()
+            def go():
+                items = None
+                try: items = search_tracks(pv["sp"] or Spotify(load_config()), qq, 5)
+                except Exception as ex: log("Search: %r" % ex)
+                out = [meta(t) for t in (items or [])]
+                def done():
+                    if se.get().strip() != qq: return                   # typed on meanwhile
+                    st["results"] = out; bst["sel"] = 0; st["busy"] = ""
+                    if not out: toast("No results")
+                    draw()
+                post(done)
+            threading.Thread(target=go, daemon=True).start()
+        if now: run()
+        else: bst["qjob"] = d.after(350, run)
+    def se_key(e):
+        k = e.keysym
+        if k in ("Down", "Up"):
+            if st["results"]: bst["sel"] = (bst["sel"] + (1 if k == "Down" else -1)) % len(st["results"]); draw()
+            return "break"
+        if k == "Return":
+            if st["results"]: pick_result(bst["sel"])
+            else: do_search(now=True)
+            return "break"
+        if k == "Escape":
+            if st["results"] or se.get(): se.delete(0, "end"); st["results"] = []; draw(); return "break"
+            return None
+        if k not in ("Left", "Right", "Home", "End", "Shift_L", "Shift_R", "Control_L", "Control_R"): do_search()
+    se.bind("<KeyRelease>", lambda e: None if e.keysym in ("Down", "Up", "Return", "Escape") else se_key(e))
+    se.bind("<KeyPress-Down>", se_key); se.bind("<KeyPress-Up>", se_key); se.bind("<Return>", se_key); se.bind("<Escape>", se_key)
+    se.bind("<<Paste>>", lambda e: d.after(20, lambda: (add_uris(parse_tracks(se.get())), se.delete(0, "end")) if parse_tracks(se.get()) else do_search()))
+    def pick_result(i_):
+        if 0 <= i_ < len(st["results"]):
+            r_ = st["results"][i_]
+            if any(t["uri"] == r_["uri"] for t in st["tracks"]): toast("Already in the list"); return
+            snap(); st["tracks"].append(dict(r_)); bst["target"] = max_sc(); smooth()
+            toast("Added \u201c%s\u201d" % fit(r_.get("name", "Song"), 10.5, False, 200))
+    # ---- smooth scrolling
+    def smooth():
+        if bst["sjob"]: return
+        def step():
+            bst["sjob"] = None
+            t_ = max(0.0, min(max_sc(), bst["target"])); bst["target"] = t_
+            dlt = t_ - st["sc"]
+            if abs(dlt) < 0.6: st["sc"] = t_; draw(); return
+            st["sc"] += dlt * 0.35; draw(); bst["sjob"] = d.after(16, step)
+        step()
+    # ---- removing
+    def remove(i_):
+        if not (0 <= i_ < len(st["tracks"])): return
+        snap(); t_ = st["tracks"].pop(i_)
+        if pv["uri"] == t_["uri"]: pass                   # keeps playing; just no row to glow on
+        bst["target"] = min(bst["target"], max_sc()); st["sc"] = min(st["sc"], max_sc())
+        bst["hov"] = None; toast("Removed \u201c%s\u201d" % fit(t_.get("name", "Song"), 10.5, False, 150), undo=True, ms=5000)
+    # ---- drawing
+    def row_top(i_): return LT + i_ * RH - st["sc"]
+    def draw_build():
+        trs = st["tracks"]; n = len(trs); ph = pv["phase"]; hv = bst["hov"]; dg = bst["drag"]
+        # list first (header / footer are painted over its overflow)
+        if n:
+            first = max(0, int(st["sc"] // RH)); last = min(n, first + VISN + 2)
+            for i_ in range(first, last):
+                if dg and dg["i"] == i_: continue
+                t_ = trs[i_]; ry = row_top(i_); tg = "row%d" % i_
+                playing = pv["uri"] == t_["uri"]; hover = hv == i_ and not dg
+                if playing: rr(20, ry + 2, W - 20, ry + RH - 2, 10, "#17271d", tag=tg)
+                elif hover: rr(20, ry + 2, W - 20, ry + RH - 2, 10, "#1f1f1f", tag=tg)
+                else: rr(20, ry + 2, W - 20, ry + RH - 2, 10, C["bg"], tag=tg)
+                text(36, ry + RH / 2, str(i_ + 1), 10.5, C["acc"] if playing else C["mu"], playing, "center", tg)
+                if playing: cv.create_image(*P(68, ry + RH / 2), image=glow_img(ph), anchor="center", tags=(tg, "pvglow"))
+                cv.create_image(*P(52, ry + 8), image=thumb(track_cover(t_["uri"]), 32), anchor="nw", tags=tg)
+                if hover: cv.create_image(*P(52, ry + 8), image=cover_overlay(playing), anchor="nw", tags=tg)
+                if playing: eq_badge(84, ry + 38, ph)
+                right = (W - 104) if hover else (W - 72)
+                text(96, ry + 17, fit(t_.get("name", "Song"), 11.5, True, right - 96), 11.5, C["acc"] if playing else C["tx"], True, tag=tg)
+                text(96, ry + 32, fit(t_.get("artist", ""), 10, False, right - 96), 10, C["mu"], tag=tg)
+                dur = "%d:%02d" % (t_["ms"] // 60000, t_["ms"] // 1000 % 60) if t_.get("ms") else ""
+                if hover:
+                    icon("handle", W - 92, ry + RH / 2, C["mu"], sz=18, tag="hd%d" % i_)
+                    text(W - 58, ry + RH / 2, dur, 10.5, C["mu"], anchor="e", tag=tg)
+                    rt = "rm%d" % i_; circ(W - 40, ry + RH / 2, 11, "#3a3a3a" if bst["hpart"] == "rm" else "#2a2a2a", tag=rt)
+                    icon("x", W - 40, ry + RH / 2, C["tx"], sz=18, tag=rt); click(rt, lambda i_=i_: remove(i_))
+                else: text(W - 34, ry + RH / 2, dur, 10.5, C["mu"], anchor="e", tag=tg)
+            if dg and bst["ins"] is not None:                          # insertion line + floating ghost
+                iy = LT + bst["ins"] * RH - st["sc"]
+                rr(20, iy - 1, W - 20, iy + 1, 1, C["acc"]); circ(22, iy, 3.5, C["acc"])
+                t_ = trs[dg["i"]]; gy = dg["y"] - dg["off"]
+                cv.create_image(*P(60 - 12, gy - 12 + 2), image=ghost_shadow(W - 100, 40), anchor="nw")
+                rr(60, gy, W - 40, gy + 40, 10, "#2b2b2d", "#3a3a3c", 1)
+                cv.create_image(*P(68, gy + 6), image=thumb(track_cover(t_["uri"]), 28), anchor="nw")
+                text(106, gy + 14, fit(t_.get("name", "Song"), 11.5, True, W - 160), 11.5, b=True); text(106, gy + 28, fit(t_.get("artist", ""), 10, False, W - 160), 10, C["mu"])
+            if max_sc() > 0:                                           # scrollbar (draggable)
+                vh = RH * VISN; th = max(28, vh * vh / (n * RH)); ty = LT + (vh - th) * st["sc"] / max_sc()
+                rr(W - 12, LT + 2, W - 8, LB - 2, 2, "#222222", tag="sb"); rr(W - 13, ty + 2, W - 7, ty + th - 2, 3, "#6a6a6a" if bst["sb"] else "#4a4a4a", tag="sb")
+        else:                                                          # empty state
+            hl = st["drag"]
+            rr(20, LT + 8, W - 20, LT + 216, 14, "#16261c" if hl else "#151a16", C["acc"] if hl else "#3f5a48", 1.4, dash=True)
+            cv.create_image(*P(W / 2, LT + 70), image=empty_art(), anchor="center")
+            text(W / 2, LT + 142, "Drop songs from Spotify", 12.5, C["tx"], True, "center")
+            text(W / 2, LT + 164, "or search, add what's playing, paste links", 10.5, C["mu"], False, "center")
+        if n and st["drag"]: rr(16, LT - 4, W - 16, LB + 4, 12, None, C["acc"], 1.4, dash=True)   # drop from Spotify
+        # masks over the list overflow
+        cv.create_rectangle(0, 0, W * S, LT * S - 1, fill=C["bg"], outline="")
+        cv.create_rectangle(0, LB * S + 1, W * S, (LB + 200) * S, fill=C["bg"], outline="")
+        # header
+        cv.create_image(*P(30, 46), image=_img(("bk", ""), int(32 * S), int(32 * S),
+                        lambda dr, Q, im: dr.ellipse([0, 0, 32 * S * Q - 1, 32 * S * Q - 1], fill="#2a2a2a")), anchor="center", tags="back")
+        icon("back", 30, 46, C["tx"], tag="back"); click("back", lambda: (st.update(page="pick", err=""), draw()))
+        if trs: cv.create_image(*P(56, 14), image=mosaic([t["uri"] for t in trs], 64), anchor="nw")
+        else: rr(56, 14, 120, 78, 8, "#1f2a23"); icon("note", 88, 46, C["acc"], "#1f2a23", sz=26)
+        rr(132, 16, W - 20, 46, 9, C["ib"])
+        cv.create_window(*P(144, 31), window=nm, anchor="w", width=int((W - 20 - 144 - 10) * S), height=int(24 * S))
+        mins = sum(t.get("ms", 0) for t in trs) // 60000
+        text(134, 62, ("%d song%s \u00b7 %d min" % (n, "" if n == 1 else "s", mins)) if n else "No songs yet", 10.5, C["mu"])
+        # add bar: search + add playing + paste
+        sf = d.focus_get() is se
+        rr(20, 92, W - 96, 126, 17, C["ib"], C["acc"] if sf else "#3a3a3a", 1)
+        icon("search", 38, 109, C["acc"] if sf else C["mu"], C["ib"], sz=18)
+        cv.create_window(*P(54, 109), window=se, anchor="w", width=int((W - 96 - 54 - 30) * S), height=int(22 * S))
+        if st.get("busy") == "search": text(W - 108, 109, "\u2026", 12, C["mu"], anchor="e")
+        if not se.get() and not sf: text(56, 109, "Search songs", 11, C["dim"], tag="seph"); click("seph", lambda: se.focus_set())
+        for k_, (ic, tg) in enumerate((("playing", "tbp"), ("paste", "tbv"))):
+            x_ = W - 74 + k_ * 38; circ(x_, 109, 16, "#333333" if bst.get("tip") == tg else C["ib"], tag=tg); icon(ic, x_, 109, C["tx"] if bst.get("tip") == tg else C["mu"], sz=20, tag=tg)
+        click("tbp", add_playing); click("tbv", add_paste)
+        # results dropdown (floats over the list)
+        rs = st["results"]
+        if rs:
+            h_ = len(rs) * 44 + 8; y0 = 132
+            cv.create_image(*P(20 - 12, y0 - 12 + 2), image=ghost_shadow(W - 116, h_), anchor="nw")
+            rr(20, y0, W - 96, y0 + h_, 10, "#262628", "#3a3a3c", 1, tag="dd")
+            for j_, r_ in enumerate(rs):
+                yy = y0 + 4 + j_ * 44; tg = "sr%d" % j_; inl = any(t["uri"] == r_["uri"] for t in trs)
+                if j_ == bst["sel"]: rr(24, yy, W - 100, yy + 42, 8, "#2f2f31", tag=tg)
+                else: rr(24, yy, W - 100, yy + 42, 8, "#262628", tag=tg)
+                cv.create_image(*P(30, yy + 7), image=thumb(track_cover(r_["uri"]), 28), anchor="nw", tags=tg)
+                text(68, yy + 15, fit(r_["name"], 11, True, W - 200), 11, b=True, tag=tg); text(68, yy + 30, fit(r_["artist"], 9.5, False, W - 200), 9.5, C["mu"], tag=tg)
+                circ(W - 120, yy + 21, 11, "#1c3a26" if not inl else "#2a2a2a", tag=tg)
+                icon("x" if False else ("plus" if not inl else "note"), W - 120, yy + 21, C["acc"] if not inl else C["mu"], sz=16, tag=tg)
+                click(tg, lambda j_=j_: pick_result(j_))
+        # toast + footer
+        ty_ = LB + 8; tb = bst["toast"]
+        if tb:
+            msg = tb["msg"]; tw_ = fnt(10.5, False).measure(msg) / S + 28 + (48 if tb["undo"] else 0)
+            rr(20, ty_, 20 + tw_, ty_ + 32, 16, "#2b2b2d", "#3a3a3c", 1); text(34, ty_ + 16, msg, 10.5, C["tx"])
+            if tb["undo"]:
+                text(20 + tw_ - 14, ty_ + 16, "Undo", 10.5, C["acc"], True, "e", "undo"); click("undo", lambda: undo_redo(True))
+        fy = LB + 50
+        rr(W - 120, fy, W - 20, fy + 32, 16, C["acc"] if n else "#2a2a2a", tag="save"); text(W - 70, fy + 16, "Save", 12, "#121212" if n else C["dim"], True, "center", "save")
+        rr(W - 218, fy, W - 130, fy + 32, 16, "#2a2a2a", tag="cancel"); text(W - 174, fy + 16, "Cancel", 12, C["tx"], False, "center", "cancel")
+        click("save", save_list); click("cancel", d.destroy)
+        st["H"] = fy + 32 + 14
+    # ---- pointer
+    def tags_at(e): return {t for it in cv.find_overlapping(e.x, e.y, e.x, e.y) for t in cv.gettags(it)}
+    def row_of(tags):
+        for t in tags:
+            if t[:3] in ("row", "rm", "hd") or t.startswith("rm"):
+                k = t[3:] if t.startswith("row") else t[2:]
+                if k.isdigit(): return int(k)
+        return None
+    def b_motion(e):
+        tags = tags_at(e); y_ = e.y / S
+        h_ = row_of(tags) if LT <= y_ <= LB and not st["results"] else None
+        part = "rm" if any(t.startswith("rm") for t in tags) else ("hd" if any(t.startswith("hd") for t in tags) else None)
+        tipt = next((t for t in ("tbp", "tbv") if t in tags), None)
+        if (h_, part, tipt) != (bst["hov"], bst["hpart"], bst.get("tip")):
+            bst["hov"], bst["hpart"], bst["tip"] = h_, part, tipt; draw()
+            if tipt:
+                bb = cv.bbox(tipt)
+                if bb: get_tip(cv).request(("bld", tipt), {"tbp": "Add what's playing", "tbv": "Paste song links"}[tipt], canvas_rect(cv, bb), S, cv)
+            else: get_tip(cv).hide()
+        sr = next((int(t[2:]) for t in tags if t.startswith("sr") and t[2:].isdigit()), None)
+        if sr is not None and sr != bst["sel"]: bst["sel"] = sr; draw()
+        cur_ = "fleur" if part == "hd" else ("hand2" if (h_ is not None or any(t in handlers for t in tags) or "sb" in tags) else "")
+        if cv.cget("cursor") != cur_: cv.config(cursor=cur_)
+    def b_press(e):
+        tags = tags_at(e); y_ = e.y / S
+        if st["results"] and "dd" not in tags and not any(t.startswith("sr") for t in tags):
+            st["results"] = []; draw()                                  # click outside closes the dropdown
+        if "dd" in tags or any(t.startswith("sr") for t in tags): return      # dropdown sits over the list rows
+        if "sb" in tags and max_sc() > 0:
+            bst["sb"] = (y_, st["sc"]); return
+        i_ = row_of(tags)
+        if i_ is not None and not any(t.startswith("rm") for t in tags) and LT <= y_ <= LB:
+            bst["press"] = {"i": i_, "x": e.x / S, "y": y_, "off": y_ - row_top(i_)}
+    def ins_at(y_):
+        return max(0, min(len(st["tracks"]), int(round((y_ - LT + st["sc"]) / RH))))
+    def b_drag(e):
+        y_ = e.y / S
+        if bst["sb"]:
+            y0, s0 = bst["sb"]; vh = RH * VISN; th = max(28, vh * vh / (len(st["tracks"]) * RH))
+            st["sc"] = bst["target"] = max(0.0, min(max_sc(), s0 + (y_ - y0) * max_sc() / max(1, vh - th))); draw(); return
+        p_ = bst["press"]
+        if not p_: return
+        if not bst["drag"] and abs(y_ - p_["y"]) + abs(e.x / S - p_["x"]) < 5: return
+        if not bst["drag"]: bst["drag"] = {"i": p_["i"], "off": p_["off"], "y": y_}; get_tip(cv).hide()
+        bst["drag"]["y"] = max(LT - 20, min(LB - 20, y_)); bst["ins"] = ins_at(y_); draw()
+        if (y_ < LT + 24 or y_ > LB - 24) and not bst["ajob"]:          # edge auto-scroll
+            def auto():
+                bst["ajob"] = None
+                if not bst["drag"]: return
+                yy = bst["drag"]["y"]; dv = -9 if yy < LT + 24 else (9 if yy > LB - 44 else 0)
+                if not dv: return
+                st["sc"] = bst["target"] = max(0.0, min(max_sc(), st["sc"] + dv)); bst["ins"] = ins_at(yy); draw()
+                bst["ajob"] = d.after(30, auto)
+            auto()
+    def b_release(e):
+        """Returns True when the builder consumed the release."""
+        if bst["sb"]: bst["sb"] = None; draw(); return True
+        p_, dg = bst["press"], bst["drag"]; bst["press"] = None; bst["drag"] = None
+        if dg:
+            i_, j_ = dg["i"], bst["ins"]; bst["ins"] = None
+            if j_ is not None and j_ not in (i_, i_ + 1):
+                snap(); t_ = st["tracks"].pop(i_); st["tracks"].insert(j_ - 1 if j_ > i_ else j_, t_)
+            draw(); return True
+        if p_:
+            tags = tags_at(e)
+            if row_of(tags) == p_["i"] and not any(t.startswith("rm") or t.startswith("hd") for t in tags):
+                preview(st["tracks"][p_["i"]]["uri"]); return True
+        return False
+    def b_cancel(_=None):
+        bst["press"] = None; bst["sb"] = None
+        if bst["drag"]: bst["drag"] = None; bst["ins"] = None; draw()
+    def on_press(e):
+        st["pdown"] = bool(st.get("armed"))
+        if not st.get("armed"): return
+        if st["page"] == "build": b_press(e)
+    def end_move(e): st["move"] = None
+    cv.bind("<ButtonPress-1>", on_press); cv.bind("<B1-Motion>", lambda e: b_drag(e) if st["page"] == "build" and st.get("armed") else None)
+    def cancel_ptr(_=None):
+        st.pop("pdown", None); b_cancel()
+    d.bind("<FocusOut>", lambda e: d.after(50, lambda: (d.focus_displayof() is None) and cancel_ptr()), add="+")
+    def on_wheel(e):
+        if st["page"] == "build" and not st["results"]:
+            get_tip(cv).hide(); bst["target"] = max(0.0, min(max_sc(), bst["target"] - (e.delta / 120) * RH * 1.5)); smooth()
+    cv.bind("<MouseWheel>", on_wheel)
+    # ---- drag & drop from Spotify
+    def on_drop(data):
+        st["drag"] = False
+        if st["page"] == "pick":
+            u = parse_link(data or "")
+            if u: finish(u); return
+            st["err"] = "Not a Spotify %s" % ("playlist or song" if allow_tracks else "playlist"); draw()
+        else:
+            u = parse_tracks(data or "")
+            if u: add_uris(u)
+            else: st["busy"] = "Drop songs (not playlists)"; draw()
+    try:
+        from tkinterdnd2 import TkinterDnD, DND_TEXT
+        TkinterDnD._require(d)
+        for w_ in (cv, ent):
+            w_.drop_target_register(DND_TEXT)
+            w_.dnd_bind("<<DropEnter>>", lambda e: (st.update(drag=True, err=""), draw(), "copy")[2])
+            w_.dnd_bind("<<DropPosition>>", lambda e: "copy")
+            w_.dnd_bind("<<DropLeave>>", lambda e: (st.update(drag=False), draw(), "copy")[2])
+            w_.dnd_bind("<<Drop>>", lambda e: (d.after_idle(lambda x=e.data: on_drop(x)), "copy")[1])
+    except Exception as ex: log("Picker drag-in unavailable: %r" % ex)
+    d.bind("<Escape>", lambda e: d.destroy() if st["page"] == "pick" else (st.update(page="pick"), draw()))
+    install_edit_menu(d)
+    if start_builder: open_builder(current if is_custom(current) else None)
+    else: draw()
+    pump(); mp_load()
+    try: reveal(d, fade=False, over=parent)
+    except Exception: pass
+    def arm():                                         # input + modal grab only after the opening press is fully released
+        st["armed"] = True
+        try: d.grab_set()
+        except tk.TclError: pass
+    after_mouse_up(d, arm)
+    parent.wait_window(d)
+    return res.get("uri")
 
 # ---------------------------------------------------------------- control panel (--panel)
 # A small settings window. Settings are saved to %APPDATA%/AoE4Spotify/config.json and
@@ -1854,7 +3612,7 @@ def update_cover(sp, pid, need=96):
     if url and not os.path.exists(path):
         try:
             data = http_get(url); os.makedirs(COVERS, exist_ok=True)
-            open(path + ".part", "wb").write(data); os.replace(path + ".part", path)
+            atomic_write(path, data, "wb")
             for f in os.listdir(COVERS):                          # drop older snapshots of this playlist
                 if f.startswith(pid + "_") and os.path.join(COVERS, f) != path:
                     try: os.remove(os.path.join(COVERS, f))
@@ -1913,7 +3671,7 @@ def fetch_track(sp, uri, need=96):
     if url:
         try:
             os.makedirs(COVERS, exist_ok=True); data = http_get(url); p = track_cover(uri)
-            open(p + ".part", "wb").write(data); os.replace(p + ".part", p)
+            atomic_write(p, data, "wb")
         except Exception as e: log("Track cover download failed: %r" % e)
     return r["name"], ", ".join(a_.get("name", "") for a_ in (r.get("artists") or [])[:2])
 def store_track(r, need=96):
@@ -1923,9 +3681,85 @@ def store_track(r, need=96):
     if url and not os.path.exists(track_cover(uri)):
         try:
             os.makedirs(COVERS, exist_ok=True); data = http_get(url); p = track_cover(uri)
-            open(p + ".part", "wb").write(data); os.replace(p + ".part", p)
+            atomic_write(p, data, "wb")
         except Exception as e: log("Track cover download failed: %r" % e)
     return uri, r.get("name") or "Song", ", ".join(a_.get("name", "") for a_ in (r.get("artists") or [])[:2])
+# ---- your Spotify library for the picker (0.5.1): Liked Songs + your playlists
+LIB_SCOPES = ("playlist-read-private", "playlist-read-collaborative", "user-library-read")
+LIKED_URI = "aoe4s:liked"; LIKED_ID = "liked"
+_MYLIB = {}                                         # last good list, so a reopened picker shows it instantly
+def lib_scopes_ok(sp):
+    t = getattr(sp, "tok", None) or Spotify._disk_tok() or {}
+    have = set(str(t.get("scope") or "").split())
+    return all(x in have for x in LIB_SCOPES)
+def _next_path(r):
+    n = r.get("next") if isinstance(r, dict) else None
+    return n.split("/v1", 1)[1] if isinstance(n, str) and "/v1/" in n else None
+def _pl_total(p):
+    for k in ("items", "tracks"):                   # Feb 2026 API renamed playlist "tracks" to "items"
+        v = p.get(k)
+        if isinstance(v, dict) and v.get("total") is not None:
+            try: return int(v["total"])
+            except (TypeError, ValueError): pass
+    return 0
+def playlist_total(sp, pid):
+    """Song count of a playlist for the shuffle start: old (tracks) or new (items) field, then the items endpoint; 0 if unknown."""
+    c, pl = sp._api("GET", "/playlists/%s?fields=items.total,tracks.total" % pid)
+    n = _pl_total(pl) if c == 200 and isinstance(pl, dict) else 0
+    if n <= 0:
+        c, r = sp._api("GET", "/playlists/%s/items?limit=1&fields=total" % pid)
+        try: n = int(r.get("total") or 0) if c == 200 and isinstance(r, dict) else 0
+        except (TypeError, ValueError): n = 0
+    return max(0, n)
+def my_library(sp, cap=1000):
+    """('ok', items) | ('scope', []) needs Reconnect | ('login', []) | ('off', []). Liked Songs first, then every page of /me/playlists."""
+    if not (getattr(sp, "tok", None) or Spotify._disk_tok()): return "login", []
+    if not lib_scopes_ok(sp): return "scope", []
+    c, r = sp._api("GET", "/me/tracks?limit=1")
+    if c in (401, 403): return "scope", []
+    if c != 200 or not isinstance(r, dict): return "off", []
+    try: n = int(r.get("total") or 0)
+    except (TypeError, ValueError): n = 0
+    out = [{"uri": LIKED_URI, "name": "Liked Songs", "n": n, "liked": True}]
+    path = "/me/playlists?limit=50"; seen = set()
+    while path and len(out) < cap:
+        c, r = sp._api("GET", path)
+        if c in (401, 403): return "scope", []
+        if c != 200 or not isinstance(r, dict): break
+        for p in r.get("items") or []:
+            if not isinstance(p, dict) or not p.get("id") or p["id"] in seen: continue
+            seen.add(p["id"])
+            snap = re.sub(r"[^A-Za-z0-9]", "", str(p.get("snapshot_id") or "0"))[:16] or "0"
+            out.append({"uri": "spotify:playlist:" + p["id"], "pid": p["id"], "name": str(p.get("name") or "Playlist"),
+                        "n": _pl_total(p), "snap": snap, "url": pick_image(p.get("images"), 192)})
+        path = _next_path(r)
+    _MYLIB.update(t=time.time(), items=out); return "ok", out
+def lib_cover(it, fetch=True):
+    """Cover for a library playlist, in the panel's <pid>_<snapshot>.jpg cache (downloaded once per snapshot)."""
+    pid = it.get("pid")
+    if not pid: return None
+    path = os.path.join(COVERS, "%s_%s.jpg" % (pid, it.get("snap") or "0"))
+    if os.path.exists(path): return path
+    if not fetch or not it.get("url"): return cover_file(pid)
+    try:
+        data = http_get(it["url"]); os.makedirs(COVERS, exist_ok=True); atomic_write(path, data, "wb")
+        for f in os.listdir(COVERS):
+            if f.startswith(pid + "_") and os.path.join(COVERS, f) != path:
+                try: os.remove(os.path.join(COVERS, f))
+                except OSError: pass
+        return path
+    except Exception as e: log("Library cover download failed: %r" % e); return cover_file(pid)
+def liked_tracks(sp, cap=100):
+    """Your newest liked songs (Liked Songs can't be played as a context, so it becomes a song list)."""
+    out = []; path = "/me/tracks?limit=50"
+    while path and len(out) < cap:
+        c, r = sp._api("GET", path)
+        if c != 200 or not isinstance(r, dict): break
+        for x in r.get("items") or []:
+            t = (x or {}).get("track") or (x or {}).get("item") if isinstance(x, dict) else None
+            if isinstance(t, dict) and str(t.get("uri", "")).startswith("spotify:track:"): out.append(t)
+        path = _next_path(r)
+    return out[:cap]
 def parse_tracks(text):
     """Every Spotify track in a text (links, URIs, one per line as the Spotify app drags them), in order."""
     ids = re.findall(r"(?:spotify:track:|open\.spotify\.com/(?:intl-[a-z]+/)?track/)([A-Za-z0-9]{22})", text or "")
@@ -2067,7 +3901,7 @@ def pool_editor(parent, user, save):
     if not single_window("editor", "Age Intros"): return None
     import tkinter as tk
     C = dict(bg="#121212", card="#1f1f1f", tx="#f2f2f2", mu="#9a9a9a", acc="#1DB954", line="#2e2e2e", dis="#4a4a4a")
-    win = tk.Toplevel(parent); dark_window(win, C["bg"]); win.title("Age Intros"); win.resizable(False, False)
+    win = tk.Toplevel(parent); dark_window(win, C["bg"]); win.title("AoE4 Spotify"); win.resizable(False, False)
     win.bind("<Destroy>", lambda e: release_window("editor") if e.widget is win else None, add="+")
     S = win.winfo_fpixels("1i") / 96.0
     W, H, LT, RH, GAP = 600, 720, 196, 40, 4
@@ -2269,11 +4103,10 @@ def pool_editor(parent, user, save):
                 if not sp.tok: return
                 for u_ in miss: fetch_track(sp, u_)
             except Exception as ex: log("Covers: %r" % ex); return
-            try: win.after(0, lambda: (art.cache.clear(), draw()))
-            except Exception: pass
+            ui(lambda: (art.cache.clear(), draw()))           # Tk only on the UI thread
         threading.Thread(target=go, daemon=True).start()
     def name_dialog(title, init, cb):
-        d = tk.Toplevel(win); dark_window(d, C["card"]); d.title(title); d.resizable(False, False); d.transient(win)
+        d = tk.Toplevel(win); dark_window(d, C["card"]); d.title("AoE4 Spotify"); d.resizable(False, False); d.transient(win)
         tk.Label(d, text=title, bg=C["card"], fg=C["tx"], font=("Segoe UI", 11, "bold")).pack(padx=16, pady=(14, 6), anchor="w")
         e_ = tk.Entry(d, width=32, bg="#2a2a2a", fg=C["tx"], insertbackground=C["tx"], relief="flat", font=("Segoe UI", 10)); e_.pack(padx=16, ipady=5)
         e_.insert(0, init); e_.select_range(0, "end")
@@ -2284,7 +4117,7 @@ def pool_editor(parent, user, save):
         e_.bind("<Return>", ok); d.bind("<Escape>", lambda e: d.destroy())
         reveal(d, over=win); e_.focus_set(); win._name = (d, e_, ok); return "break"
     def import_dialog():
-        d = tk.Toplevel(win); dark_window(d, "#1e1e1e"); d.title("Import"); d.resizable(False, False); d.transient(win)
+        d = tk.Toplevel(win); dark_window(d, "#1e1e1e"); d.title("AoE4 Spotify"); d.resizable(False, False); d.transient(win)
         DW, DH = 480, 360; dc = tk.Canvas(d, width=int(DW * S), height=int(DH * S), bg="#1e1e1e", highlightthickness=0); dc.pack()
         e_ = tk.Entry(d, bg="#141414", fg="#c8c8c8", insertbackground=C["tx"], relief="flat", font=("Segoe UI", 10),
                       highlightthickness=max(1, int(S)), highlightbackground="#3e3e3e", highlightcolor=C["acc"])
@@ -2297,7 +4130,7 @@ def pool_editor(parent, user, save):
             dc.delete("g"); dimg.clear()
             if not dc.find_withtag("entry"): dc.create_window(24 * S, 66 * S, anchor="nw", width=int(432 * S), height=int(40 * S), window=e_, tags="entry")
             dc.create_image(38 * S, 36 * S, image=art.disc(30, "#1e3c28", outline=C["acc"], ow=1.5), tags="g"); dc.create_image(38 * S, 36 * S, image=bar_icon("import", C["acc"]), tags="g")
-            dtext(62, 36, "Import", 17, b=True); dtext(452, 34, "×", 20, C["tx"] if res["hov"] == "x" else C["mu"], anchor="center")
+            dtext(62, 36, "Import", 17, b=True); dtext(452, 34, "Ã—", 20, C["tx"] if res["hov"] == "x" else C["mu"], anchor="center")
             drr(24, 126, 456, 290, 14, "#262626")
             p, err = res["p"], res["err"]
             if p:
@@ -2353,7 +4186,7 @@ def pool_editor(parent, user, save):
     def add_dialog():
         """Search Spotify, add what's playing, or paste a link. Clicking a result adds it."""
         D = dict(bg=C["card"], row="#2a2a2a", fld="#232323", tx=C["tx"], mu=C["mu"], acc=C["acc"])
-        d = tk.Toplevel(win); dark_window(d, D["bg"]); d.title("Add a song"); d.resizable(False, False); d.transient(win)
+        d = tk.Toplevel(win); dark_window(d, D["bg"]); d.title("AoE4 Spotify"); d.resizable(False, False); d.transient(win)
         Wd, RHd, NR = 400, 52, 6
         top = tk.Frame(d, bg=D["bg"]); top.pack(fill="x", padx=16, pady=(14, 8))
         tk.Label(top, text="Add a song", bg=D["bg"], fg=D["tx"], font=("Segoe UI", 12, "bold")).pack(side="left")
@@ -2512,6 +4345,7 @@ def pool_editor(parent, user, save):
     def hit(x, y):
         if ed["page"] == "overview":
             m = st.get("menu")
+            if not m and 18 <= x <= 50 and 33 <= y <= 65: return ("back",)
             if m == "presets":
                 ps = user_presets(user)
                 for i_, p in enumerate(ps):
@@ -2566,8 +4400,9 @@ def pool_editor(parent, user, save):
                        width=max(1, 2 * S), capstyle="round", joinstyle="round")
     def draw_overview():
         cv.delete("all"); on = ages_on(); hov = st["hov"]
-        cv.create_polygon(*[v * S for v in (20, 58, 20, 42, 27, 49, 32, 38, 37, 49, 44, 42, 44, 58)], fill=C["acc"])
-        text(52, 49, "Age Intros", 18, b=True)
+        cv.create_image(34 * S, 49 * S, image=art.chevron(32, C["tx"], True, "#2a2a2a" if (hov or ("",))[0] == "back" else C["card"], w=6, h=12))
+        cv.create_polygon(*[v * S for v in (64, 58, 64, 42, 71, 49, 76, 38, 81, 49, 88, 42, 88, 58)], fill=C["acc"])
+        text(96, 49, "Age Intros", 18, b=True)
         for k, a_ in enumerate(INTRO_AGES):
             y = CARD_Y(k); p = pools(a_); n = sum(1 for v in p.values() if v); hv = hov and hov[1:] == (a_,)
             rr(20, y, 580, y + 128, 18, "#262626" if hv else C["card"], "#464646" if hv else None)
@@ -2785,6 +4620,7 @@ def pool_editor(parent, user, save):
         return glow_cache[k]
     def glow_tick():                                   # 'now playing' breathing glow, ~30 fps while active
         pv["gjob"] = None
+        if pv["song"] and win_hidden(win): pv["gjob"] = win.after(500, glow_tick); return   # minimized: sleep
         if pv["song"]: pv["gsong"] = pv["song"]
         pv["env"] = min(1.0, pv["env"] + 0.1) if pv["song"] else max(0.0, pv["env"] - 0.1)
         pv["gt"] = (pv["gt"] + 1) % GLOW_N
@@ -2866,36 +4702,44 @@ def pool_editor(parent, user, save):
             elif hov[0] == "tray":
                 ii = hov[1]; cx, cy = tray_xy(ii); R_ = tray_rad(ii) + 3
                 cv.create_oval((cx - R_) * S, (cy - R_) * S, (cx + R_) * S, (cy + R_) * S, outline=C["acc"], width=max(1, int(1.5 * S)))
-        hov = hov if st.get("tipok") else None
-        p = pools()
-        tip = None
-        if not drag and hov and hov[0] in ("tray", "chip"):
-            s = SONGS[hov[1]] if hov[0] == "tray" else SONG_BY_URI.get(p[CIV_LIST[hov[1]][0]][hov[2]])
-            if s:
-                cx, cy = tray_xy(hov[1]) if hov[0] == "tray" else chip_xy(hov[1], hov[2])
-                tip = ("%s \u2014 %s" % (s[1], s[2]) if s[2] else s[1], cx, cy + 26)
-
-        if hov and hov[0] == "swoff": tip = ("Add a song first", hov[2], hov[3])
-        if st.get("press") and not st.get("released", True): tip = None       # mouse button down: no tooltips
-        if st["msg"]: tip = st["msg"]
-        if tip:                                        # measured text, even padding, same look as the panel tooltips
-            import tkinter.font as tkfont
-            fnt = tkfont.Font(root=win, family="Segoe UI", size=-int(10 * S))
-            tw = fnt.measure(tip[0]) / S + 20; x0 = min(max(8, tip[1] - tw / 2), W - 8 - tw)
-            rr(x0, tip[2], x0 + tw, tip[2] + 24, 8, "#2a2a2a", "#3d3d3d", 1)
-            text(x0 + tw / 2, tip[2] + 12, tip[0], 10, C["tx"], anchor="center")
+        tip = st["msg"]                                # status message only (tooltips live in the shared GlassTip)
+        if tip:
+            tw = msg_font.measure(tip[0]) / S + 20; x0 = min(max(8, tip[1] - tw / 2), W - 8 - tw)
+            ty = min(max(8, tip[2]), H_vis() - 32)
+            rr(x0, ty, x0 + tw, ty + 24, 12, "#1c3a26", C["acc"], 1)
+            text(x0 + tw / 2, ty + 12, tip[0], 10, C["tx"], anchor="center")
         for it in cv.find_all():
             if it > mark: cv.addtag_withtag("ovl", it)
-    tipjob = {"id": None}
+    import tkinter.font as _tkf
+    msg_font = _tkf.Font(root=win, family="Segoe UI", size=-int(10 * S))
+    def H_vis():
+        try: return cv.winfo_height() / S
+        except Exception: return 600
+    gtip = get_tip(cv)
+    def song_tip(h):
+        """(key, text, screen rect) for a hovered song cover / disabled switch, else None."""
+        if not h or st["drag"]: return None
+        if h[0] in ("tray", "chip"):
+            p = pools()
+            s_ = SONGS[h[1]] if h[0] == "tray" else SONG_BY_URI.get(p[CIV_LIST[h[1]][0]][h[2]])
+            if not s_: return None
+            cx, cy = tray_xy(h[1]) if h[0] == "tray" else chip_xy(h[1], h[2])
+            r = tray_rad(h[1]) if h[0] == "tray" else 15
+            if h[0] == "chip" and not (LT <= cy <= BOT): return None
+            return (h, "%s \u2014 %s" % (s_[1], s_[2]) if s_[2] else s_[1], (cx - r, cy - r - 3, cx + r, cy + r + 3))
+        if h[0] == "swoff": return (h, "Add a song first", (h[2] - 12, h[3] - 30, h[2] + 12, h[3] - 6))
+        return None
     def set_hover(h):
         """Hover changed: update the overlay now, show the tooltip after a short delay."""
-        OV = ("card", "cardtog", "swoff", "preset", "save", "share", "import", "pm", "pnew", "ssave", "snew")
+        OV = ("back", "card", "cardtog", "swoff", "preset", "save", "share", "import", "pm", "pnew", "ssave", "snew")
         redraw = ed["page"] == "overview" and (st["hov"] or ("",))[0] in OV or (h or ("",))[0] in OV
         st["hov"] = h; st["msg"] = None; st["tipok"] = False
         if redraw and ed["page"] == "overview": draw()                 # card hover highlight
-        if tipjob["id"]: win.after_cancel(tipjob["id"]); tipjob["id"] = None
-        if h and h[0] in ("tray", "chip", "swoff"):
-            tipjob["id"] = win.after(300, lambda: (st.update(tipok=True), tipjob.update(id=None), overlay()))
+        t_ = song_tip(h)
+        if t_ and not (st.get("press") and not st.get("released", True)):
+            k_, txt, (a0, b0, a1, b1) = t_
+            gtip.request(("intro",) + tuple(k_), txt, canvas_rect(cv, (a0 * S, b0 * S, a1 * S, b1 * S)), S, cv)
+        else: gtip.hide()
         overlay()
         cur = "hand2" if h and h[0] in ("tray", "chip", "x", "undo", "reset", "plus", "tabtog", "card", "cardtog", "back",
                                         "preset", "save", "share", "import", "pm", "pnew", "ssave", "snew") else ("no" if h and h[0] == "swoff" else "")
@@ -2954,7 +4798,10 @@ def pool_editor(parent, user, save):
         elif h and h[0] == "import": win.after_idle(import_dialog)
         elif h and h[0] == "card": open_page(h[1]); return
         elif h and h[0] == "cardtog": set_age_on(h[1], not ages_on()[h[1]])
-        elif h and h[0] == "back": open_page("overview"); return
+        elif h and h[0] == "back":
+            if ed["page"] == "overview": win.destroy()             # overview: back arrow closes the window
+            else: open_page("overview")
+            return
         elif h and h[0] == "x": remove(h[1], h[2])
         elif h and h[0] == "undo":
             p = pools(); p[CIV_LIST[h[1]][0]] = row_default(CIV_LIST[h[1]][0]); commit(p)
@@ -2975,10 +4822,15 @@ def pool_editor(parent, user, save):
             finally: m.grab_release()
     def on_wheel(e):
         if ed["page"] == "overview": return
+        gtip.hide(fade=False)
         st["sc"] = max(0, min(max_sc(), st["sc"] - (e.delta / 120) * 46)); st["hov"] = hit(*L(e)); draw()
     cv.bind("<Motion>", on_motion); cv.bind("<ButtonPress-1>", on_press); cv.bind("<B1-Motion>", on_drag)
-    cv.bind("<ButtonRelease-1>", on_release); cv.bind("<Button-3>", on_right); cv.bind("<MouseWheel>", on_wheel)
-    cv.bind("<Leave>", lambda e: set_hover(None) if not st["drag"] else None)
+    def on_release_guarded(e):                         # a release whose press opened this window (or was elsewhere) does nothing
+        if st["press"] is None: st["hov"] = hit(*L(e)); draw(); return
+        try: on_release(e)
+        finally: st["press"] = None
+    cv.bind("<ButtonRelease-1>", on_release_guarded); cv.bind("<Button-3>", on_right); cv.bind("<MouseWheel>", on_wheel)
+    cv.bind("<Leave>", lambda e: (gtip.hide(), set_hover(None) if not st["drag"] else None))
     win.bind("<Escape>", lambda e: open_page("overview") if ed["page"] != "overview" else (st.update(menu=None), draw()))
     win.bind("<BackSpace>", lambda e: open_page("overview") if ed["page"] != "overview" else None)
     set_app_icon(win)
@@ -3098,10 +4950,23 @@ def run_update(setup):
 
 def load_user(): return load_user_settings()
 
+_save_lock = threading.RLock()
+_LIVE_USER = []                                     # the panel's in-memory settings dict (when the panel runs)
 def save_user(u):
-    tmp = USER_CONFIG + ".tmp"                      # write-then-rename: never leaves a half-written file
-    with open(tmp, "w", encoding="utf-8") as f: json.dump(u, f, indent=2)
-    os.replace(tmp, USER_CONFIG)
+    """Write-then-rename (never half-written), serialized, retried while another process has the file open."""
+    with _save_lock: atomic_write(USER_CONFIG, json.dumps(u, indent=2))
+
+def merge_user(set_=None, remove=()):
+    """Change only these keys: in the panel's live dict (so its next save keeps them) and on disk (other keys as they
+    are there). Side dialogs use this instead of load/modify/save, which overwrote newer changes."""
+    set_ = dict(set_ or {})
+    with _save_lock:
+        for live in _LIVE_USER:
+            live.update(set_)
+            for k in remove: live.pop(k, None)
+        u = load_user_settings(); u.update(set_)
+        for k in remove: u.pop(k, None)
+        save_user(u)
 
 def panel():
     if not single_window("panel", "AoE4 Spotify"): return
@@ -3111,6 +4976,7 @@ def panel():
     C = dict(bg="#121212", card="#1f1f1f", tx="#f2f2f2", mu="#9a9a9a", off="#3a3a3a", line="#2a2a2a",
              ib="#2a2a2a", idle="#8a8a8a", red="#e5484d", acc="#1DB954", dis="#555555", org="#f0a030")
     root = tk.Tk(); dark_window(root, C["bg"]); root.title("AoE4 Spotify"); root.resizable(False, False)
+    install_edit_menu(root)
     S = root.winfo_fpixels("1i") / 96.0
     W, H = 430, 420
     M = 16; R_ = W - M                              # content left / right edge
@@ -3180,8 +5046,103 @@ def panel():
                 for x, yy in pts: d.ellipse([x - lw/2, yy - lw/2, x + lw/2, yy + lw/2], fill=col)
             _chevr[k] = _icon(int(size * S), p)
         cv.create_image(*P(cx, cy), image=_chevr[k], anchor="center", tags=tag)
-    ui = {"open": os.environ.get("AOE4SPOTIFY_PANEL_OPEN") == "1"}   # env var: screenshots/testing only
+    ui = {"open": os.environ.get("AOE4SPOTIFY_PANEL_OPEN") == "1",   # env vars: screenshots/testing only
+          "am": os.environ.get("AOE4SPOTIFY_AM_OPEN") == "1"}
+    class _V:                                          # After match icons: drawn in 22-unit space around the centre
+        def __init__(s_, d, m): s_.d = d; s_.k = m / 22.0; s_.c = m / 2.0
+        def p(s_, x, y): return (s_.c + x * s_.k, s_.c + y * s_.k)
+        def rr(s_, x0, y0, x1, y1, r, fill): s_.d.rounded_rectangle([*s_.p(x0, y0), *s_.p(x1, y1)], radius=r * s_.k, fill=fill)
+        def circ(s_, x, y, r, fill): s_.d.ellipse([*s_.p(x - r, y - r), *s_.p(x + r, y + r)], fill=fill)
+        def poly(s_, pts, fill): s_.d.polygon([s_.p(x, y) for x, y in pts], fill=fill)
+        def arc(s_, box, a0, a1, col, w): s_.d.arc([*s_.p(box[0], box[1]), *s_.p(box[2], box[3])], a0, a1, fill=col, width=max(1, int(w * s_.k)))
+        def pie(s_, box, a0, a1, col): s_.d.pieslice([*s_.p(box[0], box[1]), *s_.p(box[2], box[3])], a0, a1, fill=col)
+        def line(s_, pts, col, w):
+            P_ = [s_.p(x, y) for x, y in pts]; s_.d.line(P_, fill=col, width=max(1, int(w * s_.k)), joint="curve"); r = w * s_.k / 2
+            for x, y in (P_[0], P_[-1]): s_.d.ellipse([x - r, y - r, x + r, y + r], fill=col)
+    def _am_icon(name, col, bg):
+        def paint(d, m, Q):
+            v = _V(d, m)
+            if name == "flag":
+                v.line([(-6, -8), (-6, 8)], col, 2); v.rr(-5, -8, 7, 1, 1.5, col)
+                for i in range(3):
+                    for j in range(2):
+                        if (i + j) % 2: d.rectangle([*v.p(-5 + i * 4, -8 + j * 4.5), *v.p(-1 + i * 4, -3.5 + j * 4.5)], fill=bg)
+            elif name == "keep": v.poly([(-4, -6), (-4, 6), (6, 0)], col)
+            elif name == "fade":
+                for i, h in enumerate((10, 7, 4)): v.rr(-8 + i * 3.6, 5 - h, -5.8 + i * 3.6, 5, 1.1, col)
+                v.rr(2.5, -5, 4.7, 5, 1.1, col); v.rr(6.5, -5, 8.7, 5, 1.1, col)
+            elif name == "stop": v.rr(-5, -5, 5, 5, 2, col)
+            elif name == "playlist":
+                for i in range(3): v.line([(-8, -5 + i * 5), (1 if i < 2 else -3, -5 + i * 5)], col, 2)
+                v.circ(4.5, 5, 2.6, col); v.line([(6.6, 5), (6.6, -4), (9, -5.5)], col, 1.8)
+            elif name == "dark":
+                import math
+                v.arc((-7, -7, 7, 7), -60, 220, col, 1.9); a = math.radians(-60); px_, py_ = 7 * math.cos(a), 7 * math.sin(a)
+                v.poly([(px_ + 3.5, py_ - 1.5), (px_ - 2.5, py_ - 3.5), (px_ + 0.5, py_ + 3)], col)
+            elif name in ("winloss", "trophy"):
+                v.pie((-6, -12, 6, 3), 0, 180, col); v.rr(-6, -6, 6, -4.5, 0.5, col)
+                v.arc((-10, -6, -3, 1), 90, 270, col, 1.8); v.arc((3, -6, 10, 1), 270, 90, col, 1.8)
+                v.rr(-1.2, 2, 1.2, 6, 0.6, col); v.rr(-5, 5.5, 5, 7.5, 1, col)
+            elif name == "skull":
+                v.circ(0, -1, 6, col); v.rr(-3.5, 2, 3.5, 7, 1.5, col); v.circ(-2.3, -1, 1.6, bg); v.circ(2.3, -1, 1.6, bg)
+            elif name == "resume":
+                v.arc((-8, -8, 8, 8), 140, 420, col, 1.8); v.poly([(-9.5, -6.5), (-4, -7.5), (-7.5, -2.5)], col)
+                v.poly([(-2, -4), (-2, 4), (4.5, 0)], col)
+            elif name == "then": v.line([(-5, 0), (4, 0)], col, 1.8); v.line([(1, -3.5), (4.5, 0), (1, 3.5)], col, 1.8)
+            elif name == "plus": v.line([(-4.5, 0), (4.5, 0)], col, 1.8); v.line([(0, -4.5), (0, 4.5)], col, 1.8)
+        return _icon(int(22 * S), paint)
+    _amic = {}
+    def vic(name, col, bg):
+        k = (name, col, bg)
+        if k not in _amic: _amic[k] = _am_icon(name, col, bg)
+        return _amic[k]
     power_img = _icon(int(30 * S), _power); fade_img = _icon(int(24 * S), _fade)
+    G0, GREY_ACC, CORAL, CORAL_TX = "#1DB954", "#6e6e6e", "#e5675f", "#f0d6d4"
+    _fadec = {}
+    def fade_icon(col):
+        if col not in _fadec:
+            def p(d, m, Q):
+                lw = int(2 * S * Q)
+                for k in range(3): d.arc([m*(-0.2+k*0.18), m*0.12, m*(0.4+k*0.18), m*0.88], start=-60, end=60, fill=col, width=lw)
+            _fadec[col] = _icon(int(24 * S), p)
+        return _fadec[col]
+    def _mix(a, b, t):
+        A_, B_ = ImageColor_rgb(a), ImageColor_rgb(b)
+        return "#%02x%02x%02x" % tuple(int(round(A_[i] + (B_[i] - A_[i]) * t)) for i in range(3))
+    _pwr = {}
+    def power_icon(t):
+        """Power icon for the Enabled row: t=0 on (green, upright) .. t=1 off (coral, upside down)."""
+        k = round(t * 20) / 20.0
+        if k not in _pwr:
+            px = int(30 * S); px += px % 2; Q = 4; m = px * Q; col = _mix(G0, CORAL, k)
+            im = Image.new("RGBA", (m, m), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+            lw = int(3 * S * Q); d.arc([m*0.12, m*0.16, m*0.88, m*0.92], start=-60, end=240, fill=col, width=lw)
+            d.rounded_rectangle([m/2 - lw/2, m*0.04, m/2 + lw/2, m*0.5], radius=lw/2, fill=col)
+            if k: im = im.rotate(-180 * k, resample=Image.BICUBIC, center=(m / 2, m * 0.54))
+            _pwr[k] = ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+        return _pwr[k]
+    def red_glow():
+        k = ("glow",)
+        if k not in imgs:
+            from PIL import ImageFilter
+            w, h = int((R_ - M + 24) * S), int((48 + 24) * S)
+            im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            ImageDraw.Draw(im).rounded_rectangle([8 * S, 8 * S, w - 8 * S, h - 8 * S], radius=16 * S, fill=(229, 103, 95, 70))
+            imgs[k] = ImageTk.PhotoImage(im.filter(ImageFilter.GaussianBlur(5 * S)))
+        return imgs[k]
+    en_anim = {"t": None, "job": None}               # current power-icon state while animating (None = settled)
+    def anim_enabled(to_off):
+        if en_anim["job"]: root.after_cancel(en_anim["job"])
+        t0 = time.perf_counter(); a = 0.0 if to_off else 1.0; b = 1.0 - a
+        def step():
+            u = min(1.0, (time.perf_counter() - t0) / 0.32); e = u * u * (3 - 2 * u)   # smoothstep
+            t = a + (b - a) * e; en_anim["t"] = t
+            try:
+                cv.itemconfigure("pwr", image=power_icon(t)); cv.itemconfigure("entx", fill=_mix(C["tx"], CORAL_TX, t))
+            except tk.TclError: return
+            if u < 1.0: en_anim["job"] = root.after(16, step)
+            else: en_anim.update(t=None, job=None)
+        step()
     def _gear(col):
         def p(d, m, Q):
             import math
@@ -3219,13 +5180,14 @@ def panel():
             for it in cv.find_overlapping(px, py, px, py):
                 if cv.itemcget(it, "state") != "hidden": tags.update(cv.gettags(it))
         x, y = px / S, py / S; row = None
-        if inside and ui.get("open") and not ui.get("menu") and M + 22 <= x <= R_:
+        if inside and ui.get("open") and not ui.get("menu") and M + 16 <= x <= R_ - 16:
             for i in range(len(AGES)):
-                if 216 + i * 50 <= y <= 258 + i * 50: row = i
+                if PL_Y(i) <= y <= PL_Y(i) + 42: row = i
         if force: hov.update(row="?", hl="?")                 # (cursor/tooltip kept unless they really change)
         if row != hov["row"]:                       # Change button: hover-only, its space is always reserved
-            cv.itemconfigure("chgx", state="hidden")
-            if row is not None: cv.itemconfigure("chg%d" % row, state="normal")
+            cv.itemconfigure("chgx", state="hidden"); cv.itemconfigure("rowhlx", state="hidden")
+            for j_ in range(len(AGES)): cv.itemconfigure("rowhl%d" % j_, state="hidden")
+            if row is not None: cv.itemconfigure("chg%d" % row, state="normal"); cv.itemconfigure("rowhl%d" % row, state="normal")
             hov["row"] = row
         hl = next((int(t[3:]) for t in tags if t.startswith("opn") and t[3:].isdigit()), None)
         if hl != hov["hl"]:
@@ -3237,12 +5199,15 @@ def panel():
         ctrl = any(t.startswith(CTRL_TAGS) for t in tags)     # switches, slider, buttons, gear, menu
         tg = None if (ctrl or hov.get("down")) else next((t for t in sorted(tags) if tips.get(t)), None)
         if tg != hov["tip"]:
-            hov["tip"] = tg; hide_tip()
-            if tg: show_tip_later(tg)
+            hov["tip"] = tg
+            if tg: show_tip_later(tg)                 # neighbour -> instant switch; nothing -> fade out
+            else: hide_tip()
     root._hov = hov                                   # (tests)
-    CTRL_TAGS = ("rev", "chg", "fade", "en", "boss", "gear", "upd", "m_", "plh", "menubg", "spot")
+    PL_H = 36 + 6 + len(AGES) * 46 + 4                   # open Playlists card height
+    def PL_Y(i): return 214 + i * 46                       # age row top
+    CTRL_TAGS = ("rev", "chg", "fade", "en", "boss", "gear", "upd", "m_", "plh", "menubg", "spot", "am")
     def _down(e, v): hov["down"] = v; on_pointer(e)
-    cv.bind("<Motion>", on_pointer, add="+"); cv.bind("<Leave>", lambda e: on_pointer(e), add="+")
+    cv.bind("<Motion>", on_pointer, add="+"); cv.bind("<Leave>", lambda e: (on_pointer(e), hov.update(tip=None), hide_tip()), add="+")
     cv.bind("<ButtonPress-1>", lambda e: _down(e, True), add="+"); cv.bind("<ButtonRelease-1>", lambda e: _down(e, False), add="+")
     cv.bind("<B1-Motion>", on_pointer, add="+")
     def click(tag, fn):
@@ -3251,7 +5216,7 @@ def panel():
         bound.add(tag)
         cv.tag_bind(tag, "<Button-1>", lambda e, t=tag: root.after_idle(lambda: handlers[t]() if t in handlers else None), add="+")
 
-    base = load_config(user=False); user = load_user()
+    base = load_config(user=False); user = load_user(); _LIVE_USER[:] = [user]
     defaults = base.get("default_playlists") or base.get("playlists", {})
     try: names = json.load(open(NAMES_CACHE, encoding="utf-8"))
     except Exception: names = {}
@@ -3266,7 +5231,7 @@ def panel():
     def set_user(k, v): user[k] = v; save_user(user); draw()
 
     def toggle(x, y, on, tag, w=44, h=24):
-        rr(x, y, x + w, y + h, h / 2, C["acc"] if on else C["off"], tag=tag)
+        rr(x, y, x + w, y + h, h / 2, G0 if on else C["off"], tag=tag)       # switches stay green even when disabled
         cx = x + w - h / 2 if on else x + h / 2
         oval_(P(cx - h/2 + 3, y + 3, cx + h/2 - 3, y + h - 3), fill="white", outline="", tags=tag)
 
@@ -3282,48 +5247,38 @@ def panel():
             cv.create_polygon(P(cx-9, cy+6, cx-9, cy-6, cx-4, cy, cx, cy-9, cx+4, cy, cx+9, cy-6, cx+9, cy+6), fill=c)
 
     def pl_name(uri):
+        if is_custom(uri): return (custom_get(uri, user) or {}).get("name") or "My list"
         pid = uri.split(":")[-1]
         return names.get(pid) or "Playlist"
 
     covers = {}; cover_cache = {}
-    def cover_img(path):
-        """Rounded, anti-aliased 30 px thumbnail of a cached cover file (None if missing/broken)."""
+    def cover_img(path, size=30):
+        """Rounded, anti-aliased thumbnail (30 px default) of a cached cover file (None if missing/broken)."""
         if not path or not os.path.exists(path): return None
-        k = (path, os.path.getmtime(path))
+        k = (path, os.path.getmtime(path), size)
         if k not in cover_cache:
             try:
-                px = int(round(30 * S)); Q = 4
+                px = int(round(size * S)); Q = 4
                 im = Image.open(path).convert("RGB").resize((px, px), Image.LANCZOS)
                 m = Image.new("L", (px * Q, px * Q), 0)
-                ImageDraw.Draw(m).rounded_rectangle([0, 0, px * Q - 1, px * Q - 1], 6 * S * Q, fill=255)
+                ImageDraw.Draw(m).rounded_rectangle([0, 0, px * Q - 1, px * Q - 1], (6 if size >= 30 else 5) * S * Q, fill=255)
                 im.putalpha(m.resize((px, px), Image.LANCZOS)); cover_cache[k] = ImageTk.PhotoImage(im)
             except Exception as e:
                 log("Cover image: %r" % e); cover_cache[k] = None
         return cover_cache[k]
     tips, tipbound = {}, set()
-    tipw = tk.Toplevel(root); tipw.withdraw(); tipw.overrideredirect(True); tipw.configure(bg=C["line"])
-    tipl = tk.Label(tipw, text="", bg=C["line"], fg=C["tx"], font=F(10), padx=6, pady=2, wraplength=int(260 * S), justify="left"); tipl.pack()
-    tipst = {"tag": None, "job": None, "shown": False}
+    tipst = {"tag": None, "shown": False}
     def hide_tip(_=None):
-        if tipst["job"]: root.after_cancel(tipst["job"]); tipst["job"] = None
-        tipst["tag"] = None
-        if tipst["shown"]:
-            tipst["shown"] = False
-            try: tipw.withdraw()
-            except tk.TclError: pass
-    def tip(tag, msg): tips[tag] = msg              # shown by on_pointer after a short delay
+        tipst["tag"] = None; get_tip(cv).hide()
+    def tip(tag, msg): tips[tag] = msg              # shown by on_pointer (shared GlassTip: delay, anchoring, fades)
     def show_tip_later(tag):
-        tipst["tag"] = tag
-        def show():
-            tipst["job"] = None
-            if tipst["tag"] != tag or not tips.get(tag): return
-            if not tipw.winfo_exists(): return
-            tipl.config(text=tips[tag]); x, y = root.winfo_pointerxy()
-            tipw.geometry("+%d+%d" % (x + 10, y + 14)); tipw.deiconify(); tipw.lift(); tipst["shown"] = True
-        tipst["job"] = root.after(300, show)
+        tipst["tag"] = tag; bb = cv.bbox(tag)
+        if not bb or not tips.get(tag): return
+        get_tip(cv).request(("panel", tag), tips[tag], canvas_rect(cv, bb), S, cv)
 
     def draw():
         cv.delete("all"); handlers.clear(); cfg = cur(); en = bool(cfg.get("enabled", True))
+        C["acc"] = G0 if en else GREY_ACC                  # disabled: the other rows' green accents go grey
         # header: logo, title + subtitle, version pill, update pill, gear
         cv.create_image(*P(M, 14), image=logo, anchor="nw")
         text(M + 44, 30, "AoE4 Spotify", 19, b=True)
@@ -3334,64 +5289,73 @@ def panel():
         px += 48
         ph = upd["phase"]
         if ph != "idle":
-            col = C["red"] if ph == "error" else C["acc"]
+            col = C["red"] if ph == "error" else G0
             lab = {"avail": "\u2193 Update %s" % (upd["info"] or {}).get("version", ""), "dl": "Downloading %d%%" % upd["pct"],
-                   "run": "Installing…", "error": upd["msg"] or "Update failed", "done": upd["msg"]}[ph]
+                   "run": "Installingâ€¦", "error": upd["msg"] or "Update failed", "done": upd["msg"]}[ph]
             pw = tkfont.Font(font=F(10, True)).measure(lab) / S + 20
-            rr(px, 21, px + pw, 39, 9, "#183d26" if col == C["acc"] else "#3d1a1a", col, "upd")
+            rr(px, 21, px + pw, 39, 9, "#183d26" if col == G0 else "#3d1a1a", col, "upd")
             text(px + pw / 2, 30, lab, 10, col, True, "center", "upd")
             if ph in ("avail", "error") and upd["info"]: click("upd", start_update)
         gx = R_ - 32
         rr(gx, 14, R_, 46, 10, "#2a2a2a", tag="gear"); cv.create_image(*P(gx + 16, 30), image=gear_img[ui.get("menu", False)], anchor="center", tags="gear")
-        if upd["info"] and ph in ("avail", "error"): oval_(P(R_ - 8, 10, R_ + 2, 20), fill=C["acc"], outline=C["bg"], width=2 * S, tags="gear")
+        if upd["info"] and ph in ("avail", "error"): oval_(P(R_ - 8, 10, R_ + 2, 20), fill=G0, outline=C["bg"], width=2 * S, tags="gear")
         click("gear", lambda: (ui.update(menu=not ui.get("menu")), draw()))
         cv.create_line(*P(M, 62, R_, 62), fill=C["line"])
 
         # enabled (power icon vertically centered on the card)
-        rr(M, 72, R_, 120, 12, C["card"], tag="encard"); cy = 96
-        cv.create_image(*P(M + 24, cy), image=power_img, anchor="center", tags="encard")
-        text(M + 50, cy, "Enabled", 16, b=True, tag="encard"); toggle(R_ - 12 - 52, cy - 14, en, "en", 52, 28)
-        click("en", lambda: (set_user("enabled", not en), threading.Thread(target=music_sync, args=(not en,), daemon=True).start()))
+        if en: rr(M, 72, R_, 120, 12, C["card"], tag="encard")
+        else:                                               # disabled: soft red tint, thin red edge, soft glow
+            cv.create_image(*P(M - 12, 72 - 12), image=red_glow(), anchor="nw")
+            rr(M, 72, R_, 120, 12, "#2a1c1c", "#5a3330", tag="encard")
+        cy = 96; pt = en_anim["t"] if en_anim["t"] is not None else (0.0 if en else 1.0)
+        cv.create_image(*P(M + 24, cy), image=power_icon(pt), anchor="center", tags=("encard", "pwr"))
+        text(M + 50, cy, "Enabled" if en else "Disabled", 16, _mix(C["tx"], CORAL_TX, pt), b=True, tag=("encard", "entx")); toggle(R_ - 12 - 52, cy - 14, en, "en", 52, 28)
+        click("en", lambda: (set_user("enabled", not en), anim_enabled(en), threading.Thread(target=music_sync, args=(not en,), daemon=True).start()))
         tip("encard", "Runs automatically when you launch AoE4 from Steam and mutes the game's own music. You don't need this window open." if en else "Off: music won't switch when you play, and the game's music is back on.")
         # status chips: Spotify (clickable -> log in) and Game
         cw = (W - 2 * M - 10) / 2; x = M; sp_ok = state["spotify"]
         rr(x, 130, x + cw, 162, 16, "#242424", "#3a3a3a", "spot")
-        oval_(P(x+14, 141, x+24, 151), fill=C["acc"] if sp_ok else (C["org"] if sp_ok is False else C["idle"]), outline="", tags="spot")
+        oval_(P(x+14, 141, x+24, 151), fill=G0 if sp_ok else (C["org"] if sp_ok is False else C["idle"]), outline="", tags="spot")
         text(x + 32, 146, "Spotify", 12, C["mu"], tag="spot")
         if sp_ok:
-            text(x + cw - 26, 146, "Connected", 12, C["acc"], True, "e", "spot"); chev_right(x + cw - 16, 146, C["mu"], "spot", 12)
+            text(x + cw - 26, 146, "Connected", 12, G0, True, "e", "spot"); chev_right(x + cw - 16, 146, C["mu"], "spot", 12)
         elif sp_ok is False:
             rr(x + cw - 86, 136, x + cw - 8, 156, 10, "#4a3216", C["org"], "spot"); text(x + cw - 52, 146, "Log in", 11, C["org"], True, "center", "spot"); chev_right(x + cw - 22, 146, C["org"], "spot", 11)
         else: text(x + cw - 14, 146, "...", 12, C["mu"], True, "e", "spot")
         click("spot", login); tip("spot", "Log in to Spotify" if not sp_ok else "Log in again")
-        x = M + cw + 10; gv = state["game"]; gc = C["acc"] if gv else C["idle"]
+        x = M + cw + 10; gv = state["game"]; gc = G0 if gv else C["idle"]
         rr(x, 130, x + cw, 162, 16, C["card"])
         oval_(P(x+14, 141, x+24, 151), fill=gc, outline=""); text(x + 32, 146, "Game", 12, C["mu"])
         text(x + cw - 14, 146, "..." if gv is None else ("Running" if gv else "Not running"), 12, gc, True, "e")
         # collapsible Playlists section (collapsed by default)
+        if ui["open"]:                                      # one card: header + age rows, symmetric insets
+            rr(M, 172, R_, 172 + PL_H, 10, C["card"]); cv.create_line(*P(M + 12, 208, R_ - 12, 208), fill=C["line"])
         rr(M, 172, R_, 208, 10, C["card"], tag="plh")
         text(M + 16, 190, "Playlists", 13, b=True, tag="plh")
         cv.create_image(*P(R_ - 18, 190), image=chev_up if ui["open"] else chev_down, anchor="center", tags="plh")
-        click("plh", lambda: (ui.update(open=not ui["open"]), draw()))
-        X = M + 22                                         # age rows sit indented under the Playlists header
+        click("plh", lambda: (ui.update(open=not ui["open"], am=False), draw()))
+        X = M + 22; XR = R_ - 22                           # age rows: same inset left and right
         for i, (k, lab) in enumerate(AGES if ui["open"] else []):
-            rx = R_ - 12 - 30; y = 216 + i * 50; uri = cfg["playlists"].get(k, ""); is_def = uri == defaults.get(k)
-            rr(X, y, R_, y + 42, 10, C["card"]); pid = uri.split(":")[-1]
-            cimg = cover_img(covers.get(pid) or (cover_file(pid) if pid else None))
+            rx = XR - 6 - 30; y = PL_Y(i); uri = cfg["playlists"].get(k, ""); is_def = uri == defaults.get(k)
+            if i < len(AGES) - 1: cv.create_line(*P(X + 48, y + 44, XR, y + 44), fill="#2a2a2a", tags="pldiv")
+            rr(X - 6, y, XR + 6, y + 42, 9, "#262626", tag="rowhl%d" % i); cv.itemconfigure("rowhl%d" % i, state="hidden")
+            pid = uri.split(":")[-1]
+            cimg = cover_img(custom_cover(uri) if is_custom(uri) else (covers.get(pid) or (cover_file(pid) if pid else None)))
             if cimg:                                       # playlist cover: click = open in Spotify
                 cv.create_image(*P(X + 24, y + 21), image=cimg, anchor="center", tags="cov%d" % i)
-                click("cov%d" % i, lambda pid=pid: open_playlist(pid)); tip("cov%d" % i, "Open in Spotify")
+                click("cov%d" % i, lambda pid=pid, uri=uri, k=k, lab=lab: change(k, lab) if is_custom(uri) else open_playlist(pid))
+                tip("cov%d" % i, "Edit list" if is_custom(uri) else "Open in Spotify")
             else:
                 rr(X + 9, y + 6, X + 39, y + 36, 6, C["ib"]); icon(i, X + 24, y + 21, C["acc"])
-            rr(X + 38, y + 7, rx - 76, y + 35, 8, C["card"], tag="opn%d" % i)          # hit area (gaps between texts)
+            rr(X + 38, y + 7, rx - 76, y + 35, 8, "", tag="opn%d" % i)          # transparent hit area (gaps between texts)
             rr(X + 38, y + 7, rx - 76, y + 35, 8, "#2c2c2c", tag="hl%d" % i); cv.itemconfigure("hl%d" % i, state="hidden")
             text(X + 48, y + 21, lab, 13, b=True, tag="opn%d" % i)
             oval_(P(X+118, y+17, X+126, y+25), fill=C["acc"] if uri else C["idle"], outline="", tags="opn%d" % i)
             nm = pl_name(uri); nm = nm if len(nm) <= 15 else nm[:14] + "\u2026"
             text(X + 132, y + 21, nm, 12, C["mu"], tag="opn%d" % i)
             if pid:
-                click("opn%d" % i, lambda pid=pid: open_playlist(pid)); tip("opn%d" % i, "Open in Spotify"); hover_hl(i)
-            rx = R_ - 12 - 30
+                click("opn%d" % i, lambda pid=pid, uri=uri, k=k, lab=lab: change(k, lab) if is_custom(uri) else open_playlist(pid))
+                tip("opn%d" % i, "Edit list" if is_custom(uri) else "Open in Spotify"); hover_hl(i)
             rr(rx - 70, y + 9, rx - 8, y + 33, 12, C["card"], C["acc"], ("chg%d" % i, "chgx")); text(rx - 39, y + 21, "Change", 10, C["acc"], True, "center", ("chg%d" % i, "chgx"))
             rc = C["dis"] if is_def else C["mu"]
             rr(rx, y + 9, rx + 30, y + 33, 12, C["card"], rc, "rev%d" % i); undo_icon(rx + 15, y + 21, rc, "rev%d" % i)
@@ -3399,8 +5363,8 @@ def panel():
             if not is_def: click("rev%d" % i, lambda k=k: revert(k))
             tip("rev%d" % i, "Revert" if not is_def else "Revert (already default)")
         # Age 4 Intro theme
-        base = 418 if ui["open"] else 218
-        Hn = base + 56 + 46 + M
+        base = 172 + PL_H + 10 if ui["open"] else 218
+        Hn = base + 112 + (AM_H if ui.get("am") else 46) + M
         if int(cv.cget("height")) != int(Hn * S): cv.config(height=int(Hn * S))
         y = base; bon = bool((cfg.get("boss_intro") or {}).get("enabled", True))
         rr(M, y, R_, y + 46, 10, C["card"], tag="intro"); icon(3, M + 24, y + 23, C["acc"])
@@ -3418,7 +5382,7 @@ def panel():
         # fade
         y = base + 56; fv = float(cfg.get("fade_seconds", 2))
         rr(M, y, R_, y + 46, 10, C["card"])
-        cv.create_image(*P(M + 24, y + 23), image=fade_img, anchor="center")
+        cv.create_image(*P(M + 24, y + 23), image=fade_icon(C["acc"]), anchor="center")
         text(M + 46, y + 23, "Fade", 13, b=True)
         x0, x1 = FX0, FX1; xv = x0 + (x1 - x0) * fv / 5
         rr(x0, y + 20, x1, y + 26, 3, C["off"], tag="fade"); rr(x0, y + 20, max(xv, x0 + 6), y + 26, 3, C["acc"], tag="fade")
@@ -3430,6 +5394,58 @@ def panel():
         rr(rx, y + 11, rx + 30, y + 35, 12, C["card"], rc, "revf"); undo_icon(rx + 15, y + 23, rc, "revf")
         if not f_is_def: click("revf", lambda: (user.pop("fade_seconds", None), save_user(user), draw()))
         tip("revf", "Revert" if not f_is_def else "Revert (already default)")
+        # After match: expandable radio list (what the music does when a match ends)
+        y = base + 112; am = after_match_cfg(cfg); mode = am["mode"]; aopen = bool(ui.get("am"))
+        if aopen: rr(M, y, R_, y + AM_H, 10, C["card"])
+        rr(M, y, R_, y + 46, 10, C["card"], tag="amh")
+        cv.create_image(*P(M + 24, y + 23), image=vic("flag", C["acc"], C["card"]), anchor="center", tags="amh")
+        text(M + 46, y + 23, "After match", 13, b=True, tag="amh")
+        cv.create_image(*P(R_ - 18, y + 23), image=chev_up if aopen else chev_down, anchor="center", tags="amh")
+        click("amh", lambda: (ui.update(am=not ui.get("am"), open=False), draw()))
+        suri = am["playlist"] if mode == "playlist" else ""
+        lab = am_trunc(am_name(suri), 14) if suri else dict(AM_ROWS)[mode]
+        text(R_ - 36, y + 23, lab, 12, C["acc"], True, "e", "amh")
+        tw = tkfont.Font(font=F(12, True)).measure(lab) / S; hx = R_ - 36 - tw - 8
+        cim = am_cover(suri, 22) if suri else None
+        if cim: cv.create_image(*P(hx - 11, y + 23), image=cim, anchor="center", tags="amh"); hx -= 22 + 8
+        if am["wl"]:                                      # Win / Loss on: trophy hint, then an arrow to the choice
+            cv.create_image(*P(hx - 8, y + 23), image=vic("then", C["mu"], C["card"]), anchor="center", tags="amh")
+            cv.create_image(*P(hx - 30, y + 23), image=vic("trophy", "#e0b040", C["card"]), anchor="center", tags="amh")
+        if aopen:
+            cv.create_line(*P(M + 12, y + 46, R_ - 12, y + 46), fill=C["line"])
+            XL, XR = M + 22, R_ - 22; CC = XR - 72               # same insets as Playlists; cover column
+            wl = am["wl"]; wy = y + 52 + 20; wbg = "#232a25" if wl else C["card"]   # Win / Loss toggle line
+            rr(XL - 6, wy - 20, XR + 6, wy + 20, 9, wbg, tag="amwl")
+            cv.create_image(*P(XL + 8, wy), image=vic("trophy", C["acc"] if wl else C["mu"], wbg), anchor="center", tags="amwl")
+            text(XL + 28, wy, "Win / Loss", 12, C["tx"] if wl else C["mu"], True, tag="amwl")
+            if wl:
+                cv.create_image(*P(CC - 76, wy), image=vic("trophy", "#e0b040", wbg), anchor="center", tags="amw")
+                am_slot(CC - 50, wy, am["win"], "amw")
+                cv.create_image(*P(CC - 24, wy), image=vic("skull", C["red"], wbg), anchor="center", tags="aml")
+                am_slot(CC, wy, am["loss"], "aml")
+                click("amw", lambda: am_pick("win")); click("aml", lambda: am_pick("loss"))
+                tip("amw", "Victory: click or drop a song / playlist"); tip("aml", "Defeat: click or drop a song / playlist")
+            toggle(XR - 44, wy - 12, wl, "amtg")
+            click("amtg", lambda wl=wl: am_wl(not wl)); click("amwl", lambda wl=wl: am_wl(not wl))
+            ty = wy + 20 + 13
+            text(XL + 48, ty, "Then", 10.5, C["mu"], True)
+            lx = XL + 48 + tkfont.Font(font=F(10.5, True)).measure("Then") / S + 10
+            cv.create_line(*P(lx, ty, XR, ty), fill=C["line"])
+            for i, (k, lab) in enumerate(AM_ROWS):
+                ry = ty + 13 + i * 42 + 21; on = k == mode; tg = "amr%d" % i; bgc = "#262a27" if on else C["card"]
+                if i < len(AM_ROWS) - 1 and not on and AM_ROWS[i + 1][0] != mode:
+                    cv.create_line(*P(XL + 54, ry + 21, XR, ry + 21), fill="#2a2a2a")
+                rr(XL - 6, ry - 19, XR + 6, ry + 19, 9, bgc, tag=tg)
+                oval_(P(XL + 1, ry - 7, XL + 15, ry + 7), outline=C["acc"] if on else "#5a5a5a", width=1.6 * S, tags=tg)
+                if on: oval_(P(XL + 4.5, ry - 3.5, XL + 11.5, ry + 3.5), fill=C["acc"], tags=tg)
+                cv.create_image(*P(XL + 34, ry), image=vic(k, C["acc"] if on else C["mu"], bgc), anchor="center", tags=tg)
+                text(XL + 54, ry, lab, 12, C["tx"] if on else C["mu"], on, tag=tg)
+                click(tg, lambda k=k: am_select(k))
+                if k == "resume": text(XR, ry, "Pre-match", 11, C["mu"], False, "e", tg)
+                elif k == "playlist":
+                    am_slot(CC, ry, am["playlist"], "amp")
+                    text(CC + 16, ry, am_trunc(am_name(am["playlist"]), 10) if am["playlist"] else "Pick", 11.5, C["tx"] if on else C["mu"], on, tag="amp")
+                    chev_right(XR - 2, ry, C["mu"], "amp", 14); click("amp", lambda: am_pick("playlist")); tip("amp", "Pick a playlist")
         # gear menu (drawn on top, with a dim layer that closes it)
         if ui.get("menu"):
             cv.create_image(0, 0, anchor="nw", tags="menubg", image=_img(("dim", Hn), int(W * S), int(Hn * S),
@@ -3459,28 +5475,87 @@ def panel():
     cv.bind("<B1-Motion>", lambda e: root.after_idle(lambda: slide(e)))
     cv.bind("<ButtonRelease-1>", lambda e: root.after_idle(lambda: slide(e, True)))
 
-    def dialog(title, prompt):
-        d = tk.Toplevel(root); dark_window(d, C["card"]); d.title(title); d.transient(root); d.resizable(False, False)
+    def dialog(title, prompt, tracks=None):          # tracks=None: playlist id; else full uri (songs too if True)
+        d = tk.Toplevel(root); dark_window(d, C["card"]); d.title("AoE4 Spotify"); d.transient(root); d.resizable(False, False)
         tk.Label(d, text=prompt, bg=C["card"], fg=C["tx"], font=F(12, True), justify="left").pack(padx=16, pady=(14, 6), anchor="w")
         e = tk.Entry(d, width=52, bg=C["ib"], fg=C["tx"], insertbackground=C["tx"], relief="flat", font=F(12)); e.pack(padx=16, ipady=5)
         err = tk.Label(d, text="", bg=C["card"], fg=C["red"], font=F(10)); err.pack(padx=16, anchor="w")
         res = {}
         def ok(_=None):
             m = RE_PLAYLIST.search(e.get().strip())
+            if tracks is not None:
+                tm = parse_track(e.get().strip()) if tracks else None
+                if m or tm: res["id"] = ("spotify:playlist:" + m.group(1)) if m else tm; d.destroy(); return
+                err.config(text="Paste a Spotify %s link" % ("song or playlist" if tracks else "playlist")); return
             if not m: err.config(text="That's not a Spotify playlist link (open.spotify.com/playlist/...)"); return
             res["id"] = m.group(1); d.destroy()
         row = tk.Frame(d, bg=C["card"]); row.pack(padx=16, pady=(4, 14), anchor="e")
         tk.Button(row, text="Cancel", command=d.destroy, bg=C["ib"], fg=C["tx"], relief="flat", font=F(11), padx=12).pack(side="left", padx=6)
-        tk.Button(row, text="Save", command=ok, bg=C["acc"], fg="black", relief="flat", font=F(11, True), padx=14).pack(side="left")
-        reveal(d, fade=False, over=root); d.grab_set(); e.bind("<Return>", ok); e.focus_set(); root.wait_window(d)
+        tk.Button(row, text="Save", command=ok, bg=G0, fg="black", relief="flat", font=F(11, True), padx=14).pack(side="left")
+        reveal(d, fade=False, over=root); after_mouse_up(d, lambda: d.grab_set()); e.bind("<Return>", ok); e.focus_set(); root.wait_window(d)
         return res.get("id")
 
     def change(k, lab):
-        pid = dialog("Change playlist", "Paste a Spotify playlist link for %s Age:" % lab)
-        if not pid: return
-        pls = dict(user.get("playlists") or {}); pls[k] = "spotify:playlist:" + pid
+        old = (cur()["playlists"] or {}).get(k, "")
+        uri = list_picker(root, "%s Age" % lab, old, False, user, save_user, start_builder=is_custom(old))
+        if not uri: draw(); return
+        pls = dict(user.get("playlists") or {}); pls[k] = uri
         set_user("playlists", pls); fetch_names()
 
+    AM_ROWS = [("resume", "Resume"), ("playlist", "Playlist"), ("stop", "Stop")]
+    AM_H = 46 + 6 + 40 + 26 + len(AM_ROWS) * 42 + 8
+    def am_trunc(t_, n): return t_ if len(t_) <= n else t_[:n - 1] + "\u2026"
+    def am_name(uri):
+        if not uri: return ""
+        if is_custom(uri): return (custom_get(uri, user) or {}).get("name") or "My list"
+        return names.get(uri.split(":")[-1]) or ("Song" if uri.startswith("spotify:track:") else "Playlist")
+    def am_cover(uri, size):
+        if not uri: return None
+        i_ = uri.split(":")[-1]
+        if is_custom(uri): pth = custom_cover(uri)
+        elif uri.startswith("spotify:track:"): pth = covers.get(i_) or track_cover(uri)
+        else: pth = covers.get(i_) or cover_file(i_)
+        return cover_img(pth, size)
+    def am_slot(cx, cy, uri, tag):                     # 24 px cover, or an empty '+' slot
+        ci = am_cover(uri, 24)
+        if ci: cv.create_image(*P(cx, cy), image=ci, anchor="center", tags=tag)
+        else:
+            rr(cx - 12, cy - 12, cx + 12, cy + 12, 5, C["ib"], tag=tag)
+            cv.create_image(*P(cx, cy), image=vic("plus", C["mu"], C["ib"]), anchor="center", tags=tag)
+    def am_select(k):
+        a = dict(user.get("after_match") or {}); a["mode"] = k; set_user("after_match", a)
+        if k == "playlist" and not after_match_cfg(cur())["playlist"]: root.after_idle(lambda: am_pick("playlist"))
+    def am_wl(on):
+        a = dict(user.get("after_match") or {}); a["winloss_on"] = on
+        if a.get("mode") == "winloss": a["mode"] = "stop"
+        set_user("after_match", a)
+    def am_set(which, uri):
+        a = dict(user.get("after_match") or {}); a[which] = uri; a["winloss_on"] = True
+        if a.get("mode") == "winloss": a["mode"] = "stop"
+        set_user("after_match", a); fetch_names()
+    def am_drop(e):
+        """Spotify song/playlist dropped on the panel: lands in the Victory or Defeat slot under the pointer."""
+        try:
+            px, py = int(e.x_root) - cv.winfo_rootx(), int(e.y_root) - cv.winfo_rooty()
+            tags = set()
+            for it in cv.find_overlapping(px - 2, py - 2, px + 2, py + 2): tags.update(cv.gettags(it))
+            which = "win" if "amw" in tags else "loss" if "aml" in tags else None
+            if not which: return
+            m = RE_PLAYLIST.search(e.data or ""); tr = parse_track(e.data or "")
+            uri = ("spotify:playlist:" + m.group(1)) if m else tr
+            if uri: log("After match: dropped %s on %s" % (uri, which)); am_set(which, uri)
+        except Exception as ex: log("After match drop: %r" % ex)
+    def am_pick(which):
+        a0 = after_match_cfg(cur()); old = a0.get(which, "")
+        uri = list_picker(root, {"playlist": "After match playlist", "win": "Victory", "loss": "Defeat"}[which], old,
+                          which != "playlist", user, save_user, start_builder=is_custom(old))
+        if not uri: draw(); return
+        a = dict(user.get("after_match") or {}); a[which] = uri
+        if which == "playlist": a["mode"] = "playlist"
+        else:
+            a["winloss_on"] = True
+            if a.get("mode") == "winloss": a["mode"] = "stop"
+        set_user("after_match", a); fetch_names()
     def revert(k):
         pls = dict(user.get("playlists") or {}); pls.pop(k, None); set_user("playlists", pls); fetch_names()
 
@@ -3495,7 +5570,7 @@ def panel():
         def go():
             r = access_status(Spotify(load_config()))
             if r == "ok":
-                u = load_user_settings(); u.pop("access_pending", None); save_user(u); show_gtg()
+                merge_user(remove=("access_pending",)); show_gtg()
             elif r == "blocked": post(lambda: access_dialog(root, on_allowed=show_gtg))
         threading.Thread(target=go, daemon=True).start()
     def login():
@@ -3512,6 +5587,12 @@ def panel():
         threading.Thread(target=go, daemon=True).start()
 
     art = Art(root, S)
+    try:                                               # drag songs / playlists from Spotify onto Victory / Defeat
+        from tkinterdnd2 import TkinterDnD, DND_TEXT
+        TkinterDnD._require(root); cv.drop_target_register(DND_TEXT)
+        cv.dnd_bind("<<DropPosition>>", lambda e: "copy")
+        cv.dnd_bind("<<Drop>>", lambda e: (root.after_idle(lambda d=e: am_drop(d)), "copy")[1])
+    except Exception as ex: log("Panel drag-in unavailable: %r" % ex)
     def open_editor(): pool_editor(root, user, lambda: (save_user(user), draw()))
     pending_access()
 
@@ -3571,8 +5652,16 @@ def panel():
                 cfg = load_config(); sp = Spotify(cfg)
                 if not sp.tok: return
                 changed = False
-                for uri in set(cfg["playlists"].values()) | set(defaults.values()):
+                am = after_match_cfg(cfg)
+                for uri in set(cfg["playlists"].values()) | set(defaults.values()) | ({am["playlist"], am["win"], am["loss"]} - {""}):
                     pid = uri.split(":")[-1]
+                    if is_custom(uri): continue
+                    if uri.startswith("spotify:track:"):              # After match: Victory / Defeat song
+                        if pid not in names or not os.path.exists(track_cover(uri)):
+                            r_ = fetch_track(sp, uri, int(round(30 * S * 1.5)))
+                            if r_ and names.get(pid) != r_[0]: names[pid] = r_[0]; changed = True
+                        if os.path.exists(track_cover(uri)) and covers.get(pid) != track_cover(uri): covers[pid] = track_cover(uri); changed = True
+                        continue
                     if not pid: continue
                     nm, path = update_cover(sp, pid, int(round(30 * S * 1.5)))
                     if nm and names.get(pid) != nm: names[pid] = nm; changed = True
@@ -3594,12 +5683,17 @@ def panel():
             s = {"spotify": os.path.exists(TOKEN), "game": aoe_running()}
             if s != state: state.update(s); post(draw)
         threading.Thread(target=go, daemon=True).start()
-    def tick(): refresh_now(); root.after(3000, tick)
+    def tick():
+        if not win_hidden(root): refresh_now()        # minimized: nothing to show, no polling
+        root.after(3000, tick)
+    pq = {"idle": 0}
     def pump():                                   # run UI updates queued by worker threads (Tk isn't thread-safe)
+        busy = bool(ui_q)
         while ui_q:
             try: ui_q.pop(0)()
             except Exception as e: log("Panel update failed: %r" % e)
-        root.after(150, pump)
+        pq["idle"] = 0 if busy else pq["idle"] + 1
+        root.after(60 if pq["idle"] < 10 else (1000 if win_hidden(root) else 150), pump)   # fast only while work flows
 
     if upd["phase"] == "done": root.after(6000, lambda: (upd.update(phase="idle") if upd["phase"] == "done" else None, draw()))
     draw(); reveal(root); note_window("panel", root); pump(); tick(); fetch_names(); check_updates(); root.mainloop()
