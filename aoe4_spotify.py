@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 GITHUB_URL = "https://github.com/Capstar1/aoe4-spotify"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
@@ -1941,6 +1941,15 @@ def set_app_icon(win):
 # ---------------------------------------------------------------- "Not invited yet" (Spotify app in development mode)
 ACCOUNT_URL = "https://www.spotify.com/account/overview/"
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$")
+def clean_email(e):
+    """One plain address (no spaces / newlines / lists), at most 100 characters - else None."""
+    e = (e or "").strip()
+    return e if len(e) <= 100 and EMAIL_RE.fullmatch(e) else None
+def clean_name(n):
+    """Display name for the request: letters, digits, space . _ - only, at most 40 characters (None if empty)."""
+    n = re.sub(r"[^\w .-]", "", re.sub(r"\s", " ", str(n or "")))
+    n = re.sub(r"\s+", " ", n).strip()[:40].strip()
+    return n or None
 ACCESS_GAP = 600                                       # one request per 10 min per install
 
 def not_invited(code, body):
@@ -1966,7 +1975,8 @@ def send_access_request(cfg, email, name=None, now=None):
     Only ever called from the 'Send request' button."""
     url = cfg.get("access_webhook"); now = now or time.time()
     if not webhook_ok(url): return "off"
-    if not EMAIL_RE.match(email or ""): return "bad"
+    email = clean_email(email); name = clean_name(name)
+    if not email: return "bad"
     u = load_user_settings()
     if now - float(u.get("access_last") or 0) < ACCESS_GAP: return "wait"
     hdr = {"Content-Type": "application/json", "User-Agent": "AoE4Spotify/" + VERSION}
@@ -4374,7 +4384,7 @@ def pool_editor(parent, user, save):
             dc.delete("g"); dimg.clear()
             if not dc.find_withtag("entry"): dc.create_window(24 * S, 66 * S, anchor="nw", width=int(432 * S), height=int(40 * S), window=e_, tags="entry")
             dc.create_image(38 * S, 36 * S, image=art.disc(30, "#1e3c28", outline=C["acc"], ow=1.5), tags="g"); dc.create_image(38 * S, 36 * S, image=bar_icon("import", C["acc"]), tags="g")
-            dtext(62, 36, "Import", 17, b=True); dtext(452, 34, "Ã—", 20, C["tx"] if res["hov"] == "x" else C["mu"], anchor="center")
+            dtext(62, 36, "Import", 17, b=True); dtext(452, 34, "Ãƒâ€”", 20, C["tx"] if res["hov"] == "x" else C["mu"], anchor="center")
             drr(24, 126, 456, 290, 14, "#262626")
             p, err = res["p"], res["err"]
             if p:
@@ -5188,7 +5198,7 @@ def check_update(timeout=6, report=False):
     """{version, url, size, sha256} if GitHub has a newer release (with a Setup .exe) than VERSION, else None.
     Offline or any error -> None (silently)."""
     try:
-        api = os.environ.get("AOE4SPOTIFY_UPDATE_API") or LATEST_API     # env var: testing only (fake release)
+        api = test_env("AOE4SPOTIFY_UPDATE_API") or LATEST_API     # env var: testing only (fake release)
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json", "User-Agent": "AoE4-Spotify"})
         with urllib.request.urlopen(req, timeout=timeout) as r: rel = json.loads(r.read())
         tag = rel.get("tag_name", "")
@@ -5237,7 +5247,7 @@ def auto_update(t):
     """Switcher background thread: newer GitHub release -> download, then install silently only between matches.
     Returns the downloaded setup path if the install must wait until the game closes, else None. Never raises."""
     try:
-        if not FROZEN and not os.environ.get("AOE4SPOTIFY_UPDATE_API"): return None      # running from source: never
+        if not FROZEN and not test_env("AOE4SPOTIFY_UPDATE_API"): return None      # running from source: never
         info = check_update(timeout=5)
         if not info: return None
         v = info["version"]; mark = os.path.join(DATA, "auto_update.json")
@@ -5642,7 +5652,7 @@ def panel():
         if ph != "idle":
             col = C["red"] if ph == "error" else G0
             lab = {"avail": "\u2193 Update %s" % (upd["info"] or {}).get("version", ""), "dl": "Downloading %d%%" % upd["pct"],
-                   "run": "Installingâ€¦", "error": upd["msg"] or "Update failed", "done": upd["msg"]}[ph]
+                   "run": "InstallingÃ¢â‚¬Â¦", "error": upd["msg"] or "Update failed", "done": upd["msg"]}[ph]
             pw = tkfont.Font(font=F(10, True)).measure(lab) / S + 20
             rr(px, 21, px + pw, 39, 9, "#183d26" if col == G0 else "#3d1a1a", col, "upd")
             text(px + pw / 2, 30, lab, 10, col, True, "center", "upd")
