@@ -10,3 +10,13 @@ __pycache__/
 launch_option_backup.json
 portrait_src/
 portraits_candidates/
+
+*.bak_*
+tests_bak_*/
+*.bak
+fade_restore.json
+config.user.json
+*test*.py
+patch*.py
+ypsnap.py
+.env
