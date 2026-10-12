@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 GITHUB_URL = "https://github.com/Capstar1/aoe4-spotify"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
@@ -1115,6 +1115,16 @@ class Tracker:
             log("Only human in the lobby - that's you (slot %d)" % sl); return True
         return False
 
+    def session_reset(self):
+        """The game log was recreated (new game session): back to 'in the menus' - no match, age, player or hold."""
+        self.in_match = self.replay = False; self.match_n += 1; self.result = None
+        self.my_id = self.fixed_id if isinstance(self.fixed_id, int) else None; self.my_slot = None; self.my_hidx = None
+        self.started.clear(); self.ages.clear(); self.recent.clear(); self.humans = []; self.first_human = None
+        cb = getattr(self, "on_session_reset", None)
+        if cb:
+            try: cb()
+            except Exception as e: log("Session reset hook failed: %r" % e)
+
     def reset(self):
         self.in_match = True; self.replay = False; self.result = None; self.match_n += 1
         self.my_id = self.fixed_id if isinstance(self.fixed_id, int) else None
@@ -1292,6 +1302,7 @@ def tail(path, tracker, stop=None, skip_older_than=None):
         if ino is not None and (key != ino or st.st_size < pos):
             log("Log was recreated/truncated (game restarted) - reading from start")
             pos = 0
+            with tracker.lock: tracker.session_reset()
         ino = key
         if not caught_up and skip_older_than and st.st_mtime < skip_older_than:
             # We just launched the game: this log is from the LAST session (the game recreates it in a moment).
@@ -2707,6 +2718,7 @@ def main():
         t.replay_session = True; log("Game started to watch a replay - the music is left alone")
     t.crc_dir = os.path.join(os.path.dirname(path), "LogFiles")
     install_after_match(t, sp)
+    t.on_session_reset = sp.clear_hold                                       # a held age playlist never outlives its session
     _on_start = t.on_start
     t.on_start = lambda: jobs.put((_on_start, ()))                           # snapshot before the Dark Age switch, off the lock
     upd = {}
