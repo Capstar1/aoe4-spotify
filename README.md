@@ -1,12 +1,12 @@
-# AoE4 Spotify
+<img src="assets/icon.png" alt="AoE4 Spotify icon" width="96" height="96" align="left">
 
-Spotify music that follows your ages in **Age of Empires IV** on Windows.
+<h1>AoE4 Spotify</h1>
 
-<p align="center">
-  <a href="https://github.com/Capstar1/aoe4-spotify/releases/latest/download/AoE4.Spotify.Setup.exe"><img src="https://img.shields.io/badge/Download_for_Windows-1DB954?style=for-the-badge&logo=spotify&logoColor=white" alt="Download for Windows" height="48"></a>
-  <br>
-  <sub><a href="https://github.com/Capstar1/aoe4-spotify/releases">or see all releases</a></sub>
-</p>
+Spotify music that follows your ages in **Age of Empires IV**.
+
+<a href="https://github.com/Capstar1/aoe4-spotify/releases/latest/download/AoE4.Spotify.Setup.exe"><img src="assets/download.svg" alt="Download" height="38"></a>&nbsp;&nbsp;<sub>Latest · Windows 10/11 · <a href="https://github.com/Capstar1/aoe4-spotify/releases">all releases</a></sub>
+
+<br clear="left">
 
 ## Features
 
