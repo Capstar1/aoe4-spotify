@@ -20,7 +20,8 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "0.5.2"
+VERSION = "1.0.0"
+GITHUB_URL = "https://github.com/Capstar1/aoe4-spotify"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
 def child_env():
@@ -128,7 +129,7 @@ def load_user_settings():
 def apply_user(cfg, u):
     pls = u.get("playlists") if isinstance(u.get("playlists"), dict) else {}
     cfg["playlists"] = {**cfg.get("playlists", {}),
-                        **{k: v for k, v in pls.items() if isinstance(v, str) and (v.startswith("spotify:playlist:") or is_custom(v))}}
+                        **{k: v for k, v in pls.items() if isinstance(v, str) and (v.startswith("spotify:playlist:") or (is_custom(v) and custom_tracks(v, u)))}}
     if isinstance(u.get("enabled"), bool): cfg["enabled"] = u["enabled"]
     for k in ("access_webhook", "access_key"):                       # request-access endpoint: overridable per user
         if isinstance(u.get(k), str) and u[k]: cfg[k] = u[k]
@@ -159,7 +160,9 @@ RE_AM_URI = re.compile(r"(spotify:(playlist|track):[A-Za-z0-9]{22}|aoe4s:list:[A
 def after_match_cfg(cfg):
     a = cfg.get("after_match") if isinstance(cfg.get("after_match"), dict) else {}
     def u(k):
-        v = a.get(k); return v if isinstance(v, str) and RE_AM_URI.match(v) else ""
+        v = a.get(k)
+        if not (isinstance(v, str) and RE_AM_URI.match(v)): return ""
+        return "" if is_custom(v) and not custom_tracks(v) else v          # deleted / empty app list: nothing
     old_wl = a.get("mode") == "winloss"                          # 0.4.5: Win / Loss was a choice -> now toggle on + Stop
     mode = a.get("mode") if a.get("mode") in AFTER_MODES else ("resume" if "mode" not in a else "stop")   # never picked -> Resume; old keep/fade/dark -> Stop
     return {"mode": mode,
@@ -1702,6 +1705,38 @@ def good_to_go(status, parent=None, on_open_panel=None, on_retry=None, fix=None)
     if parent is None: win.mainloop()
     return win
 
+_GROW = threading.local()
+def set_canvas_height(cv, px):
+    """Resize a canvas without an unpainted (white) strip. Growing a shown window exposes new client area that
+    Windows shows unpainted until Tk redraws at idle; first expands are slowest (new images, fonts). So: paint the
+    new items at the old size, then grow and paint in the same pass."""
+    px = int(px)
+    if px == int(cv.cget("height")): return
+    live = False
+    try: live = bool(cv.winfo_toplevel().winfo_viewable()) and not getattr(_GROW, "busy", False)
+    except Exception: pass
+    if not live: cv.config(height=px); return
+    _GROW.busy = True
+    try:
+        top = cv.winfo_toplevel()
+        if px > int(cv.cget("height")): top.update_idletasks()
+        cv.config(height=px); top.update_idletasks()
+    except Exception: pass
+    finally: _GROW.busy = False
+
+def focus_window(w):
+    """Front + keyboard focus, also when another app was in front (brief topmost pulse, then normal)."""
+    try:
+        if not w.winfo_exists(): return
+        if w.state() == "iconic": w.deiconify()
+        w.lift(); w.attributes("-topmost", True); w.focus_force()
+        if sys.platform == "win32":
+            try:
+                import ctypes; ctypes.windll.user32.SetForegroundWindow(int(w.wm_frame(), 16))
+            except Exception: pass
+        w.after(60, lambda: w.winfo_exists() and w.attributes("-topmost", False))
+    except Exception as e: log("Focus window: %r" % e)
+
 def dark_window(win, bg):
     """Start hidden with the dark background, so a window never flashes white while it is built."""
     try: win.withdraw()
@@ -1737,7 +1772,7 @@ def place_centered(win, over=None):
     except Exception as e:
         log("Window placement: %r" % e)
 
-def reveal(win, fade=True, over=None):
+def reveal(win, fade=True, over=None, warm=None):
     """Show a window built hidden in one step: final position, dark title bar and first frame are set while withdrawn."""
     try:
         place_centered(win, over)
@@ -1751,6 +1786,9 @@ def reveal(win, fade=True, over=None):
         # Map it invisible, let Tk paint the first frame, then show it in one step. (Windows paints a new
         # window's client area white before Tk draws; the DWM open animation and our old fade made that a blink.)
         win.attributes("-alpha", 0.0); win.deiconify(); win.update()
+        if warm:                                       # first-time work for later states, done while invisible
+            try: warm(); win.update()
+            except Exception as e: log("Window warm-up: %r" % e)
         def show():
             try: win.attributes("-alpha", 1.0)
             except Exception: pass
@@ -1882,7 +1920,7 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000):
     IW, IH = W - M - PAD - CX, 118                      # illustration box
     BOXW, BOXH = 300, 44
     G = {"lay": dict(W=W, BX=BX, CX=CX, CR=CR, Y=(Y1, Y2, Y3), H=(H1, H2, H3), TY=TY, GAP=GAP, BOXW=BOXW, BOXH=BOXH, IW=IW, IH=IH)}
-    cv = tk.Canvas(win, width=even_px(W, S), height=even_px(HH, S), highlightthickness=0, bd=0); cv.pack()
+    cv = tk.Canvas(win, width=even_px(W, S), height=even_px(HH, S), highlightthickness=0, bd=0, bg=P()["bg"]); cv.pack()
     imgs = {}
     def rgb(h): return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
     def rr_img(w, h, r, fill, outline=None, ow=0.0):
@@ -1955,15 +1993,15 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000):
         imgs[k_] = ImageTk.PhotoImage(im.resize((Wp, Hp), Image.LANCZOS), master=win); return imgs[k_]
     # ---- live widgets: email box (Entry on a rounded image), placeholder, check
     ev = tk.StringVar()
-    e_ = tk.Entry(cv, textvariable=ev, font=F(15, False), relief="flat", bd=0, highlightthickness=0)
-    ph = tk.Label(e_, text="your Spotify email", font=F(15, False), cursor="xterm", bd=0)
-    ck = tk.Label(cv, text="", bd=0)                      # text kept for tests; shows the drawn check image
+    e_ = tk.Entry(cv, textvariable=ev, font=F(15, False), relief="flat", bd=0, highlightthickness=0, bg=P()["ent"], fg=P()["enttx"])
+    ph = tk.Label(e_, text="your Spotify email", font=F(15, False), cursor="xterm", bd=0, bg=P()["ent"], fg=P()["dis"])
+    ck = tk.Label(cv, text="", bd=0, bg=P()["card"])                      # text kept for tests; shows the drawn check image
     def ph_upd(*_):
         if ev.get(): ph.place_forget()
         else: ph.place(x=0, rely=0.5, anchor="w")
     ph.bind("<Button-1>", lambda e: (e_.focus_set(), e_.icursor("end")))
     e_.bind("<FocusIn>", lambda e: (st.update(focus=True), draw())); e_.bind("<FocusOut>", lambda e: (st.update(focus=False), draw()))
-    done = tk.Frame(win)
+    done = tk.Frame(win, bg=P()["bg"])
     class Btn:                                          # pill button drawn on the canvas; Tk-button-like config/state for callers
         def __init__(s, key): s.key = key
         def __getitem__(s, o): return st["b3"] if o == "state" else st["b3t"]
@@ -2002,7 +2040,7 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000):
         titles = ("Open your Spotify page", "Find your email and copy it", "Paste or type your Spotify email")
         h3 = H3 if st["note"][0] else H3 - 24              # no note line: card 3 ends 18 px under the button
         hh = Y3 + h3 + M
-        if int(cv.cget("height")) != even_px(hh, S): cv.configure(height=even_px(hh, S))
+        set_canvas_height(cv, even_px(hh, S))
         G["lay"]["H"] = (H1, H2, h3)
         for i, (y0, h) in enumerate(zip((Y1, Y2, Y3), (H1, H2, h3))):
             cv.create_image(M * S, y0 * S, anchor="nw", image=rr_img(W - 2 * M, h, 12, p["card"]))
@@ -2141,7 +2179,7 @@ class GlassTip:
     DELAY, WARM, FIN, FOUT, MAXW, PAD, SH = 350, 400, 120, 80, 260, 10, 12
     def __init__(self, root):
         import tkinter as tk
-        self.root = root; self.w = tk.Toplevel(root); self.w.withdraw(); self.w.overrideredirect(True)
+        self.root = root; self.w = tk.Toplevel(root, bg="#010203"); self.w.withdraw(); self.w.overrideredirect(True)
         self.key = None; self.want = None; self.job = None; self.anim = None; self.shown = False; self.t_hide = 0.0
         self.hwnd = None; self.layered = False; self.img = None; self.pos = (0, 0); self.label = None
         self.wd = None; self.cursor = None; self.foreground = None     # (tests may override cursor / foreground)
@@ -2157,11 +2195,17 @@ class GlassTip:
     def _init_layered(self):
         import ctypes
         if os.name != "nt": return
+        self.w.update_idletasks(); self._ensure_layered(); self.layered = True
+    def _ensure_layered(self):
+        """(Re)apply the layered style to the CURRENT wrapper window. Tk recreates the wrapper HWND on some wm
+        changes (e.g. `wm transient` to a new owner): the new one is a plain window that shows as an empty
+        light-grey box and ignores UpdateLayeredWindow. Called before every show."""
+        import ctypes
         u = ctypes.windll.user32; self.w.update_idletasks()
         h = u.GetParent(self.w.winfo_id()) or self.w.winfo_id()
-        GWL_EXSTYLE = -20; ex = u.GetWindowLongW(h, GWL_EXSTYLE)
-        u.SetWindowLongW(h, GWL_EXSTYLE, ex | 0x80000 | 0x20 | 0x08000000 | 0x80)   # LAYERED|TRANSPARENT|NOACTIVATE|TOOLWINDOW
-        self.hwnd = h; self.layered = True
+        GWL_EXSTYLE = -20; ex = u.GetWindowLongW(h, GWL_EXSTYLE); want = 0x80000 | 0x20 | 0x08000000 | 0x80   # LAYERED|TRANSPARENT|NOACTIVATE|TOOLWINDOW
+        if ex & want != want: u.SetWindowLongW(h, GWL_EXSTYLE, ex | want)
+        self.hwnd = h
     def _push(self, alpha):
         """Blit self.img (RGBA) at self.pos with overall alpha 0..1."""
         x, y = self.pos
@@ -2352,13 +2396,16 @@ class GlassTip:
             top = int(y1 + gap - sh) if below else int(y0 - gap - (H_ - sh))
             top = max(wy0 - sh, min(top, wy1 + sh - H_))
             self.img = img; self.final = (left, top); dy = int(2 * s) * (1 if below else -1)
-            if self.layered: self.w.geometry("%dx%d+%d+%d" % (W_, H_, left, top))
-            else: self._tkimg = ImageTk.PhotoImage(img); self.label.config(image=self._tkimg)
-            self.w.deiconify(); self.shown = True
-            try:                                                    # owned by the anchor's window (not globally topmost)
+            try:                                                    # owned by the anchor's window (not globally topmost); set while hidden
                 own = _w.winfo_toplevel() if _w is not None else self.root
                 if str(self.w.transient() or "") != str(own): self.w.transient(own)
-                self.w.lift()
+            except Exception: pass
+            if self.layered:
+                self.w.geometry("%dx%d+%d+%d" % (W_, H_, left, top)); self._ensure_layered()
+                self.pos = (left, top + (dy if slide else 0)); self._push(0.0 if slide else 1.0)   # content first, then map: never an empty box
+            else: self._tkimg = ImageTk.PhotoImage(img); self.label.config(image=self._tkimg); self.w.attributes("-alpha", 0.0)
+            self.w.deiconify(); self.shown = True
+            try: self.w.lift()
             except Exception: pass
             if not slide: self.pos = (left, top); self._push(1.0); return
             t0 = time.time()
@@ -2783,11 +2830,11 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
             ImageDraw.Draw(m).rounded_rectangle([0, 0, px * Q - 1, px * Q - 1], (6 if size >= 40 else 5) * S * Q, fill=255)
             im.putalpha(m.resize((px, px), Image.LANCZOS)); imgs[k] = ImageTk.PhotoImage(im)
         return imgs[k]
-    def mosaic(tracks, size):
-        key = ("mos",) + tuple(tracks[:4]) + tuple(os.path.exists(track_cover(t)) for t in tracks[:4])
+    def mosaic(tracks, size, r=7):
+        key = ("mos", size, r) + tuple(tracks[:4]) + tuple(os.path.exists(track_cover(t)) for t in tracks[:4])
         if key not in imgs:
-            px = int(round(size * S)); Q = 4; im = mosaic_image(tracks, px * 2).resize((px, px), Image.LANCZOS)
-            m = Image.new("L", (px * Q, px * Q), 0); ImageDraw.Draw(m).rounded_rectangle([0, 0, px * Q - 1, px * Q - 1], 7 * S * Q, fill=255)
+            px = int(round(size * S)); Q = 4; im = mosaic_image(tracks, px * 2).convert("RGBA").resize((px, px), Image.LANCZOS)
+            m = Image.new("L", (px * Q, px * Q), 0); ImageDraw.Draw(m).rounded_rectangle([0, 0, px * Q - 1, px * Q - 1], r * S * Q, fill=255)
             im.putalpha(m.resize((px, px), Image.LANCZOS)); imgs[key] = ImageTk.PhotoImage(im)
         return imgs[key]
     def click(tag, fn): handlers[tag] = fn
@@ -2858,9 +2905,26 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
         l = custom_get(uri, user) if uri else None
         st.update(page="build", id=(uri[len(CUSTOM_PREFIX):] if l else None), tracks=[dict(t) for t in (l or {}).get("tracks", []) if isinstance(t, dict)],
                   sc=0.0, search=False, results=[], busy="", err="")
-        bst.update(hov=None, press=None, drag=None, ins=None, target=0.0, undo=[], redo=[], sel=0, toast=None)
+        bst.update(hov=None, press=None, drag=None, ins=None, target=0.0, undo=[], redo=[], sel=0, toast=None, delarm=False)
         se.delete(0, "end")
         nm.delete(0, "end"); nm.insert(0, (l or {}).get("name") or "My list"); draw()
+    def delete_list():
+        if not bst.get("delarm"):
+            bst["delarm"] = True; draw()
+            def disarm():
+                if bst.get("delarm"): bst["delarm"] = False; draw()
+            d.after(3000, disarm); return
+        bst["delarm"] = False; lid = st["id"]; uri = CUSTOM_PREFIX + lid
+        lists.pop(lid, None)
+        pls_ = user.get("playlists") if isinstance(user.get("playlists"), dict) else {}
+        for k_ in [k_ for k_, v_ in pls_.items() if v_ == uri]: pls_.pop(k_)               # ages using it: back to default
+        am_ = user.get("after_match") if isinstance(user.get("after_match"), dict) else {}
+        for k_ in ("playlist", "win", "loss"):
+            if am_.get(k_) == uri: am_[k_] = ""
+        if save: save(user)
+        try: os.remove(custom_cover(uri))
+        except OSError: pass
+        log("Deleted app list %s" % lid); res["deleted"] = uri; d.destroy()
     def save_list():
         if not st["tracks"]: return
         import secrets
@@ -2990,7 +3054,10 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
             vis = GH / (GH + mx); th = max(28, GH * vis); ty = (GH - th) * (mp["sc"] / mx)
             def paint(dr, Q, im, th=th):
                 dr.rounded_rectangle([0, 0, int(round(4 * S)) * Q - 1, int(round(th * S)) * Q - 1], radius=2 * S * Q, fill="#5a5a5a")
-            gc.create_image((GW - 4) * S, ty * S, image=g_img(("sb", int(th)), 4, int(th), paint), anchor="nw")
+            col_ = "#9a9a9a" if mp.get("sbd") else ("#7a7a7a" if mp.get("sbh") else "#5a5a5a")
+            def paint(dr, Q, im, th=th, col_=col_):
+                dr.rounded_rectangle([0, 0, int(round(4 * S)) * Q - 1, int(round(th * S)) * Q - 1], radius=2 * S * Q, fill=col_)
+            gc.create_image((GW - 4) * S, ty * S, image=g_img(("sb", int(th), col_), 4, int(th), paint), anchor="nw", tags="sbthumb")
     def gdraw_soon():
         if not mp["gjob"]: mp["gjob"] = d.after(60, gdraw)
     def g_select(u):
@@ -3000,14 +3067,25 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
             for t in gc.gettags(it_):
                 if t in ghand: return t
         return None
+    def g_sb(e):                                      # (max, thumb height, thumb top) when the press is in the scrollbar lane
+        mx = g_max()
+        if mx <= 0 or e.x / S < GW - 12: return None
+        th = max(28, GH * GH / (GH + mx)); return mx, th, (GH - th) * (mp["sc"] / mx)
     def g_press(e):                                   # acts on press (popup is armed only after the opening release)
         if not st.get("armed") or mp["use"]: return
+        sb = g_sb(e)
+        if sb:
+            mx, th, ty = sb; y = e.y / S
+            if not (ty <= y <= ty + th): mp["sc"] = mp["tg"] = max(0.0, min(mx, (y - th / 2) * mx / max(1, GH - th)))
+            mp["sbd"] = (y, mp["sc"]); gdraw(); return
         t = g_tag(e)
         if t: ghand[t]()
     def g_double(e):
         if st.get("armed") and g_tag(e) and str(g_tag(e)).startswith("g") and mp["sel"]: use_sel()
     def g_motion(e):
-        t = g_tag(e); gc.config(cursor="hand2" if t else "")
+        h_ = bool(g_sb(e))
+        if h_ != bool(mp.get("sbh")): mp["sbh"] = h_; gdraw()
+        t = g_tag(e); gc.config(cursor="hand2" if (t or h_) else "")
         items = mp_shown(); u = None
         if t and t.startswith("g") and t[1:].isdigit() and int(t[1:]) < len(items): u = items[int(t[1:])]["uri"]
         if u != mp["hov"]: mp["hov"] = u; gdraw()
@@ -3020,6 +3098,13 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
         dv = mp["tg"] - mp["sc"]
         if abs(dv) < 0.6: mp["sc"] = mp["tg"]; mp["sjob"] = None; gdraw(); return
         mp["sc"] += dv * 0.35; gdraw(); mp["sjob"] = d.after(15, g_step)
+    def g_drag(e):
+        if not mp.get("sbd"): return
+        mx = g_max(); th = max(28, GH * GH / (GH + mx)) if mx > 0 else GH; y0, s0 = mp["sbd"]
+        mp["sc"] = mp["tg"] = max(0.0, min(mx, s0 + (e.y / S - y0) * mx / max(1, GH - th))); gdraw()
+    def g_release(e):
+        if mp.get("sbd"): mp["sbd"] = None; gdraw()
+    gc.bind("<B1-Motion>", g_drag); gc.bind("<ButtonRelease-1>", g_release)
     gc.bind("<ButtonPress-1>", g_press); gc.bind("<Double-Button-1>", g_double); gc.bind("<Motion>", g_motion)
     gc.bind("<Leave>", g_leave); gc.bind("<MouseWheel>", g_wheel)
     def mp_load():
@@ -3075,7 +3160,7 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
     def draw():
         cv.delete("all"); handlers.clear()
         (draw_pick if st["page"] == "pick" else draw_build)()
-        if int(cv.cget("height")) != int(st["H"] * S): cv.config(height=int(st["H"] * S))
+        set_canvas_height(cv, int(st["H"] * S))
     def draw_pick():
         text(20, 24, title, 15, b=True)
         # your playlists card (Liked Songs + your Spotify playlists)
@@ -3102,7 +3187,7 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
         hv = st.get("mkh"); cy = y + 28                                     # one button: tile, title, grey subline, chevron
         rr(16, y, W - 16, y + 56, 12, "#22302a" if hv else "#1c241f", C["acc"] if hv else "#2f6b46", 1.2, tag="mk")
         trs = [t["uri"] for t in (cur_l or {}).get("tracks", [])] if cur_l else []
-        if trs: cv.create_image(*P(28, cy - 18), image=mosaic(trs, 36), anchor="nw", tags="mk")
+        if trs: cv.create_image(*P(28, cy - 18), image=mosaic(trs, 36, 9), anchor="nw", tags="mk")      # same slot as the + tile
         else: rr(28, cy - 18, 64, cy + 18, 9, "#24553a" if hv else "#1f4630", tag="mk"); icon("plus", 46, cy, C["acc"], tag="mk")
         text(78, cy - 8, ("Edit \u00b7 " + trunc(cur_l.get("name", "My list"), 22)) if cur_l else "Make your own", 12.5, b=True, tag="mk")
         text(78, cy + 10, "Saved in this app, not Spotify", 10.5, C["mu"], tag="mk")
@@ -3408,7 +3493,9 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
                 text(106, gy + 14, fit(t_.get("name", "Song"), 11.5, True, W - 160), 11.5, b=True); text(106, gy + 28, fit(t_.get("artist", ""), 10, False, W - 160), 10, C["mu"])
             if max_sc() > 0:                                           # scrollbar (draggable)
                 vh = RH * VISN; th = max(28, vh * vh / (n * RH)); ty = LT + (vh - th) * st["sc"] / max_sc()
-                rr(W - 12, LT + 2, W - 8, LB - 2, 2, "#222222", tag="sb"); rr(W - 13, ty + 2, W - 7, ty + th - 2, 3, "#6a6a6a" if bst["sb"] else "#4a4a4a", tag="sb")
+                hot = bool(bst["sb"]) or bst.get("sbh")
+                rr(W - 18, LT, W - 2, LB, 4, "", tag="sb")                             # invisible, easy-to-hit lane
+                rr(W - 12, LT + 2, W - 8, LB - 2, 2, "#222222", tag="sb"); rr(W - 13, ty + 2, W - 7, ty + th - 2, 3, "#8a8a8a" if bst["sb"] else ("#6a6a6a" if hot else "#4a4a4a"), tag=("sb", "sbthumb"))
         else:                                                          # empty state
             hl = st["drag"]
             rr(20, LT + 8, W - 20, LT + 216, 14, "#16261c" if hl else "#151a16", C["acc"] if hl else "#3f5a48", 1.4, dash=True)
@@ -3423,7 +3510,7 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
         cv.create_image(*P(30, 46), image=_img(("bk", ""), int(32 * S), int(32 * S),
                         lambda dr, Q, im: dr.ellipse([0, 0, 32 * S * Q - 1, 32 * S * Q - 1], fill="#2a2a2a")), anchor="center", tags="back")
         icon("back", 30, 46, C["tx"], tag="back"); click("back", lambda: (st.update(page="pick", err=""), draw()))
-        if trs: cv.create_image(*P(56, 14), image=mosaic([t["uri"] for t in trs], 64), anchor="nw")
+        if trs: cv.create_image(*P(56, 14), image=mosaic([t["uri"] for t in trs], 64, 8), anchor="nw")
         else: rr(56, 14, 120, 78, 8, "#1f2a23"); icon("note", 88, 46, C["acc"], "#1f2a23", sz=26)
         rr(132, 16, W - 20, 46, 9, C["ib"])
         cv.create_window(*P(144, 31), window=nm, anchor="w", width=int((W - 20 - 144 - 10) * S), height=int(24 * S))
@@ -3462,10 +3549,19 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
             if tb["undo"]:
                 text(20 + tw_ - 14, ty_ + 16, "Undo", 10.5, C["acc"], True, "e", "undo"); click("undo", lambda: undo_redo(True))
         fy = LB + 50
-        rr(W - 120, fy, W - 20, fy + 32, 16, C["acc"] if n else "#2a2a2a", tag="save"); text(W - 70, fy + 16, "Save", 12, "#121212" if n else C["dim"], True, "center", "save")
+        stg = "save" if n else "save_off"                                  # empty: visibly disabled, not clickable
+        rr(W - 120, fy, W - 20, fy + 32, 16, C["acc"] if n else "#2a2a2a", tag=stg); text(W - 70, fy + 16, "Save", 12, "#121212" if n else C["dim"], True, "center", stg)
         rr(W - 218, fy, W - 130, fy + 32, 16, "#2a2a2a", tag="cancel"); text(W - 174, fy + 16, "Cancel", 12, C["tx"], False, "center", "cancel")
-        click("save", save_list); click("cancel", d.destroy)
-        st["H"] = fy + 32 + 14
+        if n: click("save", save_list)
+        click("cancel", d.destroy)
+        if st["id"] and st["id"] in lists:                                  # saved list: Delete (press twice)
+            arm_ = bst.get("delarm")
+            rr(20, fy, 122, fy + 32, 16, C["red"] if arm_ else "#2a2a2a", None if arm_ else "#5a3330", 1.2, tag="dellist")
+            text(71, fy + 16, "Confirm" if arm_ else "Delete list", 11.5, "#121212" if arm_ else C["red"], True, "center", "dellist")
+            click("dellist", delete_list)
+        if not n:
+            text(W - 70, fy + 46, "Add a song to save", 9.5, C["mu"], False, "center"); st["H"] = fy + 32 + 30
+        else: st["H"] = fy + 32 + 14
     # ---- pointer
     def tags_at(e): return {t for it in cv.find_overlapping(e.x, e.y, e.x, e.y) for t in cv.gettags(it)}
     def row_of(tags):
@@ -3476,6 +3572,7 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
         return None
     def b_motion(e):
         tags = tags_at(e); y_ = e.y / S
+        if ("sb" in tags) != bool(bst.get("sbh")): bst["sbh"] = "sb" in tags; draw()
         h_ = row_of(tags) if LT <= y_ <= LB and not st["results"] else None
         part = "rm" if any(t.startswith("rm") for t in tags) else ("hd" if any(t.startswith("hd") for t in tags) else None)
         tipt = next((t for t in ("tbp", "tbv") if t in tags), None)
@@ -3495,7 +3592,10 @@ def list_picker(parent, title, current="", allow_tracks=False, user=None, save=N
             st["results"] = []; draw()                                  # click outside closes the dropdown
         if "dd" in tags or any(t.startswith("sr") for t in tags): return      # dropdown sits over the list rows
         if "sb" in tags and max_sc() > 0:
-            bst["sb"] = (y_, st["sc"]); return
+            vh = RH * VISN; th = max(28, vh * vh / (len(st["tracks"]) * RH)); ty = LT + (vh - th) * st["sc"] / max_sc()
+            if not (ty <= y_ <= ty + th):                                    # track click: jump there, then grab
+                st["sc"] = bst["target"] = max(0.0, min(max_sc(), (y_ - LT - th / 2) * max_sc() / max(1, vh - th)))
+            bst["sb"] = (y_, st["sc"]); draw(); return
         i_ = row_of(tags)
         if i_ is not None and not any(t.startswith("rm") for t in tags) and LT <= y_ <= LB:
             bst["press"] = {"i": i_, "x": e.x / S, "y": y_, "off": y_ - row_top(i_)}
@@ -3906,6 +4006,8 @@ def default_pool(base_cfg, civ):
     bi = base_cfg.get("boss_intro") or {}
     return list((bi.get("pools") or {}).get(civ) or bi.get("default") or [])
 
+SW_W, SW_H = 44, 24                                   # one switch size app-wide (panel toggle default)
+
 def pool_editor(parent, user, save):
     """Tier-list style editor. user: the panel's settings dict (shared); save(): persist + refresh panel."""
     if not single_window("editor", "Age Intros"): return None
@@ -3930,10 +4032,10 @@ def pool_editor(parent, user, save):
                                                  width=int(width * S * Q) if outline else 0)
             imgs[k] = ImageTk.PhotoImage(im.resize((Wp, Hp), Image.LANCZOS), master=win)
         return imgs[k]
-    def rr(x0, y0, x1, y1, r, fill, outline=None, width=1.5):
-        cv.create_image(x0 * S, y0 * S, anchor="nw", image=rr_img(x1 - x0, y1 - y0, r, fill, outline, width))
-    def text(x, y, s, sz, c=None, b=False, anchor="w"):
-        cv.create_text(x * S, y * S, text=s, fill=c or C["tx"], anchor=anchor, font=("Segoe UI", -int(sz * S), "bold" if b else "normal"))
+    def rr(x0, y0, x1, y1, r, fill, outline=None, width=1.5, tags=None):
+        cv.create_image(x0 * S, y0 * S, anchor="nw", image=rr_img(x1 - x0, y1 - y0, r, fill, outline, width), tags=tags)
+    def text(x, y, s, sz, c=None, b=False, anchor="w", tags=None):
+        cv.create_text(x * S, y * S, text=s, fill=c or C["tx"], anchor=anchor, font=("Segoe UI", -int(sz * S), "bold" if b else "normal"), tags=tags)
     def undo_glyph(cx, cy, c):
         k = ("undo", c)
         if k not in imgs:
@@ -4352,10 +4454,19 @@ def pool_editor(parent, user, save):
     win.bind("<Control-y>", lambda e: undo_redo(False)); win.bind("<Control-Y>", lambda e: undo_redo(False))
     win.bind("<Control-Shift-Z>", lambda e: undo_redo(False)); win.bind("<Control-Shift-z>", lambda e: undo_redo(False))
     # ---- hit testing (logical coords)
+    SB_X0, SB_X1 = 564, 584                            # scrollbar hit lane (thumb drawn at 572..576, wider when hot)
+    def sb_geom():
+        ms = max_sc(); vh = BOT - LT
+        if not ms: return None
+        th = max(28.0, vh * vh / (vh + ms)); ty = LT + (vh - th) * st["sc"] / ms
+        return ms, vh, th, ty
     def hit(x, y):
+        if ed["page"] != "overview" and SB_X0 <= x <= SB_X1 and LT <= y <= BOT and max_sc(): return ("sb",)
+        return _hit(x, y)
+    def _hit(x, y):
         if ed["page"] == "overview":
             m = st.get("menu")
-            if not m and 18 <= x <= 50 and 33 <= y <= 65: return ("back",)
+            if not m and 18 <= x <= 50 and 42 <= y <= 74: return ("back",)        # same spot as on the age pages
             if m == "presets":
                 ps = user_presets(user)
                 for i_, p in enumerate(ps):
@@ -4375,14 +4486,14 @@ def pool_editor(parent, user, save):
             for k, a_ in enumerate(INTRO_AGES):
                 y0 = CARD_Y(k)
                 if 20 <= x <= 580 and y0 <= y <= y0 + 128:
-                    if 490 <= x <= 544 and y0 + 26 <= y <= y0 + 58: return ("swoff", a_, 515, y0 + 58) if age_empty(a_) else ("cardtog", a_)
+                    if 486 <= x <= 544 and y0 + 26 <= y <= y0 + 58: return ("swoff", a_, 515, y0 + 58) if age_empty(a_) else ("cardtog", a_)
                     return ("card", a_)
             return None
         for i in range(len(SONGS) + 1):
             cx, cy = tray_xy(i); rt = tray_rad(i) + 2
             if (x - cx) ** 2 + (y - cy) ** 2 <= rt ** 2: return ("tray", i) if i < len(SONGS) else ("plus",)
         if 18 <= x <= 50 and 42 <= y <= 74: return ("back",)
-        if 520 <= x <= 566 and 44 <= y <= 72: return ("swoff", ed["age"], 544, 74) if age_empty(ed["age"]) else ("tabtog", ed["age"])
+        if 514 <= x <= 566 and 42 <= y <= 74: return ("swoff", ed["age"], 544, 74) if age_empty(ed["age"]) else ("tabtog", ed["age"])
         if age_custom() and 568 <= x <= 590 and 46 <= y <= 70: return ("reset",)
         if LT <= y <= BOT and 20 <= x <= 568:
             i = int((y - LT + st["sc"]) // STEP)
@@ -4396,10 +4507,11 @@ def pool_editor(parent, user, save):
                 if ed["age"] == "imperial" and 532 <= x <= 562: return ("undo", i)
                 return ("row", i)
         return None
-    def sw(x0, y0, on, disabled=False):                # small anti-aliased switch (greyed = can't be turned on)
-        rr(x0, y0, x0 + 36, y0 + 20, 10, "#2e2e2e" if disabled else (C["acc"] if on else "#464646"))
-        kx = x0 + 26 if on else x0 + 10
-        cv.create_image(kx * S, (y0 + 10) * S, image=art.disc(14, "#6a6a6a" if disabled else "#ffffff"))
+    def sw(xr, cy, on, disabled=False):                # same switch as the main panel (SW_W x SW_H, knob SW_H-6); right edge xr, centred on cy
+        x0, y0 = xr - SW_W, cy - SW_H / 2
+        rr(x0, y0, xr, y0 + SW_H, SW_H / 2, "#2e2e2e" if disabled else (C["acc"] if on else "#3a3a3a"), tags="sw")
+        kx = xr - SW_H / 2 if on else x0 + SW_H / 2
+        cv.create_image(kx * S, cy * S, image=art.disc(SW_H - 6, "#6a6a6a" if disabled else "#ffffff"), tags=("sw", "swknob"))
     def badge(x, y, age, on, r):
         cv.create_image(x * S, y * S, image=art.disc(2 * r, "#1e3c28" if on else "#2c2c2c",
                         {"dark": "I", "feudal": "II", "castle": "III", "imperial": "IV"}[age], C["acc"] if on else C["mu"], r * 0.62))
@@ -4410,16 +4522,16 @@ def pool_editor(parent, user, save):
                        width=max(1, 2 * S), capstyle="round", joinstyle="round")
     def draw_overview():
         cv.delete("all"); on = ages_on(); hov = st["hov"]
-        cv.create_image(34 * S, 49 * S, image=art.chevron(32, C["tx"], True, "#2a2a2a" if (hov or ("",))[0] == "back" else C["card"], w=6, h=12))
-        cv.create_polygon(*[v * S for v in (64, 58, 64, 42, 71, 49, 76, 38, 81, 49, 88, 42, 88, 58)], fill=C["acc"])
-        text(96, 49, "Age Intros", 18, b=True)
+        cv.create_image(34 * S, 58 * S, image=art.chevron(32, C["tx"], True, "#2a2a2a" if (hov or ("",))[0] == "back" else C["card"], w=6, h=12), tags="backbtn")
+        cv.create_polygon(*[v * S for v in (66, 67, 66, 51, 73, 58, 78, 47, 83, 58, 90, 51, 90, 67)], fill=C["acc"])   # crown centred like the age badge (78, 58)
+        text(102, 58, "Age Intros", 18, b=True, tags="htitle")
         for k, a_ in enumerate(INTRO_AGES):
             y = CARD_Y(k); p = pools(a_); n = sum(1 for v in p.values() if v); hv = hov and hov[1:] == (a_,)
             rr(20, y, 580, y + 128, 18, "#262626" if hv else C["card"], "#464646" if hv else None)
             badge(62, y + 42, a_, on[a_], 24)
             text(100, y + 30, a_.capitalize(), 17, b=True)
             text(100, y + 54, ("%d/%d civs" % (n, len(CIV_LIST))) if n else "Empty", 11, C["acc"] if (n and on[a_]) else C["mu"], True)
-            sw(498, y + 32, on[a_], age_empty(a_)); chev(560, y + 42, C["mu"])
+            sw(534, y + 42, on[a_], age_empty(a_)); chev(560, y + 42, C["mu"])
             rr(100, y + 82, 330, y + 88, 3, "#323232")
             if n: rr(100, y + 82, 100 + max(6, 230 * n // len(CIV_LIST)), y + 88, 3, C["acc"] if on[a_] else "#5a5a5a")
             allu = [u for u in song_sorted([u for v in p.values() for u in v]) if u in SONG_BY_URI]; used = allu[:5]
@@ -4533,17 +4645,19 @@ def pool_editor(parent, user, save):
             if ed["age"] == "imperial" and p[civ] != song_sorted(default_pool(base, civ)):
                 undo_glyph(547, cy, C["mu"])
         # scrollbar
-        ms = max_sc()
-        if ms:
-            th = (BOT - LT) * (BOT - LT) / (BOT - LT + ms); ty = LT + (BOT - LT - th) * st["sc"] / ms
-            rr(572, LT, 576, BOT, 2, "#2a2a2a"); rr(572, ty, 576, ty + th, 2, "#5a5a5a")
+        g_ = sb_geom()
+        if g_:
+            ms, vh, th, ty = g_; act = bool(st.get("sbd")); hot = act or (st["hov"] or ("",))[0] == "sb"
+            x0_, x1_ = (571, 577) if hot else (572, 576)
+            rr(x0_, LT, x1_, BOT, 3 if hot else 2, "#2a2a2a", tags="sbtrack")
+            rr(x0_, ty, x1_, ty + th, 3 if hot else 2, "#9a9a9a" if act else ("#7a7a7a" if hot else "#5a5a5a"), tags="sbthumb")
         # header + tray (opaque, on top of the scrolled list)
         cv.create_rectangle(0, 0, W * S, (LT - 4) * S, fill=C["bg"], outline="", tags="cover")
         cv.create_rectangle(0, BOT * S, W * S, H * S, fill=C["bg"], outline="", tags="cover")
         a_ = ed["age"]; on = ages_on()
-        cv.create_image(34 * S, 58 * S, image=art.chevron(32, C["tx"], True, "#2a2a2a" if (st["hov"] or ("",))[0] == "back" else C["card"], w=6, h=12))
-        badge(78, 58, a_, on[a_], 15); text(102, 58, a_.capitalize(), 18, b=True)
-        sw(526, 48, on[a_], age_empty(a_))
+        cv.create_image(34 * S, 58 * S, image=art.chevron(32, C["tx"], True, "#2a2a2a" if (st["hov"] or ("",))[0] == "back" else C["card"], w=6, h=12), tags="backbtn")
+        badge(78, 58, a_, on[a_], 15); text(102, 58, a_.capitalize(), 18, b=True, tags="htitle")
+        sw(562, 58, on[a_], age_empty(a_))
         if age_custom(): undo_glyph(578, 58, C["mu"])
         rr(20, 88, 580, 180, 18, "#1a1a1a", C["line"])
         text(36, 99, "OCTOPATH", 8.5, C["mu"], True)
@@ -4757,16 +4871,33 @@ def pool_editor(parent, user, save):
     def L(e): return e.x / S, e.y / S
     def on_motion(e):
         t0 = time.perf_counter(); h = hit(*L(e))
-        if h != st["hov"]: set_hover(h)
+        if h != st["hov"]:
+            sbch = (h == ("sb",)) != (st["hov"] == ("sb",))
+            set_hover(h)
+            if sbch: draw()                                # scrollbar hover styling lives in the main frame
         st["mt"] = max(st.get("mt", 0), time.perf_counter() - t0)     # slowest motion handler (tests)
     def on_press(e):
         cv.focus_set()                                     # keep keyboard focus here (Ctrl+Z / Ctrl+Y)
         x, y = L(e); h = hit(x, y); st["press"] = (x, y, h); st["released"] = False
+        if h == ("sb",):                                   # grab the thumb (track click: jump there, then grab)
+            g_ = sb_geom()
+            if g_:
+                ms, vh, th, ty = g_
+                if not (ty <= y <= ty + th): st["sc"] = max(0, min(ms, (y - LT - th / 2) * ms / max(1, vh - th)))
+                st["sbd"] = (y, st["sc"]); gtip.hide(fade=False); draw()
+            return
         if h and h[0] == "tray": st["drag"] = {"src": h, "song": h[1], "xy": None}
         elif h and h[0] == "chip" and pools()[CIV_LIST[h[1]][0]][h[2]] in SONG_BY_URI:
             uri = pools()[CIV_LIST[h[1]][0]][h[2]]
             st["drag"] = {"src": ("row", h[1], h[2]), "song": [s[3] for s in SONGS].index(uri), "xy": None}
     def on_drag(e):
+        if st.get("sbd"):                                  # thumb follows the pointer 1:1
+            g_ = sb_geom()
+            if g_:
+                ms, vh, th, _ = g_; y0, s0 = st["sbd"]; y = L(e)[1]
+                sc_ = max(0, min(ms, s0 + (y - y0) * ms / max(1, vh - th)))
+                if sc_ != st["sc"]: st["sc"] = sc_; draw()
+            return
         d = st["drag"]
         if not d: return
         x, y = L(e); px, py, _ = st["press"]
@@ -4781,6 +4912,7 @@ def pool_editor(parent, user, save):
         if st["sc"] == sc0 and st["drop"] == drop0 and cv.find_withtag("ghost"): cv.coords("ghost", x * S, y * S)
         else: draw()
     def on_release(e):
+        if st.get("sbd"): st["sbd"] = None; st["released"] = True; st["hov"] = hit(*L(e)); draw(); return
         st["released"] = True; d, st["drag"] = st["drag"], None; drop, st["drop"] = st["drop"], None
         x, y = L(e); h = hit(x, y); p = pools()
         if d and d["xy"] is not None:
@@ -4809,7 +4941,7 @@ def pool_editor(parent, user, save):
         elif h and h[0] == "card": open_page(h[1]); return
         elif h and h[0] == "cardtog": set_age_on(h[1], not ages_on()[h[1]])
         elif h and h[0] == "back":
-            if ed["page"] == "overview": win.destroy()             # overview: back arrow closes the window
+            if ed["page"] == "overview": close_editor()            # overview: back arrow closes the window
             else: open_page("overview")
             return
         elif h and h[0] == "x": remove(h[1], h[2])
@@ -4840,6 +4972,11 @@ def pool_editor(parent, user, save):
         try: on_release(e)
         finally: st["press"] = None
     cv.bind("<ButtonRelease-1>", on_release_guarded); cv.bind("<Button-3>", on_right); cv.bind("<MouseWheel>", on_wheel)
+    def close_editor():                                # any close (back arrow, Esc on overview, title-bar X): panel to front
+        try: win.destroy()
+        except Exception: pass
+        if parent is not None: parent.after(10, lambda: focus_window(parent))
+    win.protocol("WM_DELETE_WINDOW", close_editor)
     cv.bind("<Leave>", lambda e: (gtip.hide(), set_hover(None) if not st["drag"] else None))
     win.bind("<Escape>", lambda e: open_page("overview") if ed["page"] != "overview" else (st.update(menu=None), draw()))
     win.bind("<BackSpace>", lambda e: open_page("overview") if ed["page"] != "overview" else None)
@@ -5108,6 +5245,21 @@ def panel():
         return _amic[k]
     power_img = _icon(int(30 * S), _power); fade_img = _icon(int(24 * S), _fade)
     G0, GREY_ACC, CORAL, CORAL_TX = "#1DB954", "#6e6e6e", "#e5675f", "#f0d6d4"
+    _ghi = {}
+    def gh_icon():
+        """Small GitHub mark (light circle, cat head cut out), anti-aliased, matching the menu text colour."""
+        if not _ghi:
+            def p(d, m, Q):
+                bg = (0, 0, 0, 0); d.ellipse([0, 0, m - 1, m - 1], fill=C["tx"]); c = m / 2; k = m / 14.0
+                d.ellipse([c - 3.6 * k, c - 3.2 * k, c + 3.6 * k, c + 2.6 * k], fill=bg)
+                d.polygon([(c - 3.6 * k, c - 1 * k), (c - 3.2 * k, c - 4.8 * k), (c - 1.2 * k, c - 3 * k)], fill=bg)
+                d.polygon([(c + 3.6 * k, c - 1 * k), (c + 3.2 * k, c - 4.8 * k), (c + 1.2 * k, c - 3 * k)], fill=bg)
+                d.rectangle([c - 1.5 * k, c + 2 * k, c + 1.5 * k, m], fill=bg)
+            _ghi[0] = _icon(int(14 * S), p)
+        return _ghi[0]
+    def open_github():
+        try: webbrowser.open(GITHUB_URL)
+        except Exception as e: log("Open GitHub: %r" % e)
     _fadec = {}
     def fade_icon(col):
         if col not in _fadec:
@@ -5119,17 +5271,29 @@ def panel():
     def _mix(a, b, t):
         A_, B_ = ImageColor_rgb(a), ImageColor_rgb(b)
         return "#%02x%02x%02x" % tuple(int(round(A_[i] + (B_[i] - A_[i]) * t)) for i in range(3))
-    _pwr = {}
-    def power_icon(t):
-        """Power icon for the Enabled row: t=0 on (green, upright) .. t=1 off (coral, upside down)."""
-        k = round(t * 20) / 20.0
+    _pwr = {}; _pwr_pil = {}; PSTEP = 3                # one frame per 3 degrees (120 frames per turn)
+    def pwr_t(a):
+        """Colour position for rotation angle a: 0 = on (green, upright), 180 = off (coral), 360 = on again."""
+        a %= 360.0; return 1.0 - abs(a - 180.0) / 180.0
+    def _pwr_frame(k):
+        """PIL frame for angle k*PSTEP: drawn upright at 4x, rotated about the ring's exact centre, then downsampled."""
+        px = int(30 * S); px += px % 2; Q = 4; m = px * Q; col = _mix(G0, CORAL, pwr_t(k * PSTEP))
+        im = Image.new("RGBA", (m, m), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+        lw = int(3 * S * Q); d.arc([m*0.12, m*0.16, m*0.88, m*0.92], start=-60, end=240, fill=col, width=lw)
+        d.rounded_rectangle([m/2 - lw/2, m*0.04, m/2 + lw/2, m*0.5], radius=lw/2, fill=col)
+        if k % (360 // PSTEP): im = im.rotate(-(k * PSTEP), resample=Image.BICUBIC, center=(m / 2, m * 0.54))
+        return im.resize((px, px), Image.LANCZOS)
+    def _pwr_prerender():                              # background thread: PIL only (PhotoImages are made on the Tk thread)
+        for k in range(360 // PSTEP):
+            if k not in _pwr_pil:
+                try: _pwr_pil[k] = _pwr_frame(k)
+                except Exception: return
+    def power_icon(a):
+        """Power icon at rotation angle a (degrees, any value; 0 = on, 180 = off)."""
+        k = int(round((a % 360.0) / PSTEP)) % (360 // PSTEP)
         if k not in _pwr:
-            px = int(30 * S); px += px % 2; Q = 4; m = px * Q; col = _mix(G0, CORAL, k)
-            im = Image.new("RGBA", (m, m), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
-            lw = int(3 * S * Q); d.arc([m*0.12, m*0.16, m*0.88, m*0.92], start=-60, end=240, fill=col, width=lw)
-            d.rounded_rectangle([m/2 - lw/2, m*0.04, m/2 + lw/2, m*0.5], radius=lw/2, fill=col)
-            if k: im = im.rotate(-180 * k, resample=Image.BICUBIC, center=(m / 2, m * 0.54))
-            _pwr[k] = ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+            im = _pwr_pil.get(k) or _pwr_frame(k)
+            _pwr[k] = ImageTk.PhotoImage(im)
         return _pwr[k]
     def red_glow():
         k = ("glow",)
@@ -5140,19 +5304,31 @@ def panel():
             ImageDraw.Draw(im).rounded_rectangle([8 * S, 8 * S, w - 8 * S, h - 8 * S], radius=16 * S, fill=(229, 103, 95, 70))
             imgs[k] = ImageTk.PhotoImage(im.filter(ImageFilter.GaussianBlur(5 * S)))
         return imgs[k]
-    en_anim = {"t": None, "job": None}               # current power-icon state while animating (None = settled)
+    en_anim = {"a": None, "job": None, "pos": 0.0}   # a = angle while animating (None = settled); pos = last angle
+    PWR_DUR = 0.45                                     # seconds per half turn
     def anim_enabled(to_off):
-        if en_anim["job"]: root.after_cancel(en_anim["job"])
-        t0 = time.perf_counter(); a = 0.0 if to_off else 1.0; b = 1.0 - a
+        """Spin the power icon forward to the next upside-down (off) or upright (on) position; never reverses, also
+        when toggled again mid-spin. Colour follows the angle, so it stays in sync. ~120 fps only while spinning."""
+        if en_anim["job"]:
+            try: root.after_cancel(en_anim["job"])
+            except Exception: pass
+            en_anim["job"] = None
+        a0 = en_anim["a"] if en_anim["a"] is not None else (0.0 if to_off else 180.0)
+        goal = 180.0 if to_off else 0.0
+        b = a0 + ((goal - a0) % 360.0 or 360.0)           # next goal strictly ahead (forward only)
+        if en_anim["a"] is not None and (goal - a0) % 360.0 == 0: b = a0  # already there mid-spin
+        dur = PWR_DUR * max(0.35, (b - a0) / 180.0); t0 = time.perf_counter()
         def step():
-            u = min(1.0, (time.perf_counter() - t0) / 0.32); e = u * u * (3 - 2 * u)   # smoothstep
-            t = a + (b - a) * e; en_anim["t"] = t
+            u = min(1.0, (time.perf_counter() - t0) / dur) if dur else 1.0
+            e = 4 * u ** 3 if u < 0.5 else 1 - (-2 * u + 2) ** 3 / 2      # ease-in-out cubic
+            a = a0 + (b - a0) * e; en_anim["a"] = a; en_anim["pos"] = a % 360.0
             try:
-                cv.itemconfigure("pwr", image=power_icon(t)); cv.itemconfigure("entx", fill=_mix(C["tx"], CORAL_TX, t))
+                cv.itemconfigure("pwr", image=power_icon(a)); cv.itemconfigure("entx", fill=_mix(C["tx"], CORAL_TX, pwr_t(a)))
             except tk.TclError: return
-            if u < 1.0: en_anim["job"] = root.after(16, step)
-            else: en_anim.update(t=None, job=None)
+            if u < 1.0: en_anim["job"] = root.after(8, step)
+            else: en_anim.update(a=None, job=None, pos=b % 360.0)          # normalise: 360 -> 0
         step()
+    root._en_anim = en_anim; root._pwr_t = lambda a: pwr_t(a); root._anim_enabled = lambda off: anim_enabled(off)   # (tests)
     def _gear(col):
         def p(d, m, Q):
             import math
@@ -5240,8 +5416,8 @@ def panel():
     def cur(): return apply_user(load_config(user=False), user)
     def set_user(k, v): user[k] = v; save_user(user); draw()
 
-    def toggle(x, y, on, tag, w=44, h=24):
-        rr(x, y, x + w, y + h, h / 2, G0 if on else C["off"], tag=tag)       # switches stay green even when disabled
+    def toggle(x, y, on, tag, w=SW_W, h=SW_H):
+        rr(x, y, x + w, y + h, h / 2, C["acc"] if on else C["off"], tag=tag)   # follows the accent: grey while the app is Disabled
         cx = x + w - h / 2 if on else x + h / 2
         oval_(P(cx - h/2 + 3, y + 3, cx + h/2 - 3, y + h - 3), fill="white", outline="", tags=tag)
 
@@ -5317,8 +5493,8 @@ def panel():
         else:                                               # disabled: soft red tint, thin red edge, soft glow
             cv.create_image(*P(M - 12, 72 - 12), image=red_glow(), anchor="nw")
             rr(M, 72, R_, 120, 12, "#2a1c1c", "#5a3330", tag="encard")
-        cy = 96; pt = en_anim["t"] if en_anim["t"] is not None else (0.0 if en else 1.0)
-        cv.create_image(*P(M + 24, cy), image=power_icon(pt), anchor="center", tags=("encard", "pwr"))
+        cy = 96; pa = en_anim["a"] if en_anim["a"] is not None else (0.0 if en else 180.0); pt = pwr_t(pa)
+        cv.create_image(*P(M + 24, cy), image=power_icon(pa), anchor="center", tags=("encard", "pwr"))
         text(M + 50, cy, "Enabled" if en else "Disabled", 16, _mix(C["tx"], CORAL_TX, pt), b=True, tag=("encard", "entx")); toggle(R_ - 12 - 52, cy - 14, en, "en", 52, 28)
         click("en", lambda: (set_user("enabled", not en), anim_enabled(en), threading.Thread(target=music_sync, args=(not en,), daemon=True).start()))
         tip("encard", "Runs automatically when you launch AoE4 from Steam and mutes the game's own music. You don't need this window open." if en else "Off: music won't switch when you play, and the game's music is back on.")
@@ -5348,7 +5524,7 @@ def panel():
         for i, (k, lab) in enumerate(AGES if ui["open"] else []):
             rx = XR - 6 - 30; y = PL_Y(i); uri = cfg["playlists"].get(k, ""); is_def = uri == defaults.get(k)
             if i < len(AGES) - 1: cv.create_line(*P(X + 48, y + 44, XR, y + 44), fill="#2a2a2a", tags="pldiv")
-            rr(X - 6, y, XR + 6, y + 42, 9, "#262626", tag="rowhl%d" % i); cv.itemconfigure("rowhl%d" % i, state="hidden")
+            rr(X - 6, y, XR + 6, y + 42, 9, "#262626", tag="rowhl%d" % i); cv.itemconfigure("rowhl%d" % i, state="normal" if hov.get("row") == i else "hidden")
             pid = uri.split(":")[-1]
             cimg = cover_img(custom_cover(uri) if is_custom(uri) else (covers.get(pid) or (cover_file(pid) if pid else None)))
             if cimg:                                       # playlist cover: click = open in Spotify
@@ -5366,7 +5542,7 @@ def panel():
             if pid:
                 click("opn%d" % i, lambda pid=pid, uri=uri, k=k, lab=lab: change(k, lab) if is_custom(uri) else open_playlist(pid))
                 tip("opn%d" % i, "Edit list" if is_custom(uri) else "Open in Spotify"); hover_hl(i)
-            rr(rx - 70, y + 9, rx - 8, y + 33, 12, C["card"], C["acc"], ("chg%d" % i, "chgx")); text(rx - 39, y + 21, "Change", 10, C["acc"], True, "center", ("chg%d" % i, "chgx"))
+            rr(rx - 70, y + 9, rx - 8, y + 33, 12, C["card"], C["acc"], ("chg%d" % i, "chgx")); text(rx - 39, y + 21, "Change", 10, C["acc"], True, "center", ("chg%d" % i, "chgx")); cv.itemconfigure("chg%d" % i, state="normal" if hov.get("row") == i else "hidden")   # hover-only: hidden before first paint
             rc = C["dis"] if is_def else C["mu"]
             rr(rx, y + 9, rx + 30, y + 33, 12, C["card"], rc, "rev%d" % i); undo_icon(rx + 15, y + 21, rc, "rev%d" % i)
             click("chg%d" % i, lambda k=k, lab=lab: change(k, lab))
@@ -5375,7 +5551,7 @@ def panel():
         # Age 4 Intro theme
         base = 172 + PL_H + 10 if ui["open"] else 218
         Hn = base + 112 + (AM_H if ui.get("am") else 46) + M
-        if int(cv.cget("height")) != int(Hn * S): cv.config(height=int(Hn * S))
+        ui["H"] = Hn                                       # applied after the whole frame is drawn (see draw wrapper)
         y = base; bon = bool((cfg.get("boss_intro") or {}).get("enabled", True))
         rr(M, y, R_, y + 46, 10, C["card"], tag="intro"); icon(3, M + 24, y + 23, C["acc"])
         text(M + 46, y + 23, "Age Intros", 13, b=True, tag="intro")
@@ -5464,11 +5640,16 @@ def panel():
             rr(gx, 14, R_, 46, 10, "#2a2a2a", tag="gear"); cv.create_image(*P(gx + 16, 30), image=gear_img[True], anchor="center", tags="gear")
             mx0, my0 = R_ - 158, 52
             mx0 = R_ - 190
-            rr(mx0, my0, R_, my0 + 116, 10, "#262626", "#3a3a3a")
+            rr(mx0, my0, R_, my0 + 148, 10, "#262626", "#3a3a3a")
             rr(mx0 + 6, my0 + 6, R_ - 6, my0 + 38, 7, "#262626", tag="m_chk"); text(mx0 + 20, my0 + 22, "\u21bb  Check for updates", 12, C["tx"], tag="m_chk")
             rr(mx0 + 6, my0 + 38, R_ - 6, my0 + 70, 7, "#262626", tag="m_log"); text(mx0 + 20, my0 + 54, "\u2630  Open log", 12, C["tx"], tag="m_log")
-            cv.create_line(*P(mx0 + 10, my0 + 76, R_ - 10, my0 + 76), fill="#3a3a3a")
-            rr(mx0 + 6, my0 + 80, R_ - 6, my0 + 110, 7, "#262626", tag="m_un"); text(mx0 + 20, my0 + 95, "\u2715  Uninstall", 12, C["red"], True, tag="m_un")
+            gw = tkfont.Font(font=F(12)).measure("\u2630  ") / S                 # label column of the other items
+            rr(mx0 + 6, my0 + 70, R_ - 6, my0 + 102, 7, "#262626", tag="m_gh")
+            cv.create_image(*P(mx0 + 20 + (gw - 8) / 2, my0 + 86), image=gh_icon(), anchor="center", tags="m_gh")
+            text(mx0 + 20 + gw, my0 + 86, "GitHub", 12, C["tx"], tag="m_gh")
+            cv.create_line(*P(mx0 + 10, my0 + 108, R_ - 10, my0 + 108), fill="#3a3a3a")
+            rr(mx0 + 6, my0 + 112, R_ - 6, my0 + 142, 7, "#262626", tag="m_un"); text(mx0 + 20, my0 + 127, "\u2715  Uninstall", 12, C["red"], True, tag="m_un")
+            click("m_gh", lambda: (ui.update(menu=False), draw(), open_github()))
             click("m_chk", lambda: (ui.update(menu=False), draw(), check_now()))
             click("m_log", lambda: (ui.update(menu=False), draw(), open_log()))
             click("m_un", lambda: (ui.update(menu=False), draw(), uninstall()))
@@ -5686,6 +5867,7 @@ def panel():
     _draw = draw
     def draw():                                    # full redraw (state changes only, never on hover)
         t0 = time.perf_counter(); _draw(); ui["dt"] = time.perf_counter() - t0
+        if ui.get("H"): set_canvas_height(cv, int(ui["H"] * S))
         tg = hov["tip"]; on_pointer(force=True)      # re-apply hover state to the new items
         if tg and hov["tip"] == tg and not tipst["shown"]: pass
     def refresh_now():
@@ -5706,7 +5888,14 @@ def panel():
         root.after(60 if pq["idle"] < 10 else (1000 if win_hidden(root) else 150), pump)   # fast only while work flows
 
     if upd["phase"] == "done": root.after(6000, lambda: (upd.update(phase="idle") if upd["phase"] == "done" else None, draw()))
-    draw(); reveal(root); note_window("panel", root); pump(); tick(); fetch_names(); check_updates(); root.mainloop()
+    def warm_panel():                              # build both expandable cards once (fonts, images, covers)
+        keep = dict(ui)
+        for st_ in ({"open": True, "am": False}, {"open": False, "am": True}):
+            ui.update(st_); draw(); root.update_idletasks()
+        ui.clear(); ui.update(keep); draw()
+        threading.Thread(target=_pwr_prerender, daemon=True).start()
+    root._ui = ui                                      # (tests)
+    draw(); reveal(root, warm=warm_panel); note_window("panel", root); pump(); tick(); fetch_names(); check_updates(); root.mainloop()
 
 if __name__ == "__main__":
     try: main()
