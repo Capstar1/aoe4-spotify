@@ -2,6 +2,12 @@
 
 Spotify music that follows your ages in **Age of Empires IV** on Windows.
 
+<p align="center">
+  <a href="https://github.com/Capstar1/aoe4-spotify/releases/latest/download/AoE4.Spotify.Setup.exe"><img src="https://img.shields.io/badge/Download_for_Windows-1DB954?style=for-the-badge&logo=spotify&logoColor=white" alt="Download for Windows" height="48"></a>
+  <br>
+  <sub><a href="https://github.com/Capstar1/aoe4-spotify/releases">or see all releases</a></sub>
+</p>
+
 ## Features
 
 - **Age playlists:** a playlist for Dark, Feudal, Castle and Imperial Age, switched with a smooth fade when you age up.
@@ -18,7 +24,7 @@ Spotify music that follows your ages in **Age of Empires IV** on Windows.
 
 ## Install
 
-1. Download `AoE4 Spotify Setup.exe` from the [latest release](../../releases/latest).
+1. Download the installer with the button above.
 2. Run it. If Windows warns you, choose *More info -> Run anyway*. No admin rights needed.
 3. If Steam is open, Setup closes it briefly and reopens it, so AoE4 starts the app with the game.
 4. At the end, leave *Log in to Spotify now* ticked, log in and click Agree.
