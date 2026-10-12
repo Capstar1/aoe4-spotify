@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 GITHUB_URL = "https://github.com/Capstar1/aoe4-spotify"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
@@ -91,8 +91,13 @@ class FileLock:
         FileLock._tl.release()
 
 _LOG_TL = threading.local()
+_SECRET_RE = re.compile(r"""(?i)\b(code|state|ubi|access_token|refresh_token|code_verifier|code_challenge)(['"]?\s*[:=]\s*['"]?)[A-Za-z0-9_\-\.~%+/]{6,}""")
+def redact(msg):
+    """Strip OAuth codes / states / tokens from anything that could reach the log."""
+    return _SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "<redacted>", str(msg))
+
 def log(msg):
-    line = time.strftime("%H:%M:%S ") + msg
+    line = time.strftime("%H:%M:%S ") + redact(msg)
     if getattr(_LOG_TL, "busy", False): return       # never re-enter (a stdout sink that logs would recurse)
     _LOG_TL.busy = True
     try:
@@ -468,6 +473,37 @@ class ApiVolumePacer:
     def stop(self):
         with self.cv: self.alive = False; self.cv.notify()
 
+_LOGIN = {"lock": threading.Lock(), "active": False, "url": None, "states": {}, "got": None, "err": None,
+          "done": threading.Event(), "srv": None}
+
+class _CallbackServer(http.server.HTTPServer):
+    allow_reuse_address = False                       # never share port 8888 with another listener
+    def server_bind(self):
+        import socket
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):    # Windows: refuse a second bind instead of silently sharing
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+class _CallbackHandler(http.server.BaseHTTPRequestHandler):
+    def _page(self, code, title, sub):
+        self.send_response(code); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
+        self.wfile.write(("<html><body style='background:#121212;color:#f2f2f2;font-family:Segoe UI,sans-serif;text-align:center;"
+                          "padding-top:80px'><h2>%s</h2><p style='color:#9a9a9a'>%s</p></body></html>" % (title, sub)).encode())
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path != "/callback": self.send_response(404); self.end_headers(); return
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}     # extra params (e.g. 'ubi') ignored
+        L = _LOGIN; ver = L["states"].get(q.get("state") or "")
+        if ver is None:                               # an old tab from an earlier attempt: keep waiting for the right one
+            log("Login: ignored a callback from an outdated login tab")
+            self._page(400, "This login link is out of date", "Use the newest Spotify tab, or press Log in again in AoE4 Spotify."); return
+        if q.get("error"):
+            L["got"] = ("error", str(q["error"])[:40]); self._page(200, "Spotify login cancelled", "You can close this tab."); return
+        if not q.get("code"):
+            self._page(400, "Spotify login failed", "No login code was returned. Try again."); return
+        L["got"] = ("code", q["code"], ver); self._page(200, "Spotify login done", "You can close this tab and return to AoE4 Spotify.")
+    def log_message(self, *a): pass
+
 class Spotify:
     def __init__(self, cfg):
         self.cid = cfg["client_id"].strip()
@@ -502,40 +538,61 @@ class Spotify:
             headers={"Content-Type": "application/x-www-form-urlencoded"})
         with urllib.request.urlopen(req, timeout=15) as r: return json.load(r)
 
-    def login(self):
-        verifier = secrets.token_urlsafe(64)[:100]
-        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-        state = secrets.token_urlsafe(16)
-        result = {}
-        class H(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                if urllib.parse.urlparse(self.path).path != "/callback":
-                    self.send_response(404); self.end_headers(); return
-                result.update({k: v[0] for k, v in q.items()})
-                self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers()
-                self.wfile.write(b"<h2>Spotify login done. You can close this tab.</h2>")
-            def log_message(self, *a): pass
-        try: srv = http.server.HTTPServer(("127.0.0.1", 8888), H)
-        except OSError:
-            log("Login: port 8888 is busy (another login window open?) - try again in a minute"); raise SystemExit("port busy")
-        srv.timeout = 2
-        url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode({
-            "client_id": self.cid, "response_type": "code", "redirect_uri": REDIRECT,
-            "code_challenge_method": "S256", "code_challenge": challenge,
-            "scope": SCOPES, "state": state})
-        log("Opening browser for Spotify login...")
-        webbrowser.open(url)
-        deadline = time.time() + 300                 # give up after 5 minutes
-        while "code" not in result and "error" not in result and time.time() < deadline:
-            srv.handle_request()
-        srv.server_close()
-        if not result: log("Login timed out"); raise SystemExit("Spotify login timed out")
-        if result.get("error") or result.get("state") != state:
-            raise SystemExit("Spotify login failed: %s" % result)
-        self._save(self._token_req({"grant_type": "authorization_code", "code": result["code"],
-            "redirect_uri": REDIRECT, "client_id": self.cid, "code_verifier": verifier}))
-        log("Spotify login OK, token cached in token.json")
+    def login(self, timeout=300):
+        """PKCE login. One local callback server per process: pressing Log in again while a login is pending
+        reopens the SAME Spotify page instead of starting a second listener (on Windows two sockets could
+        share port 8888, so a tab's callback landed on the other login and failed with a state mismatch).
+        Every state issued by this pending login stays valid; extra query params (e.g. 'ubi') are ignored."""
+        L = _LOGIN
+        with L["lock"]:
+            if L["active"]:
+                log("Login already in progress - reopening the same Spotify page")
+                url = L["url"]; owner = False
+            else:
+                try: srv = _CallbackServer(("127.0.0.1", 8888), _CallbackHandler)
+                except OSError:
+                    log("Login: port 8888 is busy (another AoE4 Spotify login window open?) - finish or close it and try again")
+                    raise SystemExit("Login port 8888 is busy")
+                verifier = secrets.token_urlsafe(64)[:100]
+                challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+                state = secrets.token_urlsafe(16)
+                url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode({
+                    "client_id": self.cid, "response_type": "code", "redirect_uri": REDIRECT,
+                    "code_challenge_method": "S256", "code_challenge": challenge, "scope": SCOPES, "state": state})
+                L.update(active=True, url=url, states={state: verifier}, got=None, err=None, done=threading.Event(), srv=srv)
+                owner = True
+                log("Opening browser for Spotify login...")
+        try: webbrowser.open(url)
+        except Exception as e: log("Login: could not open the browser (%s)" % type(e).__name__)
+        if not owner:                                     # the pending login finishes it; share its outcome
+            L["done"].wait(timeout)
+            if L["err"]: raise SystemExit(L["err"])
+            self.tok = self._disk_tok()
+            if not self.tok: raise SystemExit("Spotify login did not finish")
+            return
+        err = None
+        try:
+            srv.timeout = 1; deadline = time.time() + timeout
+            while L["got"] is None and time.time() < deadline: srv.handle_request()
+            got = L["got"]
+            if got is None: err = "Spotify login timed out (no answer from the browser in %s)" % ("%d min" % (timeout // 60) if timeout >= 60 else "%d s" % timeout)
+            elif got[0] == "error": err = "Spotify login was cancelled or refused (%s)" % got[1]
+            else:
+                try: tok = self._token_req({"grant_type": "authorization_code", "code": got[1], "redirect_uri": REDIRECT,
+                                            "client_id": self.cid, "code_verifier": got[2]})
+                except urllib.error.HTTPError as e:
+                    try: b = json.loads(e.read().decode("utf-8", "replace") or "{}")
+                    except Exception: b = {}
+                    err = "Spotify refused the login code (HTTP %s: %s%s)" % (e.code, b.get("error", "?"),
+                          (" - " + b["error_description"]) if b.get("error_description") else "")
+                except Exception as e: err = "Spotify login: token request failed (%s - offline?)" % type(e).__name__
+                else:
+                    self._save(tok); log("Spotify login OK, token cached in token.json")
+        finally:
+            try: srv.server_close()
+            except Exception: pass
+            with L["lock"]: L.update(active=False, err=err, srv=None); L["done"].set()
+        if err: log("Login failed: " + err); raise SystemExit(err)
 
     def access(self):
         # Never opens the login page by itself: background calls (panel, game) just fail quietly.
