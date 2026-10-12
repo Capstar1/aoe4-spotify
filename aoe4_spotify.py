@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
 def child_env():
@@ -89,10 +89,19 @@ class FileLock:
         except Exception: pass
         FileLock._tl.release()
 
+_LOG_TL = threading.local()
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
-    try: print(line, flush=True)
-    except Exception: pass  # pythonw has no console
+    if getattr(_LOG_TL, "busy", False): return       # never re-enter (a stdout sink that logs would recurse)
+    _LOG_TL.busy = True
+    try:
+        if not getattr(sys.stdout, "_aoe4_sink", False):   # windowed exe: stdout is our sink -> file only
+            try: print(line, flush=True)
+            except Exception: pass  # pythonw has no console
+        _log_write(line)
+    finally: _LOG_TL.busy = False
+
+def _log_write(line):
     try:
         if os.path.exists(LOGFILE) and os.path.getsize(LOGFILE) > 1_000_000:   # keep the log small
             os.replace(LOGFILE, LOGFILE + ".old")
@@ -1230,7 +1239,7 @@ def tail(path, tracker, stop=None):
         if stop and time.time() - last_check > 10:
             last_check = time.time()
             if stop(): return
-        time.sleep(0.5)
+        time.sleep(0.25 if tracker.in_match else 0.5)       # in a match: notice Game Over / age-ups sooner
 
 NOWIN = 0x08000000  # CREATE_NO_WINDOW
 
@@ -2433,9 +2442,10 @@ def install_crash_log():
         try: log("CRASH in %s:\n%s" % (where, "".join(traceback.format_exception(et, ev, tb)).rstrip()))
         except Exception: pass
     class _Sink:
+        _aoe4_sink = True
         def write(self, t_):
             t_ = (t_ or "").rstrip()
-            if t_: log("stderr: " + t_)
+            if t_ and not getattr(_LOG_TL, "busy", False): log("stderr: " + t_)
         def flush(self): pass
     if sys.stderr is None: sys.stderr = _Sink()
     if sys.stdout is None: sys.stdout = _Sink()
