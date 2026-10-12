@@ -1,6 +1,6 @@
 ; Inno Setup script for AoE4 Spotify. Build: ISCC.exe setup.iss (after building the dist\AoE4 Spotify\ folder)
 #ifndef AppVer
-#define AppVer "1.0.1"
+#define AppVer "1.0.2"
 #endif
 #ifdef TEST
 ; test build (ISCC /DTEST): separate AppId/name/folder so it never touches a real install
@@ -68,12 +68,17 @@ Type: files; Name: "{userprograms}\{#AppName}.lnk"
 Filename: "{app}\AoE4 Spotify.exe"; WorkingDir: "{app}"; Description: "Log in to Spotify now"; Flags: postinstall nowait skipifsilent
 ; in-app update (silent, /RELAUNCH=1): reopen the app window, which shows "Updated to x.y"
 Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel --updated"; WorkingDir: "{app}"; Flags: nowait; Check: Relaunch
+; any other install while AoE4 is running: quietly re-attach the music switcher to that game
+Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--attach"; WorkingDir: "{app}"; Flags: nowait runhidden; Check: not Relaunch
 
 [UninstallDelete]
 #ifndef TEST
 Type: filesandordirs; Name: "{userappdata}\AoE4Spotify"
 #endif
 Type: files; Name: "{app}\launch_option_backup.json"
+Type: files; Name: "{localappdata}\Temp\AoE4.Spotify.Setup-*.exe"
+Type: files; Name: "{localappdata}\Temp\AoE4 Spotify Setup *.exe"
+Type: files; Name: "{localappdata}\Temp\AoE4Spotify_window_*.hwnd"
 Type: filesandordirs; Name: "{app}\source"
 Type: dirifempty; Name: "{app}"
 

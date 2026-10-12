@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 GITHUB_URL = "https://github.com/Capstar1/aoe4-spotify"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
@@ -604,7 +604,7 @@ class Spotify:
             # refresh under a cross-process lock, and first adopt a newer token another process already saved.
             with FileLock(TOKEN):
                 d = self._disk_tok()
-                if d and time.time() <= d.get("expires_at", 0) and d.get("access_token"):
+                if d and time.time() <= d.get("expires_at", 0) and d.get("access_token") and d.get("access_token") != getattr(self, "_rejected", None):
                     self.tok = d; return d["access_token"]
                 if d and d.get("refresh_token") != self.tok.get("refresh_token"): self.tok = d
                 used = self.tok.get("refresh_token")
@@ -645,7 +645,7 @@ class Spotify:
                 try: self._retry_after = float(r.getheader("Retry-After") or 1)
                 except Exception: self._retry_after = 1.0
             if status == 401 and _retry and self.tok:          # access token rejected: refresh once
-                self.tok["expires_at"] = 0
+                self._rejected = self.tok.get("access_token"); self.tok["expires_at"] = 0
                 return self._api(method, path, body, False)
             try: return status, (json.loads(raw) if raw else None)
             except ValueError: return status, (raw.decode(errors="replace") if status >= 400 else None)
@@ -672,7 +672,11 @@ class Spotify:
         if self.shuffle and uri.startswith("spotify:playlist:"):
             n = playlist_total(self, uri.split(":")[-1])
             payload["offset"] = {"position": random.randrange(n) if n > 0 else 0}
+        self._last_fail = None
         ok = self._play(uri, payload, q)
+        if not ok and "offset" in payload and (getattr(self, "_last_fail", None) or (0,))[0] in (400, 403, 404):
+            log("Spotify: random start song is not playable (local file / unavailable?) - starting from the top")
+            payload.pop("offset"); ok = self._play(uri, payload, q)
         if ok: self.set_mode(shuffle=True if self.shuffle else None, repeat="context" if self.repeat else None)
         return ok
 
@@ -716,7 +720,8 @@ class Spotify:
             comp = [x for x in devs if (x.get("type") or "").lower() == "computer"]
             me = os.environ.get("COMPUTERNAME", "").lower()
             comp.sort(key=lambda x: (x.get("name", "").lower() != me, not x.get("is_active")))
-            return comp[0] if comp else None
+            if comp: return comp[0]
+            return next((x for x in devs if x.get("id") and not x.get("is_restricted")), None)   # no PC device: any usable one
         dev = find()
         if not dev:
             if not spotify_running() and not launch_spotify(): return False
@@ -735,12 +740,23 @@ class Spotify:
             wait = min(float(getattr(self, "_retry_after", 1) or 1), 5.0) if code == 429 else 0.6
             log("Spotify %s on play - retrying in %.1fs" % (code, wait)); time.sleep(wait)
             code, body = self._api("PUT", "/me/player/play" + q, payload)
+        if code == 404 and body and "device" not in str(body).lower():   # deleted / private playlist or song: not a device issue
+            self._last_fail = (code, body); log("Spotify: %s not found (deleted, private or unavailable?) - %s" % (uri, body)); return False
         if code == 404:  # no active device (Spotify closed/idle): start it and target this PC by device_id
             self.device_id = None
             if not self.ensure_device(): return False
             code, body = self._api("PUT", "/me/player/play?device_id=" + self.device_id, payload)
+            if code == 404:  # Spotify open but idle (nothing played yet): wake the device with a transfer, then play
+                log("Spotify: device idle - waking it up and retrying")
+                for _ in range(3):
+                    self._api("PUT", "/me/player", {"device_ids": [self.device_id], "play": False}); time.sleep(1.0)
+                    code, body = self._api("PUT", "/me/player/play?device_id=" + self.device_id, payload)
+                    if code != 404: break
+        if code not in (200, 202, 204): self._last_fail = (code, body)
         if code == 403:
-            log("Spotify 403: playback control needs Spotify Premium (%s)" % body); return False
+            if "premium" in str(body).lower() or not body: log("Spotify 403: playback control needs Spotify Premium (%s)" % body)
+            else: log("Spotify 403: Spotify refused to play %s (%s)" % (uri, body))
+            return False
         if code not in (200, 202, 204):
             log("Spotify error %s: %s" % (code, body)); return False
         self._paused_by_us = False
@@ -1401,10 +1417,38 @@ def release_window(name):
         try: import ctypes; ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(h))
         except Exception: pass
 
+def _switcher_mutex(): return "AoE4SpotifySwitcherMutex" + os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX", "")
+
 def single_instance():
-    import ctypes
-    ctypes.windll.kernel32.CreateMutexW(None, False, "AoE4SpotifySwitcherMutex")
-    return ctypes.windll.kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+    import ctypes; k = ctypes.windll.kernel32; k.CreateMutexW.restype = ctypes.c_void_p
+    h = k.CreateMutexW(None, False, _switcher_mutex())
+    if k.GetLastError() != 183: return True                  # ours (kept open for the life of this process)
+    if h: k.CloseHandle(ctypes.c_void_p(h))                    # another switcher: don't keep its name alive
+    return False
+
+def wait_single_instance(secs=20):
+    """Game restarted right after closing: the old switcher may still be finishing (~15 s). Wait for it."""
+    t0 = time.time()
+    while not single_instance():
+        if time.time() - t0 > secs: return False
+        time.sleep(1)
+    return True
+
+def switcher_running():
+    import ctypes; k = ctypes.windll.kernel32; k.OpenMutexW.restype = ctypes.c_void_p
+    h = k.OpenMutexW(0x00100000, False, _switcher_mutex())   # SYNCHRONIZE
+    if h: k.CloseHandle(ctypes.c_void_p(h))
+    return bool(h)
+
+def attach_if_running():
+    """App opened (panel, after an update...) while AoE4 runs without a switcher: start one for that game (no relaunch)."""
+    try:
+        if os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX") and not os.environ.get("AOE4SPOTIFY_ATTACH_TEST"): return False  # tests
+        if not aoe_running() or not load_config().get("enabled", True) or switcher_running(): return False
+        import subprocess
+        cmd = [sys.executable, "--attach"] if FROZEN else [sys.executable, os.path.abspath(__file__), "--attach"]
+        subprocess.Popen(cmd, env=child_env(), creationflags=0x08000000); return True
+    except Exception as e: log("Attach failed: %r" % e); return False
 
 # ---------------------------------------------------------------- Steam launch option
 # The installer calls `AoE4 Spotify.exe --set-launch-option` / `--remove-launch-option`.
@@ -2607,7 +2651,7 @@ def main():
         try: open(os.path.join(os.environ.get("TEMP", "."), "aoe4_fade_selftest.txt"), "w").write(msg)
         except Exception: pass
         return
-    if args[:1] == ["--panel"]: panel(); return        # (--panel --updated: just upgraded, shows "Updated to x.y")
+    if args[:1] == ["--panel"]: attach_if_running(); panel(); return        # (--panel --updated: just upgraded, shows "Updated to x.y")
     cfg = load_config()
     local_guard_restore()
     if args[:1] == ["--dry-run"]:
@@ -2626,16 +2670,24 @@ def main():
     sp = Spotify(cfg)
     if not args:
         # Started by hand / installer Finish page: log in to Spotify, show "You're good to go", exit.
-        login_flow(cfg); return
-    # Started by Steam with the game command (%command%) as args: start the game first.
-    import subprocess
-    game_dir = os.path.dirname(args[0]) if os.path.isfile(args[0]) else None
-    music_sync(cfg.get("enabled", True))           # game reads its music volume at launch
-    subprocess.Popen(args, env=child_env(), cwd=game_dir)
-    log("Started game: %s" % " ".join(args))
-    if not cfg.get("enabled", True): log("Disabled in the app - game started, doing nothing else"); return
-    if not single_instance(): log("Another switcher is already running - exiting"); return
-    if not sp.tok: sp.login()
+        attach_if_running(); login_flow(cfg); return
+    if args[:1] == ["--attach"]:                     # app opened while AoE4 already runs: follow that game
+        if not cfg.get("enabled", True) or not aoe_running(): return
+        if not single_instance(): return
+        if not sp.tok: log("AoE4 is running but you are not logged in to Spotify - switcher not attached"); return
+        log("AoE4 already running - attaching the music switcher")
+    else:
+        # Started by Steam with the game command (%command%) as args: start the game first.
+        import subprocess
+        game_dir = os.path.dirname(args[0]) if os.path.isfile(args[0]) else None
+        music_sync(cfg.get("enabled", True))           # game reads its music volume at launch
+        subprocess.Popen(args, env=child_env(), cwd=game_dir)
+        log("Started game: %s" % " ".join(args))
+        if not cfg.get("enabled", True): log("Disabled in the app - game started, doing nothing else"); return
+        if not wait_single_instance(): log("Another switcher is already running - exiting"); return
+        if not sp.tok:
+            try: sp.login()
+            except SystemExit as e: log("Continuing without Spotify login (%s) - log in from the app and the music starts" % e)
     t0 = time.time()
     while not aoe_running():                    # wait for RelicCardinal.exe (max 5 min)
         if time.time() - t0 > 300: log("AoE4 did not start within 5 minutes - exiting"); return
@@ -2651,6 +2703,9 @@ def main():
     install_after_match(t, sp)
     _on_start = t.on_start
     t.on_start = lambda: jobs.put((_on_start, ()))                           # snapshot before the Dark Age switch, off the lock
+    upd = {}
+    def _upd(): time.sleep(8); upd["setup"] = auto_update(t)                # after catch-up: we know if a match is on
+    threading.Thread(target=_upd, daemon=True).start()
     def stop_check():
         if not load_config().get("enabled", True) and getattr(sp, "_user_mode", None): sp.clear_hold(); sp.hand_back("Disabled")
         return not aoe_running()
@@ -2661,6 +2716,8 @@ def main():
     except Exception as e: log("Hand back failed: %r" % e)
     time.sleep(2); music_sync(load_config().get("enabled", True))   # game rewrote its settings on exit: re-mute / restore
     time.sleep(3)                                     # let a running fade finish
+    if upd.get("setup") and os.path.isfile(upd["setup"]):
+        log("Auto-update: game closed - installing now"); silent_install(upd["setup"])
 
 def install_after_match(t, sp, wait=6.0):
     """Hook the After match setting into a Tracker. Resume: the music playing at match start is saved (unless it is
@@ -5151,6 +5208,39 @@ def run_update(setup):
     import subprocess
     subprocess.Popen([setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RELAUNCH=1",
                       "/LOG=" + os.path.join(DATA, "update_setup.log")], env=child_env(), close_fds=True)
+
+def silent_install(setup):
+    """Invisible upgrade from the switcher: no panel relaunch; setup's post-install '--attach' re-attaches to a running game."""
+    import subprocess
+    subprocess.Popen([setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG=" + os.path.join(DATA, "update_setup.log")],
+                     env=child_env(), close_fds=True, creationflags=0x08000000)
+
+def auto_update(t):
+    """Switcher background thread: newer GitHub release -> download, then install silently only between matches.
+    Returns the downloaded setup path if the install must wait until the game closes, else None. Never raises."""
+    try:
+        if not FROZEN and not os.environ.get("AOE4SPOTIFY_UPDATE_API"): return None      # running from source: never
+        info = check_update(timeout=5)
+        if not info: return None
+        v = info["version"]; mark = os.path.join(DATA, "auto_update.json")
+        try: last = json.load(open(mark, encoding="utf-8"))
+        except Exception: last = {}
+        if isinstance(last, dict) and last.get("v") == v and time.time() - float(last.get("t") or 0) < 6 * 3600:
+            log("Auto-update: %s was already installed recently but this is still %s - not retrying for now" % (v, VERSION)); return None
+        log("Auto-update: %s available - downloading in the background" % v)
+        dest = os.path.join(os.environ.get("TEMP") or DATA, "AoE4.Spotify.Setup-%s.exe" % v)
+        try: download_update(info, dest)
+        except Exception as e: log("Auto-update: download failed (%r) - trying again next launch" % e); return None
+        with t.lock:                                         # no match can start while we decide
+            if t.in_match or t.catching_up:
+                log("Auto-update: %s ready - match in progress, installing after the game closes" % v); return dest
+            log("Auto-update: installing %s now (not in a match); the switcher re-attaches afterwards" % v)
+            try: atomic_write(mark, json.dumps({"v": v, "t": time.time()}))
+            except Exception: pass
+            silent_install(dest)
+        return None
+    except Exception as e:
+        log("Auto-update failed: %r" % e); return None
 
 def load_user(): return load_user_settings()
 
