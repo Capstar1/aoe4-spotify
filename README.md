@@ -8,6 +8,12 @@ Spotify music that follows your ages in **Age of Empires IV**.
 
 <br clear="left">
 
+<p align="center">
+  <img src="assets/screenshots/panel.png" alt="Main panel" height="380">&nbsp;
+  <img src="assets/screenshots/intros.png" alt="Age Intros" height="380">&nbsp;
+  <img src="assets/screenshots/picker.png" alt="Playlist picker" height="380">
+</p>
+
 ## Features
 
 - **Age playlists:** a playlist for Dark, Feudal, Castle and Imperial Age, switched with a smooth fade when you age up.
@@ -43,7 +49,7 @@ See [build.md](build.md).
 
 ## Credits
 
-Made by Capstar, built with Grok Bot.
+Made by Capstar, built with Grok Bot. Original idea by **WujuWarrior**, the reason this project exists.
 
 - Civ flag icons from [aoe4world/overlay](https://github.com/aoe4world/overlay).
 - Character portraits and the *For ...* themes are from OCTOPATH TRAVELER (music is played through Spotify, not included).
