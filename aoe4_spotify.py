@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 GITHUB_URL = "https://github.com/Capstar1/aoe4-spotify"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
@@ -1274,7 +1274,7 @@ def pick_id(pmap, slot, hidx=None):
 
 # ---------------------------------------------------------------- tailing
 CATCHUP_MAX = 2 * 1024 * 1024
-def tail(path, tracker, stop=None):
+def tail(path, tracker, stop=None, skip_older_than=None):
     """Read the whole current log silently (catch-up: learn who you are / current match state),
     then follow new lines live. Handles the log being recreated or truncated."""
     pos, ino, last_check = 0, None, 0
@@ -1293,6 +1293,11 @@ def tail(path, tracker, stop=None):
             log("Log was recreated/truncated (game restarted) - reading from start")
             pos = 0
         ino = key
+        if not caught_up and skip_older_than and st.st_mtime < skip_older_than:
+            # We just launched the game: this log is from the LAST session (the game recreates it in a moment).
+            # Never replay its old matches; only follow what the new session writes.
+            log("Game log is from the previous session - waiting for the new one")
+            pos = st.st_size; caught_up = True; tracker.play = real_play; tracker.catching_up = False
         if not caught_up and pos == 0 and st.st_size > CATCHUP_MAX:
             # Huge log: who you are is near the top; the current match is in the tail. Read only those parts.
             with open(path, "rb") as f:
@@ -2681,6 +2686,7 @@ def main():
         import subprocess
         game_dir = os.path.dirname(args[0]) if os.path.isfile(args[0]) else None
         music_sync(cfg.get("enabled", True))           # game reads its music volume at launch
+        launched_at = time.time() - 2                  # log older than this = previous session
         subprocess.Popen(args, env=child_env(), cwd=game_dir)
         log("Started game: %s" % " ".join(args))
         if not cfg.get("enabled", True): log("Disabled in the app - game started, doing nothing else"); return
@@ -2709,7 +2715,7 @@ def main():
     def stop_check():
         if not load_config().get("enabled", True) and getattr(sp, "_user_mode", None): sp.clear_hold(); sp.hand_back("Disabled")
         return not aoe_running()
-    tail(path, t, stop=stop_check)   # returns ~10s after the game closes
+    tail(path, t, stop=stop_check, skip_older_than=locals().get("launched_at"))   # returns ~10s after the game closes
     log("AoE4 closed - exiting")
     sp.clear_hold()
     try: sp.hand_back("Game closed")
