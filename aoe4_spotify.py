@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 GITHUB_URL = "https://github.com/Capstar1/aoe4-spotify"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
@@ -2239,7 +2239,7 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000):
     def show_done():
         p = P(); st["donev"] = True; done.configure(bg=p["bg"])
         for w_ in done.winfo_children(): w_.destroy()
-        for t_, sz, key, pady in (("\u2714  Done!", 30, "g", (14, 0)), ("You'll get access soon.", 20, "tx", (8, 6)),
+        for t_, sz, key, pady in (("\u2714  Done!", 30, "g", (14, 0)), ("You'll get access in about a minute.", 20, "tx", (8, 6)),
                                   ("Keep this window open or reopen the app later.\nIt continues by itself when it works.", 15, "mu", (0, 30))):
             tk.Label(done, text=t_, font=F(sz, sz != 15), bg=p["bg"], fg=p[key], justify="left").pack(anchor="w", pady=tuple(int(v * S) for v in pady))
         draw()
