@@ -9,9 +9,7 @@ Spotify music that follows your ages in **Age of Empires IV**.
 <br clear="left">
 
 <p align="center">
-  <img src="assets/screenshots/panel.png" alt="Main panel" height="380">&nbsp;
-  <img src="assets/screenshots/intros.png" alt="Age Intros" height="380">&nbsp;
-  <img src="assets/screenshots/picker.png" alt="Playlist picker" height="380">
+  <img src="assets/screenshots/panel.png" alt="Main panel" width="242" align="top">&nbsp;<img src="assets/screenshots/intros.png" alt="Age Intros" width="275" align="top">&nbsp;<img src="assets/screenshots/picker.png" alt="Playlist picker" width="218" align="top">
 </p>
 
 ## Features
