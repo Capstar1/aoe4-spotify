@@ -20,3 +20,5 @@ config.user.json
 patch*.py
 ypsnap.py
 .env
+boss_state.json
+preview_pause.json

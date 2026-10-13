@@ -26,7 +26,7 @@ Spotify music that follows your ages in **Age of Empires IV**.
 
 - Windows 10/11 and Age of Empires IV on **Steam**.
 - **Spotify Premium** and the Spotify desktop app.
-- Access to the app's Spotify login. New users can request it from the app; it is approved by hand.
+- Access to the app's Spotify login. New users can request a seat from the app (approved by hand), or use their own Spotify app from the gear menu.
 
 ## Install
 

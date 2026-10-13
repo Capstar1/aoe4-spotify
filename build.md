@@ -61,9 +61,17 @@ The panel fetches each playlist's name, images and snapshot_id (`GET /playlists/
 
 A preset share code is `AOE4S1:` + base64url (no padding) of zlib-compressed JSON `{v: 1, name, pools: {age: {civ: [track uris]}}, ages: {age: bool}, custom: [{uri, name, artist}]}`. Unknown versions are rejected with an 'update AoE4 Spotify' message; unknown civs/ages are dropped; codes referencing songs they don't include are rejected. Presets live in the user settings (`intro_presets`, `intro_preset`).
 
+## Layout
+
+`aoe4_spotify.py` is the entry point. It loads the `aoe4spotify` package and re-exports every name, so `import aoe4_spotify` still sees the same functions. Game-independent code lives in `aoe4spotify/core/` (Spotify login and playback, settings, the update check, and the window). `aoe4spotify/games/aoe4.py` only reads the Age of Empires IV log and emits events: `lobby`, `match_start`, `age`, `match_end`, `joined`, `session_reset`. The core turns those into playlist changes. `VERSION` stays in `aoe4_spotify.py`. The auto-update flow is unchanged.
+
 ## Request access
 
-If Spotify answers `/me` with 403 'User not registered in the Developer Dashboard', a 3-step guide opens (open Spotify account page, copy email, send). Send POSTs JSON `{email, name, version}` to the Grok Bot routine webhook in config `access_webhook` with `Authorization: Bearer <access_key>` (both overridable in user settings; empty URL = disabled, 'Requests not set up yet'; non-2xx shows 'Couldn't send, try again'), max 1 per 10 min, only on the button. It rechecks every 60 s and on the next panel start, then shows the good-to-go window. Test: `atest.py` (fake webhook).
+If Spotify answers `/me` with 403 "User not registered in the Developer Dashboard", a guide opens.
+
+Shared app: three steps (open the Spotify account page, copy the email, send). Send POSTs JSON `{email}` and, when the panel already knows it, `name`, to `https://capstar.app/api/aoe4-spotify/access-request`. The app does not hold a key. An empty or non-relay URL shows "Requests not set up yet". At most one request per 10 minutes, and only when Send is pressed. The guide rechecks every 60 seconds, and again the next time the panel opens, then shows the good-to-go window.
+
+Bring your own app: the gear menu item "Your Spotify app", or the link on that guide. The user creates an app in the [Spotify dashboard](https://developer.spotify.com/dashboard), adds the redirect `http://127.0.0.1:8888/callback`, adds their account under User Management, and pastes the Client ID. It is saved in `%APPDATA%\AoE4Spotify\config.json` (`client_id` and `own_app`), so an update does not wipe it. Switching apps deletes the saved Spotify login, because a refresh token belongs to the app that issued it. Test: `atest.py`.
 
 ## Fades
 

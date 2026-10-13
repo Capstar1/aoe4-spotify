@@ -1,6 +1,6 @@
 ; Inno Setup script for AoE4 Spotify. Build: ISCC.exe setup.iss (after building the dist\AoE4 Spotify\ folder)
 #ifndef AppVer
-#define AppVer "1.0.7"
+#define AppVer "1.0.8"
 #endif
 #ifdef TEST
 ; test build (ISCC /DTEST): separate AppId/name/folder so it never touches a real install
@@ -38,6 +38,7 @@ Source: "dist\AoE4 Spotify\*"; DestDir: "{app}"; Flags: ignoreversion recursesub
 Source: "config.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"
 Source: "aoe4_spotify.py"; DestDir: "{app}\source"
+Source: "aoe4spotify\*"; DestDir: "{app}\source\aoe4spotify"; Excludes: "*\__pycache__\*,__pycache__\*,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "config.json"; DestDir: "{app}\source"
 Source: "setup.iss"; DestDir: "{app}\source"
 Source: "build.md"; DestDir: "{app}\source"
