@@ -20,7 +20,7 @@ import urllib.error, urllib.parse, urllib.request, webbrowser
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 GITHUB_URL = "https://github.com/Capstar1/aoe4-spotify"
 ASSETS = getattr(sys, "_MEIPASS", HERE)     # bundled assets/ (icon, flags, portraits, gtg_face sprite): _internal next to the exe
 
@@ -136,8 +136,6 @@ def apply_user(cfg, u):
     cfg["playlists"] = {**cfg.get("playlists", {}),
                         **{k: v for k, v in pls.items() if isinstance(v, str) and (v.startswith("spotify:playlist:") or (is_custom(v) and custom_tracks(v, u)))}}
     if isinstance(u.get("enabled"), bool): cfg["enabled"] = u["enabled"]
-    for k in ("access_webhook", "access_key"):                       # request-access endpoint: overridable per user
-        if isinstance(u.get(k), str) and u[k]: cfg[k] = u[k]
     if isinstance(u.get("fade_seconds"), (int, float)): cfg["fade_seconds"] = max(0.0, min(5.0, float(u["fade_seconds"])))
     if isinstance(u.get("boss_intro_enabled"), bool): cfg.setdefault("boss_intro", {})["enabled"] = u["boss_intro_enabled"]
     if isinstance(u.get("after_match"), dict): cfg["after_match"] = u["after_match"]
@@ -1965,28 +1963,47 @@ def access_status(sp):
     if c == 200: return "ok"
     return "blocked" if not_invited(c, r) else None
 
-def webhook_ok(url):
-    if not isinstance(url, str) or not url: return False
-    if url.startswith("https://api2.cursor.sh/automations/webhook/"): return True
-    return bool(test_env("AOE4SPOTIFY_TEST")) and url.startswith("http://127.0.0.1:")
+ACCESS_URL = "https://capstar.app/api/aoe4-spotify/access-request"     # capstar.app relay; holds the routine key server-side
+ACCESS_PREFIX = "https://capstar.app/api/aoe4-spotify/"
 
-def send_access_request(cfg, email, name=None, now=None):
-    """POST one request to the configured Discord webhook. Returns 'sent', 'wait', 'off', 'bad' or 'error'.
+def webhook_ok(url):
+    """Only the capstar.app relay (test mode may also use a local fake server)."""
+    if not isinstance(url, str) or not url: return False
+    if url.startswith(ACCESS_PREFIX): return True
+    return bool(test_env("AOE4SPOTIFY_TEST")) and (url.startswith("http://127.0.0.1:") or url.startswith("http://localhost:"))
+
+def access_url():
+    """The access-request endpoint. Test mode can override it via AOE4SPOTIFY_ACCESS_URL ('' = not set up)."""
+    if test_env("AOE4SPOTIFY_TEST") and os.environ.get("AOE4SPOTIFY_ACCESS_URL") is not None:
+        return os.environ["AOE4SPOTIFY_ACCESS_URL"]
+    return ACCESS_URL
+
+ACCESS_MSG = {"bad": "That email wasn't accepted, check it and try again",
+              "busy": "Too many requests, try again later",
+              "down": "Couldn't reach the server, try later",
+              "error": "Couldn't send, try again"}
+
+def send_access_request(cfg=None, email=None, name=None, now=None):
+    """POST one request to the capstar.app relay (no key in the app).
+    Returns 'sent', 'wait', 'off', 'bad' (invalid email / HTTP 400), 'busy' (429), 'down' (502/503/network) or 'error'.
     Only ever called from the 'Send request' button."""
-    url = cfg.get("access_webhook"); now = now or time.time()
+    url = access_url(); now = now or time.time()
     if not webhook_ok(url): return "off"
     email = clean_email(email); name = clean_name(name)
     if not email: return "bad"
     u = load_user_settings()
     if now - float(u.get("access_last") or 0) < ACCESS_GAP: return "wait"
     hdr = {"Content-Type": "application/json", "User-Agent": "AoE4Spotify/" + VERSION}
-    if cfg.get("access_key"): hdr["Authorization"] = "Bearer " + str(cfg["access_key"])
+    body = {"email": email}
+    if name: body["name"] = name
     try:
-        req = urllib.request.Request(url, data=json.dumps({"email": email, "name": name or None, "version": VERSION}).encode(), headers=hdr, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as r: ok_ = 200 <= r.status < 300
-    except urllib.error.HTTPError as e: log("Access request failed: HTTP %s" % e.code); return "error"
-    except Exception as e: log("Access request failed: %s" % type(e).__name__); return "error"     # never logs the URL/key
-    if not ok_: return "error"
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=hdr, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as r: code = r.status
+    except urllib.error.HTTPError as e: code = e.code
+    except Exception as e: log("Access request failed: %s" % type(e).__name__); return "down"     # never logs the URL
+    if not 200 <= code < 300:
+        log("Access request failed: HTTP %s" % code)
+        return {400: "bad", 429: "busy", 502: "down", 503: "down"}.get(code, "error")
     merge_user({"access_last": now, "access_pending": True}); log("Access request sent")
     return "sent"
 
@@ -2033,7 +2050,7 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000):
     win.bind("<Destroy>", lambda e: release_window("access") if e.widget is win else None, add="+")
     S = win.winfo_fpixels("1i") / 96.0; F = lambda sz, b=True: ("Segoe UI", -int(round(sz * S)), "bold" if b else "normal")
     cfg = load_config(); st = {"sent": False, "job": None, "clip": None, "allowed": False, "hov": None, "focus": False, "b3": "disabled", "b3t": "Send request", "note": None}
-    on = webhook_ok(cfg.get("access_webhook"))
+    on = webhook_ok(access_url())
     st["note"] = ("" if on else "Requests not set up yet", "mu")
     # ---- grid (logical px)
     W = 500; M = 20; PAD = 18; BD = 36; GAP = 12
@@ -2234,7 +2251,7 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000):
             def fin():
                 st["b3t"] = "Send request"
                 if r in ("sent", "wait"): st["sent"] = True; show_done()     # 'wait': asked recently - same friendly end
-                else: note.config(text="Couldn't send, try again", fg="err")
+                else: note.config(text=ACCESS_MSG.get(r, ACCESS_MSG["error"]), fg="err")
                 win._res = r
             uiq.append(fin)                            # Tk is only touched on the UI thread
         threading.Thread(target=go, daemon=True).start()
