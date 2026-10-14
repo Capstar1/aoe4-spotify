@@ -9,9 +9,17 @@ function show(page) {
   document.querySelectorAll(".page").forEach((p) => p.classList.toggle("on", p.id === page));
   requestAnimationFrame(() => { $("perf").textContent = `page switch ${(performance.now() - t0).toFixed(1)} ms`; });
 }
-$("go-intros").onclick = () => show("intros");
-$("back").onclick = () => show("main");
-document.addEventListener("keydown", (e) => { if ((e.key === "Escape" || e.key === "Backspace") && $("intros").classList.contains("on")) show("main"); });
+const SIZE = { main: [430, 420], intros: [520, 560] };
+let ORDER = ""; invoke("cfg").then((c) => (ORDER = c.order));
+async function go(page) {
+  const [w, h] = SIZE[page];
+  if (ORDER === "size_first") { await invoke("resize", { w, h }); show(page); }
+  else { show(page); await invoke("resize", { w, h }); }
+}
+window.go = go;
+$("go-intros").onclick = () => go("intros");
+$("back").onclick = () => go("main");
+document.addEventListener("keydown", (e) => { if ((e.key === "Escape" || e.key === "Backspace") && $("intros").classList.contains("on")) go("main"); });
 
 $("spbtn").onclick = () => invoke(lastS && lastS.spotify.logged_in ? "logout" : "login");
 $("real").onchange = e => invoke("set_real", { on: e.target.checked });

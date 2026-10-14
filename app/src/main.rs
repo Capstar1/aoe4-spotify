@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![windows_subsystem = "windows"]
 //! M1 shell: one fixed-size window; the core follows the game log. Real playback is OFF by default (dry run)
 //! so 1.1 never fights the 1.0.9 app over Spotify; the toggle is saved in %APPDATA%\AoE4Spotify-1.1.
 use aoe4core::aoe4::Aoe4;
@@ -100,6 +100,55 @@ fn get_state(app: tauri::State<Arc<AppState>>) -> serde_json::Value {
         "spotify": { "logged_in": logged_in, "real": app.real.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
 }
 
+mod win {
+    #[repr(C)] #[derive(Default, Clone, Copy)] pub struct Rect { pub l: i32, pub t: i32, pub r: i32, pub b: i32 }
+    #[link(name = "user32")] extern "system" {
+        pub fn GetWindowRect(h: isize, r: *mut Rect) -> i32;
+        pub fn GetClientRect(h: isize, r: *mut Rect) -> i32;
+        pub fn SetWindowPos(h: isize, after: isize, x: i32, y: i32, w: i32, hh: i32, f: u32) -> i32;
+    }
+}
+
+/// Page switch resize, 1.0.9 rules: client becomes w x h (logical px), centred horizontally, title bar stays put.
+/// One SetWindowPos so size and position change in the same step.
+#[tauri::command]
+fn resize(window: tauri::WebviewWindow, w: f64, h: f64) {
+    let hwnd = window.hwnd().map(|x| x.0 as isize).unwrap_or(0);
+    let k = window.scale_factor().unwrap_or(1.0);
+    let (mut o, mut c) = (win::Rect::default(), win::Rect::default());
+    unsafe { win::GetWindowRect(hwnd, &mut o); win::GetClientRect(hwnd, &mut c); }
+    let (bw, bh) = ((o.r - o.l) - c.r, (o.b - o.t) - c.b);
+    let (nw, nh) = ((w * k).round() as i32 + bw, (h * k).round() as i32 + bh);
+    let x = o.l + ((o.r - o.l) - nw) / 2;
+    unsafe { win::SetWindowPos(hwnd, 0, x, o.t, nw, nh, 0x0004 | 0x0010); }   // NOZORDER | NOACTIVATE
+}
+
+fn wall() -> f64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0) }
+
+/// AOE4S_SWITCHTEST=<dir>: drive N page switches for the frame-capture harness, then quit.
+fn switch_test(win_: tauri::WebviewWindow, dir: PathBuf) {
+    std::thread::sleep(Duration::from_secs(3));
+    let hwnd = win_.hwnd().map(|x| x.0 as isize).unwrap_or(0);
+    let mut o = win::Rect::default(); unsafe { win::GetWindowRect(hwnd, &mut o); }
+    let _ = std::fs::write(dir.join("rect.json"), format!("{{\"x\": {}, \"y\": {}}}", o.l, o.t));
+    let _ = std::fs::write(dir.join("ready"), "");
+    std::thread::sleep(Duration::from_millis(1500));
+    let n: usize = std::env::var("AOE4S_N").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+    let mut ev = vec![];
+    for i in 0..n {
+        let name = if i % 2 == 0 { "open" } else { "close" };
+        let t0 = wall();
+        let _ = win_.eval(if i % 2 == 0 { "go(\"intros\")" } else { "go(\"main\")" });
+        std::thread::sleep(Duration::from_millis(60));
+        ev.push(format!("[\"{name}\", {t0}]")); ev.push(format!("[\"{name}_end\", {}]", t0 + 0.06));
+        std::thread::sleep(Duration::from_millis(640));
+    }
+    let _ = std::fs::write(dir.join("events.json"), format!("[{}]", ev.join(",")));
+    let _ = std::fs::write(dir.join("done"), "");
+    std::thread::sleep(Duration::from_millis(800));
+    std::process::exit(0);
+}
+
 #[tauri::command]
 fn login(app: tauri::State<Arc<AppState>>) {
     if app.busy.swap(true, Ordering::SeqCst) { return; }
@@ -111,6 +160,9 @@ fn login(app: tauri::State<Arc<AppState>>) {
         a.busy.store(false, Ordering::SeqCst);
     });
 }
+
+#[tauri::command]
+fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default() }) }
 
 #[tauri::command]
 fn logout(app: tauri::State<Arc<AppState>>) { app.real.store(false, Ordering::SeqCst); save_prefs(&app); app.spotify.lock().unwrap().logout(); push(&app.status, "Spotify: logged out, real playback off".into()); }
@@ -137,7 +189,8 @@ fn main() {
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));
     tauri::Builder::default()
         .manage(app)
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real])
+        .setup(|a| { if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
 }

@@ -1,4 +1,4 @@
-﻿//! Spotify Web API client for 1.1: PKCE login with its OWN token file (separate from 1.0.9), playback,
+//! Spotify Web API client for 1.1: PKCE login with its OWN token file (separate from 1.0.9), playback,
 //! volume fades through the API, and putting your previous music back after the match. Tokens are never logged.
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
@@ -84,7 +84,7 @@ impl Spotify {
         let listener = TcpListener::bind("127.0.0.1:8888").map_err(|_| "Port 8888 is busy (is a 1.0.9 login window open?)".to_string())?;
         let url = format!("https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&code_challenge_method=S256&code_challenge={}&scope={}&state={}",
             enc(&self.cid), enc(REDIRECT), challenge(&verifier), enc(SCOPES), state);
-        std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn().map_err(|e| e.to_string())?;
+        { use std::os::windows::process::CommandExt; std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).creation_flags(0x0800_0000).spawn() }.map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).ok();
         let deadline = Instant::now() + Duration::from_secs(180);
         let code = loop {

@@ -6,7 +6,7 @@
   "build": { "frontendDist": "../ui" },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "title": "AoE4 Spotify (1.1 preview)", "width": 520, "height": 640, "resizable": false, "maximizable": false, "center": true, "backgroundColor": "#121212" }],
+    "windows": [{ "title": "AoE4 Spotify (1.1 preview)", "label": "main", "width": 430, "height": 420, "resizable": false, "maximizable": false, "center": true, "backgroundColor": "#121212" }],
     "security": { "csp": null }
   },
   "bundle": { "active": false, "icon": ["icons/icon.ico"] }
