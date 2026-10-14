@@ -114,7 +114,7 @@ mod win {
 #[tauri::command]
 fn resize(window: tauri::WebviewWindow, w: f64, h: f64) {
     let hwnd = window.hwnd().map(|x| x.0 as isize).unwrap_or(0);
-    let k = window.scale_factor().unwrap_or(1.0);
+    let k = window.scale_factor().unwrap_or(1.0) * zoom();
     let (mut o, mut c) = (win::Rect::default(), win::Rect::default());
     unsafe { win::GetWindowRect(hwnd, &mut o); win::GetClientRect(hwnd, &mut c); }
     let (bw, bh) = ((o.r - o.l) - c.r, (o.b - o.t) - c.b);
@@ -123,10 +123,13 @@ fn resize(window: tauri::WebviewWindow, w: f64, h: f64) {
     unsafe { win::SetWindowPos(hwnd, 0, x, o.t, nw, nh, 0x0004 | 0x0010); }   // NOZORDER | NOACTIVATE
 }
 
+fn zoom() -> f64 { std::env::var("AOE4S_ZOOM").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0) }
+
 fn wall() -> f64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0) }
 
 /// AOE4S_SWITCHTEST=<dir>: drive N page switches for the frame-capture harness, then quit.
 fn switch_test(win_: tauri::WebviewWindow, dir: PathBuf) {
+    let _ = win_.set_always_on_top(true);
     std::thread::sleep(Duration::from_secs(3));
     let hwnd = win_.hwnd().map(|x| x.0 as isize).unwrap_or(0);
     let mut o = win::Rect::default(); unsafe { win::GetWindowRect(hwnd, &mut o); }
@@ -189,7 +192,8 @@ fn main() {
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));
     tauri::Builder::default()
         .manage(app)
-        .setup(|a| { if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
+        .setup(|a| { use tauri::Manager; if zoom() != 1.0 { let _ = a.get_webview_window("main").unwrap().set_zoom(zoom()); }
+            if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
         .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");

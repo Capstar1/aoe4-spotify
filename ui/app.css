@@ -1,24 +1,9 @@
-* { box-sizing: border-box; margin: 0; }
-html, body { width: 100%; height: 100%; overflow: hidden; background: #121212; color: #f2f2f2; font: 13px "Segoe UI", sans-serif; user-select: none; }
-.page { position: absolute; inset: 0; padding: 14px 16px; display: none; flex-direction: column; gap: 10px; }
-.page.on { display: flex; }
-header { display: flex; align-items: center; gap: 10px; height: 36px; }
-h1 { font-size: 17px; font-weight: 600; } h2 { font-size: 12px; color: #9a9a9a; font-weight: 600; margin-bottom: 6px; }
-.logo { width: 28px; height: 28px; border-radius: 50%; background: #1DB954; color: #0a0a0a; font-weight: 700; display: grid; place-items: center; font-size: 12px; }
-.ver { color: #9a9a9a; font-size: 11px; background: #2a2a2a; padding: 1px 6px; border-radius: 8px; }
-.card { background: #1f1f1f; border-radius: 14px; padding: 10px 12px; }
-.row { display: flex; align-items: center; gap: 8px; } .sp { flex: 1; }
-.link { cursor: pointer; } .link:hover { background: #262626; }
-.dot { width: 9px; height: 9px; border-radius: 50%; background: #555; } .dot.on { background: #1DB954; }
-.pill { font-size: 11px; color: #f0a030; border: 1px solid #f0a030; border-radius: 9px; padding: 0 7px; }
-.pl { display: flex; align-items: center; gap: 8px; padding: 5px 0; color: #ddd; } .pl b { width: 70px; font-weight: 600; } .pl i { color: #9a9a9a; font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pl.now b { color: #1DB954; }
-.crown { color: #1DB954; font-size: 16px; } .chev { color: #9a9a9a; font-size: 20px; }
-.pip { display: inline-block; width: 18px; height: 18px; border-radius: 50%; border: 1px solid #444; font-size: 10px; text-align: center; line-height: 16px; margin-left: 3px; color: #9a9a9a; } .pip.on { background: #1DB954; color: #0a0a0a; border-color: #1DB954; }
-.log { height: 150px; overflow: auto; font: 11px Consolas, monospace; color: #bbb; white-space: pre-wrap; }
-footer { color: #555; font-size: 10px; margin-top: auto; }
-.back { width: 32px; height: 32px; border-radius: 50%; border: 0; background: #2a2a2a; color: #f2f2f2; font-size: 20px; cursor: pointer; }
-.age { background: #1f1f1f; border-radius: 14px; padding: 14px; display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
-.age .num { width: 30px; height: 30px; border-radius: 50%; background: #2a2a2a; display: grid; place-items: center; color: #9a9a9a; }
-.age.on .num { background: #1DB954; color: #0a0a0a; }
-.hint { color: #777; font-size: 11px; text-align: center; margin-top: auto; }.btn{font:inherit;font-size:12px;padding:3px 10px;margin-right:8px;border-radius:6px;border:1px solid #3a4a3a;background:#1d2a1f;color:#d8e8d8;cursor:pointer}.btn:disabled{opacity:.5}.tog{font-size:12px;display:flex;gap:4px;align-items:center}.pill.live{background:#1db954;color:#06110a}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #121212; user-select: none; -webkit-font-smoothing: antialiased; }
+body { font-family: "Segoe UI", sans-serif; color: #f2f2f2; cursor: default; }
+.page { position: absolute; left: 0; top: 0; display: none; }
+.page.on { display: block; }
+.a { position: absolute; }
+.t { position: absolute; white-space: nowrap; line-height: 1.33; }
+.hit { cursor: pointer; }
+img.a { image-rendering: auto; }
