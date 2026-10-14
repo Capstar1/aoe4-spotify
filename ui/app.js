@@ -13,7 +13,15 @@ $("go-intros").onclick = () => show("intros");
 $("back").onclick = () => show("main");
 document.addEventListener("keydown", (e) => { if ((e.key === "Escape" || e.key === "Backspace") && $("intros").classList.contains("on")) show("main"); });
 
+$("spbtn").onclick = () => invoke(lastS && lastS.spotify.logged_in ? "logout" : "login");
+$("real").onchange = e => invoke("set_real", { on: e.target.checked });
+let lastS = null;
 function render(s) {
+  lastS = s; const sp = s.spotify;
+  $("sptxt").textContent = sp.busy ? "Spotify: waiting for browser login..." : sp.logged_in ? "Spotify: logged in" : "Spotify: not logged in (1.1)";
+  $("spbtn").textContent = sp.logged_in ? "Log out" : "Log in"; $("spbtn").disabled = sp.busy;
+  $("real").checked = sp.real; $("real").disabled = !sp.logged_in && !sp.real;
+  $("mode").textContent = sp.real ? "REAL playback" : "dry run"; $("mode").classList.toggle("live", sp.real);
   const st = s.status, set = s.settings;
   $("gdot").classList.toggle("on", st.in_match);
   $("gtxt").textContent = st.in_match ? `${st.game}: in a match${st.age ? " (" + st.age + ")" : ""}` : st.watching ? `${st.game}: watching log` : `${st.game}: log not found`;

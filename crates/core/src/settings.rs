@@ -11,6 +11,9 @@ pub struct Settings {
     pub playlist_names: HashMap<String, String>,
     pub intro_ages: HashMap<String, bool>,
     pub log_path: Option<String>,
+    /// public PKCE app id from the install config (not shown in the UI)
+    #[serde(skip)]
+    pub client_id: String,
 }
 
 fn read(p: &Path) -> Value { std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null) }
@@ -33,6 +36,7 @@ pub fn load(install_cfg: &Path, user_cfg: &Path, names: &Path) -> Settings {
         playlists,
         playlist_names: str_map(&read(names)),
         intro_ages,
+        client_id: base["client_id"].as_str().unwrap_or_default().to_string(),
         log_path: get("log_path").as_str().filter(|s| !s.is_empty()).map(|s| s.to_string()),
     }
 }

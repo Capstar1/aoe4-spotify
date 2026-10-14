@@ -21,4 +21,4 @@ footer { color: #555; font-size: 10px; margin-top: auto; }
 .age { background: #1f1f1f; border-radius: 14px; padding: 14px; display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .age .num { width: 30px; height: 30px; border-radius: 50%; background: #2a2a2a; display: grid; place-items: center; color: #9a9a9a; }
 .age.on .num { background: #1DB954; color: #0a0a0a; }
-.hint { color: #777; font-size: 11px; text-align: center; margin-top: auto; }
+.hint { color: #777; font-size: 11px; text-align: center; margin-top: auto; }.btn{font:inherit;font-size:12px;padding:3px 10px;margin-right:8px;border-radius:6px;border:1px solid #3a4a3a;background:#1d2a1f;color:#d8e8d8;cursor:pointer}.btn:disabled{opacity:.5}.tog{font-size:12px;display:flex;gap:4px;align-items:center}.pill.live{background:#1db954;color:#06110a}
