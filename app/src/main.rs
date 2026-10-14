@@ -236,6 +236,70 @@ async fn preview(app: tauri::State<'_, Arc<AppState>>, uri: Option<String>) -> R
     }).await.map_err(|e| e.to_string())?
 }
 
+/// Add a song (M3): one Spotify track -> {uri,name,artist,img}.
+fn norm(t: &serde_json::Value) -> Option<serde_json::Value> {
+    let u = t["uri"].as_str()?; if !u.starts_with("spotify:track:") { return None; }
+    let imgs = t["album"]["images"].as_array().cloned().unwrap_or_default();
+    let img = imgs.iter().min_by_key(|i| (i["width"].as_i64().unwrap_or(640) - 64).abs()).and_then(|i| i["url"].as_str()).unwrap_or("");
+    let ar = t["artists"].as_array().map(|a| a.iter().take(2).filter_map(|x| x["name"].as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    Some(serde_json::json!({ "uri": u, "name": t["name"].as_str().unwrap_or("Song"), "artist": ar, "img": img }))
+}
+fn fake_sp(kind: &str, arg: &str) -> serde_json::Value {
+    let tr = |k: usize, n: &str| serde_json::json!({ "uri": format!("spotify:track:{}", k.to_string().repeat(22)), "name": n, "artist": "Yasunori Nishiki", "img": "" });
+    match kind {
+        "playlists" => serde_json::json!([{ "id": "liked", "name": "Liked Songs", "n": 212 }, { "id": "p1", "name": "Octopath favourites", "n": 38 }, { "id": "p2", "name": "Game OSTs", "n": 64 }]),
+        "plist" => serde_json::json!([tr(5, "Main Theme"), tr(6, "Battle at the Gate"), tr(7, "Cyrus, the Scholar"), tr(8, "Decisive Battle II"), tr(9, "Ophilia's Theme"), tr(3, &format!("From {arg}"))]),
+        "tracks" => serde_json::Value::Array(arg.split(',').map(|i| serde_json::json!({ "uri": format!("spotify:track:{i}"), "name": format!("Dropped {}", &i[..4.min(i.len())]), "artist": "Test", "img": "" })).collect()),
+        "playing" => serde_json::json!([tr(4, "Now Playing Song")]),
+        _ => serde_json::json!([tr(1, &format!("{arg} 1")), tr(2, &format!("{arg} 2"))]),
+    }
+}
+#[tauri::command]
+async fn sp(app: tauri::State<'_, Arc<AppState>>, kind: String, arg: String) -> Result<serde_json::Value, String> {
+    use serde_json::{json, Value};
+    if std::env::var_os("AOE4S_FAKESP").is_some() { return Ok(fake_sp(&kind, &arg)); }
+    let a = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = a.spotify.lock().unwrap();
+        if !s.logged_in() { return Ok(json!("login")); }
+        let ok = |r: Result<(u16, Value), String>| -> Result<Value, String> { let (c, v) = r?; if (200..300).contains(&c) { Ok(v) } else { Err(format!("Spotify error {c}: {}", v["error"]["message"].as_str().unwrap_or(""))) } };
+        let list = |v: &Value| -> Value { Value::Array(v.as_array().cloned().unwrap_or_default().iter().filter_map(|i| norm(if i["track"].is_object() { &i["track"] } else if i["item"].is_object() { &i["item"] } else { i })).collect()) };
+        match kind.as_str() {
+            "search" => { let v = ok(s.get(&format!("/search?type=track&limit=10&q={}", aoe4core::spotify::enc(&arg))))?; Ok(list(&v["tracks"]["items"])) }
+            "playlists" => { let v = ok(s.get("/me/playlists?limit=50"))?; let mut o = vec![json!({ "id": "liked", "name": "Liked Songs", "n": Value::Null })];
+                for p in v["items"].as_array().cloned().unwrap_or_default() { if let Some(id) = p["id"].as_str() { o.push(json!({ "id": id, "name": p["name"], "n": if p["tracks"]["total"].is_null() { p["items"]["total"].clone() } else { p["tracks"]["total"].clone() } })); } }
+                Ok(Value::Array(o)) }
+            "plist" => { if arg == "liked" { let v = ok(s.get("/me/tracks?limit=50"))?; return Ok(list(&v["items"])); }
+                let id: String = arg.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+                let v = match ok(s.get(&format!("/playlists/{id}/items?limit=100"))) { Ok(v) => v, Err(_) => ok(s.get(&format!("/playlists/{id}/tracks?limit=100")))? }; Ok(list(&v["items"])) }
+            "tracks" => { let ids: Vec<String> = arg.split(',').map(|i| i.chars().filter(|c| c.is_ascii_alphanumeric()).collect()).filter(|i: &String| i.len() == 22).take(50).collect();
+                if let Ok(v) = ok(s.get(&format!("/tracks?ids={}", ids.join(",")))) { return Ok(list(&v["tracks"])); }
+                let mut o = vec![]; for i in ids { if let Ok(v) = ok(s.get(&format!("/tracks/{i}"))) { if let Some(t) = norm(&v) { o.push(t); } } } Ok(Value::Array(o)) }
+            "playing" => { let v = ok(s.get("/me/player/currently-playing"))?; Ok(Value::Array(norm(&v["item"]).into_iter().collect())) }
+            _ => Err("unknown".into()),
+        }
+    }).await.map_err(|e| e.to_string())?
+}
+/// New songs' covers go to 1.1's own cache (the 1.0.9 cache is only read).
+#[tauri::command]
+fn cache_covers(app: tauri::State<Arc<AppState>>, items: Vec<serde_json::Value>) {
+    let a = app.inner().clone();
+    std::thread::spawn(move || { let dir = a.dir.join("covers"); let _ = std::fs::create_dir_all(&dir);
+        for it in items { let (Some(u), Some(img)) = (it["uri"].as_str(), it["img"].as_str()) else { continue };
+            let id: String = u.rsplit(':').next().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric()).collect(); let p = dir.join(format!("track_{id}.jpg"));
+            if img.starts_with("https://") && !p.exists() { let b = a.spotify.lock().unwrap().fetch(img); if let Ok(b) = b { let _ = std::fs::write(&p, b); } } } });
+}
+#[tauri::command]
+async fn open_add(app: tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("add") { let _ = w.unminimize(); let _ = w.set_focus(); return; }
+    let main = app.get_webview_window("main"); let z = zoom();
+    let mut b = tauri::WebviewWindowBuilder::new(&app, "add", tauri::WebviewUrl::App("add.html".into())).title("AoE4 Spotify").inner_size(416.0 * z, 560.0 * z)
+        .resizable(false).maximizable(false).minimizable(false).theme(Some(tauri::Theme::Dark)).background_color(tauri::window::Color(33, 33, 33, 255)).disable_drag_drop_handler().visible(false);
+    if let Some(m) = &main { if let (Ok(p), Ok(sz)) = (m.outer_position(), m.outer_size()) { b = b.position((p.x as f64 + sz.width as f64 + 4.0) / m.scale_factor().unwrap_or(1.0), (p.y as f64 + 40.0) / m.scale_factor().unwrap_or(1.0)); } b = b.parent(m).unwrap_or_else(|e| panic!("{e}")); }
+    if let Ok(w) = b.build() { if z != 1.0 { let _ = w.set_zoom(z); } let _ = w.show(); let _ = w.set_focus(); }
+}
+
 #[tauri::command]
 fn login(app: tauri::State<Arc<AppState>>) {
     if app.busy.swap(true, Ordering::SeqCst) { return; }
@@ -255,6 +319,7 @@ fn cover(uri: String) -> Option<String> {
     let dir = PathBuf::from(std::env::var("APPDATA").ok()?).join(r"AoE4Spotify\covers");
     let id = uri.rsplit(':').next()?.to_string();
     if uri.contains(":list:") { let b = std::fs::read(dir.join(format!("list_{id}.png"))).ok()?; return Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))); }
+    if uri.starts_with("spotify:track:") { if let Ok(b) = std::fs::read(dir.parent()?.join(format!(r"AoE4Spotify-1.1\covers\track_{id}.jpg"))) { return Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))); } }
     let path = if uri.starts_with("spotify:track:") { dir.join(format!("track_{id}.jpg")) } else {
         std::fs::read_dir(&dir).ok()?.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{id}_")))
             .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())?.path() };
@@ -325,7 +390,7 @@ async fn check_update() -> String {
 }
 
 #[tauri::command]
-fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some(), "menutest": std::env::var_os("AOE4S_MENUTEST").is_some(), "open": std::env::var("AOE4S_OPEN").unwrap_or_default(), "edtest": std::env::var_os("AOE4S_EDTEST").is_some() }) }
+fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some(), "menutest": std::env::var_os("AOE4S_MENUTEST").is_some(), "open": std::env::var("AOE4S_OPEN").unwrap_or_default(), "edtest": std::env::var_os("AOE4S_EDTEST").is_some(), "addtest": std::env::var_os("AOE4S_ADDTEST").is_some() }) }
 
 #[tauri::command]
 fn logout(app: tauri::State<Arc<AppState>>) { app.real.store(false, Ordering::SeqCst); save_prefs(&app); app.spotify.lock().unwrap().logout(); push(&app.status, "Spotify: logged out, real playback off".into()); }
@@ -354,7 +419,7 @@ fn main() {
         .manage(app)
         .setup(|a| { use tauri::Manager; if let Some(h) = a.get_webview_window("main").and_then(|w| w.hwnd().ok()) { shadow::init(h.0 as isize); } if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, dbg, menu, check_update])
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, sp, cache_covers, open_add, dbg, menu, check_update])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
 }

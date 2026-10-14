@@ -255,7 +255,7 @@ let lastJ = "";
 async function tick() {
   try { const v0 = window.EDV || 0; const s = await invoke("get_state"); if ((window.EDV || 0) !== v0) { setTimeout(tick, 100); return; } const j = JSON.stringify([s.settings, s.spotify, s.status.in_match, s.status.age, s.status.watching, s.intros]);
     if (j !== lastJ) { const first = !lastJ; lastJ = j; render(s); if (first) { await apply("main"); invoke("cfg").then((c) => { if (c.open) setTimeout(() => { const [pg, k, tr, hv, pl, x] = c.open.split(":"); if (tr) S.ed.intro_pack_open = tr === "octo"; if (pg === "age") openAge(k); else go(pg);
-      setTimeout(() => { const d = S.agedata; if (hv) { age.hovTray = +hv; redraw(); } if (pl) { age.song = d.songs[+pl][0]; redraw(); } shotState(x); if (x === "dom") domDump(); }, 300); }, 300); if (c.edtest) setTimeout(() => edTest().catch((e) => invoke("dbg", { s: "ERROR " + e.stack })), 1500); if (c.menutest) setTimeout(() => menuTest().catch((e) => invoke("dbg", { s: "ERROR " + e + "\n" + (window.__mt || []).join("\n") })), 1500); }); } else await redraw(); } } catch (e) { console.error(e); }
+      setTimeout(() => { const d = S.agedata; if (hv) { age.hovTray = +hv; redraw(); } if (pl) { age.song = d.songs[+pl][0]; redraw(); } shotState(x); if (x === "dom") domDump(); }, 300); }, 300); if (c.addtest) setTimeout(addTest, 1500); if (c.edtest) setTimeout(() => edTest().catch((e) => invoke("dbg", { s: "ERROR " + e.stack })), 1500); if (c.menutest) setTimeout(() => menuTest().catch((e) => invoke("dbg", { s: "ERROR " + e + "\n" + (window.__mt || []).join("\n") })), 1500); }); } else await redraw(); } } catch (e) { console.error(e); }
   setTimeout(tick, 500);
 }
 tick();

@@ -192,7 +192,10 @@ function drawAge(s) {
     hov(h, () => g.srcset = g.srcset.replaceAll("undo_mu@", "undo_tx@"), () => g.srcset = g.srcset.replaceAll("undo_tx@", "undo_mu@")); tipOn(h, ["reset"], "Reset this age", tipR(W - 31, HY - 10, W - 13, HY + 10)); }
   // tray
   rr(20, 70, W - 20, 162, 18, "#1a1a1a", LN); text(36, 81, "OCTOPATH", 8.5, C.mu, true);
-  const L = trayLayout(d, u); text(L.div + 14, 81, "YOURS", 8.5, C.acc, true); el("div", "a", { left: L.div + "px", top: "84px", width: "1px", height: "66px", background: LN });
+  const L = trayLayout(d, u);
+  if (age.dropOver) { const g = rr(L.div + 2, 72, W - 22, 160, 14, "rgba(29,185,84,.10)", C.acc); g.style.borderWidth = "2px"; g.style.boxShadow = "0 0 10px rgba(30,215,96,.35)"; }
+  text(L.div + 14, 81, age.dropOver ? "DROP TO ADD" : "YOURS", 8.5, C.acc, true);
+  if (!age.dropOver) text(L.plus.cx, 150, "or drop songs here", 8.5, "#7a7a7a", false, "center"); el("div", "a", { left: L.div + "px", top: "84px", width: "1px", height: "66px", background: LN });
   if (L.emblem) { const e = aimg("emblem", EX, TY), h = hit(oval(EX - ER, TY - ER, EX + ER, TY + ER, "transparent"), () => setPackOpen(true));
     tipOn(h, ["pack"], `Octopath Traveler \u2014 ${d.nb} songs (click to show)`, tipR(EX - ER, TY - ER - 3, EX + ER, TY + ER + 3));
     hov(h, () => e.srcset = e.srcset.replaceAll("emblem@", "emblem_h@"), () => e.srcset = e.srcset.replaceAll("emblem_h@", "emblem@")); }
@@ -207,7 +210,7 @@ function drawAge(s) {
   if (L.count) { const { cx, r, n } = L.count, o = oval(cx - r - 0.5, TY - r - 0.5, cx + r + 0.5, TY + r + 0.5, null); o.style.border = "1.6px solid " + C.acc;
     text(cx, TY, String(n), 14, C.acc, true, "center"); const h = hit(oval(cx - r, TY - r, cx + r, TY + r, "transparent"), () => setPackOpen(false));
     tipOn(h, ["count"], `Your songs (${n}) \u2014 click to show`, tipR(cx - r, TY - r - 3, cx + r, TY + r + 3)); hov(h, () => o.style.background = "rgba(29,185,84,.15)", () => o.style.background = "transparent"); }
-  const pl = aimg("plus", L.plus.cx, TY, L.plus.r / 19), ph = hit(oval(L.plus.cx - L.plus.r, TY - L.plus.r, L.plus.cx + L.plus.r, TY + L.plus.r, "transparent"), () => hint("Add a song comes in M3", L.plus.cx, TY));
+  const pl = aimg("plus", L.plus.cx, TY, L.plus.r / 19), ph = hit(oval(L.plus.cx - L.plus.r, TY - L.plus.r, L.plus.cx + L.plus.r, TY + L.plus.r, "transparent"), () => { tip.hide(); invoke("open_add"); });
   hov(ph, () => pl.srcset = pl.srcset.replaceAll("plus@", "plus_h@"), () => pl.srcset = pl.srcset.replaceAll("plus_h@", "plus@"));
   L.chips.forEach(({ i, cx, r }, n) => { const sg = d.songs[i], nx = L.chips[n + 1];
     const right = nx && nx.cx - nx.r < cx + r ? (nx.cx - nx.r) : cx + r;   // a squeezed chip is only clickable where it is visible
@@ -221,6 +224,7 @@ function drawAge(s) {
     age.ghost = songChip(age.drag.song, gx, gy, 19); age.ghost.style.zIndex = 5; }
   if (age.msg && Date.now() - age.msgT < 2600) { const [m, x, y] = age.msg, tw = measure(m, 10) + 20, x0 = Math.min(Math.max(8, x - tw / 2), W - 8 - tw), ty = Math.min(Math.max(8, y + 26), H - 32);
     rr(x0, ty, x0 + tw, ty + 24, 12, "#1c3a26", C.acc); text(x0 + tw / 2, ty + 12, m, 10, C.tx, false, "center"); }
+  if (age.dropOver) { const m = "Drop to add to YOURS", tw = measure(m, 10) + 28; rr(W / 2 - tw / 2, H - 30, W / 2 + tw / 2, H - 8, 11, "#143c23", C.acc); text(W / 2, H - 19, m, 10, C.acc, true, "center"); }
   age.fadeIn = false;
   return H;
 }
@@ -352,3 +356,63 @@ async function shotState(x) {   // AOE4S_OPEN extras for screenshots
 }
 async function domDump() { await new Promise((r) => setTimeout(r, 800)); const ks = [...$("age").children].map((e) => e.className + (e.className === "glowf" ? "(" + e.style.left + "," + getComputedStyle(e).opacity + "," + getComputedStyle(e).backgroundImage.slice(0, 60) + "," + getComputedStyle(e).backgroundSize + "," + getComputedStyle(e).backgroundPosition + ")" : e.className === "chip" ? "@" + e.style.left : ""));
   const i = ks.findIndex((k) => k.startsWith("glowf")); await invoke("dbg", { s: ks.slice(Math.max(0, i - 4), i + 4).join("\n") }); }
+
+// ---- M3 Add a song: drop Spotify songs/links anywhere on the age page (or the Add a song window) -> YOURS. One undo per add.
+const TRK = /(?:open\.spotify\.com\/(?:intl-[a-z-]+\/)?track\/|spotify:track:)([A-Za-z0-9]{22})/g, META = {};
+const trackIds = (t) => [...new Set([...String(t || "").matchAll(TRK)].map((m) => m[1]))];
+const haveUris = () => songsOf(S.ed).map((x) => x[3]);
+const EVT = window.__TAURI__.event, toAdd = (m, err) => EVT.emitTo("add", "say", [m, !!err]).catch(() => {});
+function addSongs(items) {
+  const u = clone(S.ed), have = new Set(haveUris()), cs = [...(u.custom_songs || [])], fresh = [];
+  for (const it of items || []) if (it && /^spotify:track:[A-Za-z0-9]{22}$/.test(it.uri) && !have.has(it.uri)) { have.add(it.uri); fresh.push(it); cs.push({ uri: it.uri, name: String(it.name || "Song").slice(0, 80), artist: String(it.artist || "").slice(0, 80) }); }
+  const L = page === "age" && S.agedata ? trayLayout(S.agedata, S.ed) : null, at = L ? [L.plus.cx, TY] : [IW / 2, 120];
+  if (!fresh.length) { const m = items && items.length ? (items.length > 1 ? "Already in YOURS" : "Already added") : "No songs found"; if (page === "age") hint(m, ...at); toAdd(m); return 0; }
+  u.custom_songs = cs; u.intro_pack_open = false; age.tray = "yours"; record(u); invoke("cache_covers", { items: fresh });
+  fresh.forEach((it) => delete covers[it.uri]); setTimeout(() => fresh.forEach((it) => delete covers[it.uri]) || redraw(), 2500);
+  const m = fresh.length > 1 ? `Added ${fresh.length} songs to YOURS` : `Added \u201c${fresh[0].name}\u201d`; if (page === "age") hint(m, ...at); toAdd(m);
+  setTimeout(() => EVT.emitTo("add", "have", haveUris()).catch(() => {}), 50); return fresh.length;
+}
+async function dropText(t) {
+  const ids = trackIds(t); if (!ids.length) { if (page === "age") hint("Drop a Spotify song or song link", IW / 2, 120); return; }
+  const have = new Set(haveUris()), known = ids.map((i) => "spotify:track:" + i).filter((u) => META[u] || have.has(u)), miss = ids.filter((i) => !META["spotify:track:" + i] && !have.has("spotify:track:" + i));
+  let got = []; if (miss.length) { let v; try { v = await invoke("sp", { kind: "tracks", arg: miss.join(",") }); } catch (e) { v = null; }
+    if (v === "login") { hint("Log in to Spotify in AoE4 Spotify to add songs", IW / 2, 120); toAdd("Log in to Spotify in AoE4 Spotify first", true); return; } got = Array.isArray(v) ? v : []; }
+  got.forEach((it) => META[it.uri] = it);
+  addSongs(ids.map((i) => META["spotify:track:" + i] || (have.has("spotify:track:" + i) ? { uri: "spotify:track:" + i } : null)).filter(Boolean));
+}
+EVT.listen("add-songs", (e) => addSongs(e.payload)); EVT.listen("add-drop", (e) => dropText(e.payload));
+EVT.listen("add-meta", (e) => (e.payload || []).forEach((it) => META[it.uri] = it));
+EVT.listen("add-ready", () => EVT.emitTo("add", "have", haveUris()));
+let dragN = 0; const setOver = (v) => { if (age.dropOver !== v) { age.dropOver = v; tip.hide(); redraw(); } };
+document.addEventListener("dragenter", (e) => { e.preventDefault(); if (page !== "age") return; dragN++; setOver(true); });
+document.addEventListener("dragover", (e) => { e.preventDefault(); if (page === "age") e.dataTransfer.dropEffect = "copy"; else e.dataTransfer.dropEffect = "none"; });
+document.addEventListener("dragleave", () => { if (page === "age" && --dragN <= 0) { dragN = 0; setOver(false); } });
+document.addEventListener("drop", (e) => { e.preventDefault(); dragN = 0; setOver(false); if (page !== "age") return;
+  dropText(e.dataTransfer.getData("text/plain") || e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text")); });
+// M3 test: AOE4S_ADDTEST -> synthetic drags/drops + Add a song window flow, results to dbg
+async function addTest() {
+  const R = [], ok = (n, c) => R.push((c ? "PASS " : "FAIL ") + n), w = (ms) => new Promise((r) => setTimeout(r, ms)), cnt = () => (S.ed.custom_songs || []).length, und = ED.undo.length;
+  const dt = (t) => { const d = new DataTransfer(); if (t) d.setData("text/plain", t); return d; }, fire = (ty, t) => document.getElementById("age").dispatchEvent(new DragEvent(ty, { bubbles: true, cancelable: true, dataTransfer: dt(t) }));
+  const rid = () => Array.from({ length: 22 }, () => "abcdefghijkLMNOPQ0123456789"[Math.random() * 27 | 0]).join(""), A = rid(), B = rid(), n0 = cnt();
+  invoke("dbg", { s: "SHOT idle" }); await w(1200);
+  fire("dragenter"); await w(60); ok("drag over age page: YOURS shows DROP TO ADD + pill", document.getElementById("age").innerText.includes("DROP TO ADD") && document.getElementById("age").innerText.includes("Drop to add to YOURS"));
+  invoke("dbg", { s: "SHOT dragover" }); await w(1400);
+  fire("dragleave"); await w(60); ok("leave: highlight gone, idle hint back", !document.getElementById("age").innerText.includes("DROP TO ADD") && document.getElementById("age").innerText.includes("or drop songs here"));
+  fire("dragenter"); fire("drop", `https://open.spotify.com/track/${A}?si=x\r\nhttps://open.spotify.com/intl-de/track/${B}\nspotify:track:${A}`); await w(400);
+  ok("drop 2 links -> both added to YOURS", cnt() === n0 + 2 && haveUris().includes("spotify:track:" + A) && haveUris().includes("spotify:track:" + B));
+  ok("no civ pool changed", !J(S.ed.intro_pools || {}).includes(A));
+  ok("tray shows Yours view", S.ed.intro_pack_open === false);
+  invoke("dbg", { s: "SHOT dropped" }); await w(1200);
+  undoRedo(true); await w(150); ok("one undo removes the whole drop", cnt() === n0); undoRedo(false); await w(150); ok("redo brings both back", cnt() === n0 + 2);
+  fire("drop", `spotify:track:${A}`); await w(250); ok("dropping again: no duplicate", cnt() === n0 + 2);
+  fire("drop", "https://open.spotify.com/album/" + "3".repeat(22)); await w(150); ok("non-track drop ignored", cnt() === n0 + 2);
+  await invoke("open_add"); await w(1500); invoke("dbg", { s: "SHOT addwin" }); await w(900);
+  EVT.emitTo("add", "test", ["menu"]); await w(500); invoke("dbg", { s: "SHOT addmenu" }); await w(900);
+  EVT.emitTo("add", "test", ["pick", "p1"]); await w(500); invoke("dbg", { s: "SHOT addlist" }); await w(900);
+  EVT.emitTo("add", "test", ["zone", 1]); await w(300); invoke("dbg", { s: "SHOT addzone" }); await w(900); EVT.emitTo("add", "test", ["zone", 0]);
+  const n1 = cnt(); await new Promise((r) => { const un = EVT.listen("add-songs", () => { setTimeout(r, 200); }); EVT.emitTo("add", "test", ["click", 0]); setTimeout(r, 1500); });
+  META["spotify:track:" + "6".repeat(22)] = { uri: "spotify:track:" + "6".repeat(22), name: "Battle at the Gate", artist: "Yasunori Nishiki" };
+  await dropText("https://open.spotify.com/track/" + "6".repeat(22)); await w(300);
+  ok("song dragged from the window list -> YOURS (meta, no lookup)", haveUris().includes("spotify:track:" + "6".repeat(22)) && (S.ed.custom_songs || []).some((c) => c.name === "Battle at the Gate"));
+  invoke("dbg", { s: "ADDTEST " + JSON.stringify(R) + " undo+" + (ED.undo.length - und) });
+}

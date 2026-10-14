@@ -1,0 +1,41 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>AoE4 Spotify</title>
+<style>
+/* 1.0.9 "Add a song" window (intros.py add_dialog), plus Your playlists, hint line and drop zone (M3) */
+*{box-sizing:border-box} html,body{margin:0;height:100%;background:#1f1f1f;color:#f2f2f2;font-family:"Segoe UI",sans-serif;user-select:none;overflow:hidden}
+h1{font-size:16px;font-weight:700;margin:0;padding:18px 16px 10px 19px;line-height:22px}
+.fld{margin:0 16px;height:40px;background:#232323;border:1px solid #3a3a3a;display:flex;align-items:center}
+.fld:focus-within{border-color:#1db954}.fld span{color:#9a9a9a;font:16px "Segoe UI Symbol";padding:0 4px 0 8px}
+.fld input{flex:1;background:transparent;border:0;outline:0;color:#f2f2f2;font:14.5px "Segoe UI";caret-color:#f2f2f2;margin-right:8px}
+.fld input::placeholder{color:#6f6f6f}
+.bar{display:flex;gap:10px;margin:10px 16px 6px}
+.btn{background:#2a2a2a;font:700 13px "Segoe UI";padding:0 12px;height:33px;display:flex;align-items:center;cursor:pointer;white-space:nowrap}
+.btn:hover{background:#333}#pl{flex:1;justify-content:space-between}#pl b{font-weight:700;overflow:hidden;text-overflow:ellipsis}
+#pl i{width:0;height:0;border:4px solid transparent;border-top:5px solid #c8c8c8;margin-top:5px;font-style:normal}
+#menu{position:absolute;left:190px;right:16px;top:136px;background:#2e2e2e;border:1px solid #464646;border-radius:6px;padding:4px;z-index:5;max-height:300px;overflow-y:auto;display:none}
+#menu div{display:flex;justify-content:space-between;padding:5px 10px;border-radius:5px;font:600 12.5px "Segoe UI";cursor:pointer}
+#menu div:hover,#menu div.cur{background:#3c3c3c}#menu small{color:#969696;font:400 10.5px "Segoe UI"}
+#list{margin:0 8px 0 8px;height:312px;overflow-y:auto;overflow-x:hidden}#list::-webkit-scrollbar{width:6px}#list::-webkit-scrollbar-thumb{background:#3a3a3a;border-radius:3px}
+.r{position:relative;height:48px;margin-bottom:4px;border-radius:10px;cursor:pointer}.r:hover:not(.ad){background:#2a2a2a}
+.r .t{position:absolute;left:8px;top:4px;width:40px;height:40px;border-radius:8px;background:#333;object-fit:cover}
+.r .n{position:absolute;left:58px;top:7px;right:70px;font:700 12.5px "Segoe UI";white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .a{position:absolute;left:58px;top:25px;right:70px;font:10.5px "Segoe UI";color:#9a9a9a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .s{position:absolute;right:12px;top:16px;font:700 10.5px "Segoe UI";color:#1db954;display:none}.r:hover .s,.r.ad .s{display:block}.r.ad .n{color:#9a9a9a}
+#hl{margin:8px 19px 6px;font:10.5px "Segoe UI";color:#969696}
+#zone{margin:0 16px;height:56px;border-radius:10px;display:flex;align-items:center;justify-content:center;font:600 12.5px "Segoe UI";color:#7d7d7d;
+ background-image:url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'%3e%3crect x='1' y='1' width='calc(100%25 - 2px)' height='calc(100%25 - 2px)' fill='none' rx='9' stroke='%235a5a5a' stroke-width='2' stroke-dasharray='7 5'/%3e%3c/svg%3e");transition:box-shadow .12s,background-color .12s}
+#zone.on{color:#1db954;font-weight:700;background-color:rgba(30,215,96,.12);box-shadow:0 0 10px 2px rgba(30,215,96,.45);
+ background-image:url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25'%3e%3crect x='1' y='1' width='calc(100%25 - 2px)' height='calc(100%25 - 2px)' fill='none' rx='9' stroke='%231ed760' stroke-width='2' stroke-dasharray='7 5'/%3e%3c/svg%3e")}
+#msg{position:absolute;left:19px;bottom:12px;font:12px "Segoe UI";color:#9a9a9a}#msg.err{color:#e5534b}
+</style></head>
+<body>
+<h1>Add a song</h1>
+<div class="fld"><span>&#x2315;</span><input id="q" placeholder="Search Spotify or paste a song link" spellcheck="false" autofocus></div>
+<div class="bar"><div class="btn" id="np">&#x266B;&nbsp; Add what's playing</div><div class="btn" id="pl"><span>&#x266B;&nbsp; <b id="pln">Your playlists</b></span><i></i></div></div>
+<div id="menu"></div>
+<div id="list"></div>
+<div id="hl">Drag songs in from Spotify, or drop them on the age page anytime</div>
+<div id="zone">Drop Spotify songs or links here</div>
+<div id="msg">Click a song to add it</div>
+<script src="add.js"></script>
+</body></html>

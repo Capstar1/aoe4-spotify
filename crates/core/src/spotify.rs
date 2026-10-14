@@ -119,6 +119,12 @@ impl Spotify {
         match r { Ok(r) => Ok(parse(r)), Err(ureq::Error::Status(_, r)) => Ok(parse(r)), Err(e) => Err(format!("Spotify unreachable: {e}")) }
     }
 
+    /// GET with an error on non-2xx (Add a song: search, playlists, track lookup).
+    pub fn get(&mut self, path: &str) -> Result<(u16, Value), String> { self.api("GET", path, None) }
+    pub fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        let r = self.agent.get(url).call().map_err(|e| e.to_string())?; let mut b = vec![]; std::io::Read::read_to_end(&mut r.into_reader(), &mut b).map_err(|e| e.to_string())?; Ok(b)
+    }
+
     fn ensure_device(&mut self) -> Result<String, String> {
         let (_, d) = self.api("GET", "/me/player/devices", None)?;
         let devs = d["devices"].as_array().cloned().unwrap_or_default();
