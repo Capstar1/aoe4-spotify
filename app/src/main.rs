@@ -205,7 +205,9 @@ fn dbg(window: tauri::WebviewWindow, s: String) {
     let _ = std::fs::write(std::env::temp_dir().join("aoe4s_dbg.txt"), format!("{s}\nouter {o:?} {os:?}\ninner {i:?} {is:?} scale {:?}", window.scale_factor()));
 }
 
-fn open_path(p: &str) { use std::os::windows::process::CommandExt; let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", p]).creation_flags(0x0800_0000).spawn(); }
+fn open_path(p: &str) {
+    if let Some(f) = std::env::var_os("AOE4S_DRYOPEN") { use std::io::Write; if let Ok(mut h) = std::fs::OpenOptions::new().create(true).append(true).open(f) { let _ = writeln!(h, "{p}"); } return; }
+    use std::os::windows::process::CommandExt; let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", p]).creation_flags(0x0800_0000).spawn(); }
 
 /// Cog menu rows (1.0.9 behaviour; 1.1 keeps its own files and never writes the 1.0.9 settings).
 #[tauri::command]
@@ -215,7 +217,17 @@ fn menu(app: tauri::State<Arc<AppState>>, kind: String) -> String {
         "log" => { let p = app.dir.join("aoe4_spotify_1.1.log"); let _ = std::fs::create_dir_all(&app.dir);
                    let _ = std::fs::write(&p, app.status.lock().unwrap().log.join("\r\n")); open_path(&p.display().to_string()); String::new() }
         "replays" => { let v = !app.replays.load(Ordering::SeqCst); app.replays.store(v, Ordering::SeqCst); save_prefs(&app); String::new() }
-        "uninstall" => "Uninstaller not found (not installed?).".into(),   // the 1.1 preview runs from its folder
+        "uninstall" => {   // the 1.1 preview runs from its folder: same message box as 1.0.9 when no uninstaller exists
+            let msg = "Uninstaller not found (not installed?).";
+            if std::env::var_os("AOE4S_DRYOPEN").is_none() {
+                std::thread::spawn(move || {
+                    #[link(name = "user32")] extern "system" { fn MessageBoxW(h: isize, t: *const u16, c: *const u16, f: u32) -> i32; }
+                    let w = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+                    unsafe { MessageBoxW(0, w(msg).as_ptr(), w("Uninstall").as_ptr(), 0x40 | 0x40000); }   // info icon, topmost
+                });
+            }
+            msg.into()
+        }
         _ => String::new(),
     }
 }
@@ -232,7 +244,7 @@ async fn check_update() -> String {
 }
 
 #[tauri::command]
-fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some() }) }
+fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some(), "menutest": std::env::var_os("AOE4S_MENUTEST").is_some() }) }
 
 #[tauri::command]
 fn logout(app: tauri::State<Arc<AppState>>) { app.real.store(false, Ordering::SeqCst); save_prefs(&app); app.spotify.lock().unwrap().logout(); push(&app.status, "Spotify: logged out, real playback off".into()); }

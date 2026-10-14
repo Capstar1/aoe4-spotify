@@ -160,7 +160,7 @@ function drawMenu(H, sp, set) {
   const mx0 = R_ - 190; let my0 = 52; const XTRA = 32;                       // 1.1: one extra row (Real playback)
   rr(mx0, my0, R_, my0 + 180 + 38 - 32 + XTRA, 10, "#262626", "#3a3a3a");
   const gw = measure("\u2630  ", 12);
-  const item = (y0, h, fn) => { const r = hit(rr(mx0 + 6, y0, R_ - 6, y0 + h, 7, "#262626"), fn); hov(r, () => r.style.background = "#303030", () => r.style.background = "#262626"); return r; };
+  let rowN = 0; const item = (y0, h, fn) => { const r = hit(rr(mx0 + 6, y0, R_ - 6, y0 + h, 7, "#262626"), fn); hov(r, () => r.style.background = "#303030", () => r.style.background = "#262626"); r.dataset.row = rowN++; return r; };
   item(my0 + 6, 32, () => invoke("menu", { kind: "replays" }));          // stays open: you see it flip
   sprite("m_rep", mx0 + 20 + (gw - 8) / 2 - 9, my0 + 13, mx0 + 20 + (gw - 8) / 2 + 9, my0 + 31).style.pointerEvents = "none";
   text(mx0 + 20 + gw, my0 + 22, "Music in replays", 12, C.tx); toggle(R_ - 14 - 30, my0 + 22 - 8, sp.replays, 30, 16).style.pointerEvents = "none";
@@ -169,11 +169,11 @@ function drawMenu(H, sp, set) {
   item(my0 + 38, 32, () => { closeMenu(); invoke("menu", { kind: "log" }); }); text(mx0 + 20, my0 + 54, "\u2630  Open log", 12, C.tx);
   item(my0 + 70, 32, () => { closeMenu(); invoke("menu", { kind: "github" }); }); sprite("m_gh", mx0 + 20 + (gw - 8) / 2 - 9, my0 + 77, mx0 + 20 + (gw - 8) / 2 + 9, my0 + 95).style.pointerEvents = "none";
   text(mx0 + 20 + gw, my0 + 86, "GitHub", 12, C.tx);
-  item(my0 + 102, 32, () => invoke("set_real", { on: !sp.real }));
+  item(my0 + 102, 32, () => { const on = !S.spotify.real; S.spotify.real = on; redraw(); invoke("set_real", { on }); });   // flip at once, like replays (no stale state between polls)
   text(mx0 + 20, my0 + 118, "\u25b6  Real playback (1.1)", 12, C.tx); toggle(R_ - 14 - 30, my0 + 118 - 8, sp.real, 30, 16).style.pointerEvents = "none";
   const dy = -32 + XTRA;
   hline(mx0 + 10, my0 + 140 + dy, R_ - 10, "#3a3a3a");
-  item(my0 + 144 + dy, 30, () => { closeMenu(); invoke("menu", { kind: "uninstall" }).then((m) => m && alert(m)); }); text(mx0 + 20, my0 + 159 + dy, "\u2715  Uninstall", 12, C.red, true);
+  item(my0 + 144 + dy, 30, () => { closeMenu(); invoke("menu", { kind: "uninstall" }); }); text(mx0 + 20, my0 + 159 + dy, "\u2715  Uninstall", 12, C.red, true);
 }
 
 // ---------- Age Intros overview (intros.py draw_overview) ----------
@@ -244,7 +244,25 @@ window.addEventListener("blur", () => document.body.classList.add("inactive")); 
 let lastJ = "";
 async function tick() {
   try { const s = await invoke("get_state"); const j = JSON.stringify([s.settings, s.spotify, s.status.in_match, s.status.age, s.status.watching, s.intros]);
-    if (j !== lastJ) { const first = !lastJ; lastJ = j; render(s); if (first) await apply("main"); else await redraw(); } } catch (e) { console.error(e); }
+    if (j !== lastJ) { const first = !lastJ; lastJ = j; render(s); if (first) { await apply("main"); invoke("cfg").then((c) => { if (c.menutest) setTimeout(() => menuTest().catch((e) => invoke("dbg", { s: "ERROR " + e + "\n" + (window.__mt || []).join("\n") })), 1500); }); } else await redraw(); } } catch (e) { console.error(e); }
   setTimeout(tick, 500);
 }
 tick();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function menuTest() {   // AOE4S_MENUTEST: click every cog row like a user and record what happened
+  const out = window.__mt = []; const row = (i) => document.querySelector(`#main [data-row="${i}"]`);
+  const gear = () => [...document.querySelectorAll("#main .hit")].find((e) => e.style.top === "14px" && parseFloat(e.style.left) > 300);
+  const st = async () => (await invoke("get_state")).spotify;
+  gear().click(); await sleep(150); out.push("menu open: " + ui.menu + ", rows " + document.querySelectorAll("#main [data-row]").length);
+  const r0 = (await st()).replays; row(0).click(); await sleep(300); out.push(`replays ${r0} -> ${(await st()).replays}, menu still open ${ui.menu}`);
+  row(0).click(); await sleep(300); out.push(`replays back -> ${(await st()).replays}`);
+  row(1).click(); out.push("check: pill " + JSON.stringify(upd.msg) + ", menu open " + ui.menu);
+  for (let k = 0; k < 40 && upd.msg.startsWith("Checking"); k++) await sleep(250); out.push("check result pill " + JSON.stringify(upd.msg));
+  await sleep(2300); out.push("pill after 2.3s " + JSON.stringify(upd.msg));
+  for (const [i, n] of [[2, "log"], [3, "github"], [4, "real"], [5, "uninstall"]]) {
+    gear().click(); await sleep(150); const before = (await st()).real; row(i).click(); await sleep(300);
+    out.push(`${n}: clicked, menu open ${ui.menu}` + (n === "real" ? `, real ${before} -> ${(await st()).real}` : ""));
+    if (n === "real") { row(i).click(); await sleep(300); out.push("real back -> " + (await st()).real); if (ui.menu) gear().click(); await sleep(100); }
+  }
+  await invoke("dbg", { s: out.join("\n") }); await sleep(200); W_.close();
+}
