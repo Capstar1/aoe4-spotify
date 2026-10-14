@@ -221,7 +221,7 @@ let S = null, page = "main", sizes = { main: [430, 586], intros: [520, 586] }, a
 function frameRect(p) { const [w, h] = sizes[p]; const fw = w + 2, fh = h + TB + 2; return { x: SH + (WW - fw) / 2, y: SH, w: fw, h: fh }; }
 function regionOf(r) { return { x: r.x, y: r.y, w: r.w, h: r.h }; }   // exactly the drawn frame: everything else is click-through
 function setFrame(p) {
-  const r = frameRect(p), f = $("frame"); Object.assign(f.style, { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px" });
+  const r = frameRect(p), f = $("frame"); invoke("shadow", r); Object.assign(f.style, { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px" });
   $("client").style.height = sizes[p][1] + "px";
   const w = sizes[p][0]; $("tbmin").style.left = (w - 138) + "px"; $("tbmax").style.left = (w - 92) + "px"; $("tbclose").style.left = (w - 46) + "px";
   document.querySelectorAll(".page").forEach((e) => e.classList.toggle("on", e.id === p));

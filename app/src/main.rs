@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 //! M1 shell: one fixed-size window; the core follows the game log. Real playback is OFF by default (dry run)
 //! so 1.1 never fights the 1.0.9 app over Spotify; the toggle is saved in %APPDATA%\AoE4Spotify-1.1.
+mod shadow;
 use aoe4core::aoe4::Aoe4;
 use aoe4core::game::{GameAdapter, GameEvent};
 use aoe4core::logtail::{Poll, Tail};
@@ -200,6 +201,13 @@ fn region(window: tauri::WebviewWindow, x: f64, y: f64, w: f64, h: f64) {
 }
 
 #[tauri::command]
+fn shadow(window: tauri::WebviewWindow, x: f64, y: f64, w: f64, h: f64) {
+    let k = window.scale_factor().unwrap_or(1.0) * zoom(); let r = |v: f64| (v * k).round() as i32;
+    let (a, b, c, d) = (r(x), r(y), r(x + w) - r(x), r(y + h) - r(y));
+    let _ = window.run_on_main_thread(move || shadow::set_frame(a, b, c, d, k));
+}
+
+#[tauri::command]
 fn dbg(window: tauri::WebviewWindow, s: String) {
     let o = window.outer_position().ok(); let i = window.inner_position().ok(); let os = window.outer_size().ok(); let is = window.inner_size().ok();
     let _ = std::fs::write(std::env::temp_dir().join("aoe4s_dbg.txt"), format!("{s}\nouter {o:?} {os:?}\ninner {i:?} {is:?} scale {:?}", window.scale_factor()));
@@ -271,9 +279,9 @@ fn main() {
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));
     tauri::Builder::default()
         .manage(app)
-        .setup(|a| { use tauri::Manager; if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
+        .setup(|a| { use tauri::Manager; if let Some(h) = a.get_webview_window("main").and_then(|w| w.hwnd().ok()) { shadow::init(h.0 as isize); } if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, dbg, menu, check_update])
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, dbg, menu, check_update])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
 }
