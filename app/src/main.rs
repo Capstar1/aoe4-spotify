@@ -98,7 +98,7 @@ fn get_state(app: tauri::State<Arc<AppState>>) -> serde_json::Value {
     let st = app.status.lock().unwrap().clone();
     let logged_in = app.spotify.lock().map(|s| s.logged_in()).ok();
     let keys: Vec<String> = app.ages.iter().map(|(k, _)| k.clone()).collect();
-    serde_json::json!({ "settings": app.settings, "ages": app.ages, "status": st, "intros": aoe4core::intros::overview(&app.settings, &keys),
+    serde_json::json!({ "settings": app.settings, "ages": app.ages, "status": st, "intros": aoe4core::intros::overview(&app.settings, &keys), "agedata": aoe4core::intros::age_data(&app.settings, &keys),
         "spotify": { "logged_in": logged_in, "real": app.real.load(Ordering::SeqCst), "replays": app.replays.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
 }
 
@@ -161,6 +161,17 @@ fn switch_test(win_: tauri::WebviewWindow, dir: PathBuf) {
     let _ = std::fs::write(dir.join("done"), "");
     std::thread::sleep(Duration::from_millis(800));
     std::process::exit(0);
+}
+
+/// Age page: click a chip = play that song now, click again = pause ("login" when 1.1 is not logged in).
+#[tauri::command]
+async fn preview(app: tauri::State<'_, Arc<AppState>>, uri: Option<String>) -> Result<String, String> {
+    let a = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut sp = a.spotify.lock().unwrap();
+        if !sp.logged_in() { return Ok("login".to_string()); }
+        match uri { Some(u) => sp.preview(&u), None => sp.pause() }.map(|_| "ok".to_string())
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -252,7 +263,7 @@ async fn check_update() -> String {
 }
 
 #[tauri::command]
-fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some(), "menutest": std::env::var_os("AOE4S_MENUTEST").is_some() }) }
+fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some(), "menutest": std::env::var_os("AOE4S_MENUTEST").is_some(), "open": std::env::var("AOE4S_OPEN").unwrap_or_default() }) }
 
 #[tauri::command]
 fn logout(app: tauri::State<Arc<AppState>>) { app.real.store(false, Ordering::SeqCst); save_prefs(&app); app.spotify.lock().unwrap().logout(); push(&app.status, "Spotify: logged out, real playback off".into()); }
@@ -281,7 +292,7 @@ fn main() {
         .manage(app)
         .setup(|a| { use tauri::Manager; if let Some(h) = a.get_webview_window("main").and_then(|w| w.hwnd().ok()) { shadow::init(h.0 as isize); } if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, dbg, menu, check_update])
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, dbg, menu, check_update])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
 }

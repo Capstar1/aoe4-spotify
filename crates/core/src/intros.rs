@@ -1,4 +1,4 @@
-﻿//! Age Intros overview data, same rules as 1.0.9 intros.py pools(): the default age (Imperial) = install
+//! Age Intros overview data, same rules as 1.0.9 intros.py pools(): the default age (Imperial) = install
 //! default pools with your per-civ changes on top; the other ages hold only what you added.
 use crate::settings::Settings;
 use serde_json::{json, Value};
@@ -29,4 +29,40 @@ pub fn overview(s: &Settings, ages: &[String]) -> Value {
         out.insert(a.clone(), json!({ "n": n, "civs": civs.len(), "on": on, "chips": chips, "more": total.saturating_sub(5) }));
     }
     Value::Object(out)
+}
+
+/// Everything the age pages draw (1.0.9 intros.py): factions, songs (built-ins then your songs, canonical order),
+/// each age's pools (default age = install defaults with your changes on top), install default pools.
+pub fn age_data(s: &Settings, ages: &[String]) -> Value {
+    let cat: Value = serde_json::from_str(CATALOG).unwrap_or_default();
+    let civs: Vec<Value> = cat["factions"].as_array().cloned().unwrap_or_default();
+    let mut songs: Vec<Value> = cat["songs"].as_array().cloned().unwrap_or_default();
+    let nb = songs.len();
+    for c in s.custom_songs.as_array().cloned().unwrap_or_default() {
+        let uri = c["uri"].as_str().unwrap_or("");
+        if !uri.starts_with("spotify:track:") { continue; }
+        let key = format!("c_{}", uri.rsplit(':').next().unwrap_or(""));
+        songs.push(json!([key, c["name"].as_str().unwrap_or("Song"), c["artist"].as_str().unwrap_or(""), uri, "#1DB954"]));
+    }
+    let idx: std::collections::HashMap<String, usize> = songs.iter().enumerate().map(|(i, x)| (x[3].as_str().unwrap_or("").to_string(), i)).collect();
+    let sorted = |v: &Value| -> Vec<String> {
+        let mut l: Vec<String> = vec![];
+        for x in v.as_array().cloned().unwrap_or_default() { if let Some(u) = x.as_str() { if !l.iter().any(|y| y == u) { l.push(u.into()); } } }
+        let pos: Vec<String> = l.clone();
+        l.sort_by_key(|u| (idx.get(u).copied().unwrap_or(idx.len()), pos.iter().position(|y| y == u).unwrap_or(0))); l
+    };
+    let def_pool = |civ: &str| { let p = &s.base_boss["pools"][civ]; if p.as_array().map_or(true, |a| a.is_empty()) { sorted(&s.base_boss["default"]) } else { sorted(p) } };
+    let mut pools = serde_json::Map::new(); let mut custom = serde_json::Map::new(); let mut defs = serde_json::Map::new();
+    for c in &civs { let k = c[0].as_str().unwrap_or(""); defs.insert(k.into(), json!(def_pool(k))); }
+    for a in ages {
+        let bp = &s.user_pools[a.as_str()]; let mut m = serde_json::Map::new();
+        for c in &civs {
+            let k = c[0].as_str().unwrap_or("");
+            let l = if a == DEFAULT_AGE && bp.get(k).is_none() { def_pool(k) } else { sorted(&bp[k]) };
+            m.insert(k.into(), json!(l));
+        }
+        pools.insert(a.clone(), Value::Object(m));
+        custom.insert(a.clone(), json!(bp.as_object().map_or(false, |o| !o.is_empty())));
+    }
+    json!({ "civs": civs, "songs": songs, "nb": nb, "pools": pools, "defs": defs, "custom": custom, "default_age": DEFAULT_AGE })
 }

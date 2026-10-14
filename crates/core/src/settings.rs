@@ -23,6 +23,9 @@ pub struct Settings {
     pub boss_on: bool,
     pub default_playlists: HashMap<String, String>,
     pub music_in_replays: bool,
+    /// your own intro songs [{uri,name,artist}] (1.0.9 "custom_songs")
+    #[serde(skip)]
+    pub custom_songs: Value,
 }
 
 fn read(p: &Path) -> Value { std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null) }
@@ -50,6 +53,7 @@ pub fn load(install_cfg: &Path, user_cfg: &Path, names: &Path) -> Settings {
         after_match: user["after_match"].clone(),
         default_playlists: str_map(&base["default_playlists"]),
         boss_on: user["boss_intro_enabled"].as_bool().or(base["boss_intro"]["enabled"].as_bool()).unwrap_or(true),
+        custom_songs: user["custom_songs"].clone(),
         music_in_replays: get("music_in_replays").as_bool().unwrap_or(false),
         client_id: base["client_id"].as_str().unwrap_or_default().to_string(),
         log_path: get("log_path").as_str().filter(|s| !s.is_empty()).map(|s| s.to_string()),

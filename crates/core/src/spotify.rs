@@ -158,6 +158,13 @@ impl Spotify {
         if (200..300).contains(&c) { Ok(()) } else { Err(format!("Spotify play failed ({c}): {}", v["error"]["message"].as_str().unwrap_or(""))) }
     }
 
+    /// Age-page chip click (1.0.9 preview): play that one track now / pause it.
+    pub fn preview(&mut self, uri: &str) -> Result<(), String> { let dev = self.ensure_device()?; self.put_play(&dev, json!({ "uris": [uri] })) }
+    pub fn pause(&mut self) -> Result<(), String> {
+        let dev = self.ensure_device()?; let (c, _) = self.api("PUT", &format!("/me/player/pause?device_id={dev}"), None)?;
+        if (200..300).contains(&c) { Ok(()) } else { Err(format!("pause failed ({c})")) }
+    }
+
     /// Age switch: fade down, start the age's music, fade back up to your volume.
     pub fn play_age(&mut self, uri: &str, fade_s: f32) -> Result<(), String> {
         let dev = self.ensure_device()?;
