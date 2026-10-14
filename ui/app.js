@@ -62,7 +62,9 @@ function revert(rx, y, isDef, tag) {   // 1.0.9 undo button: outlined pill, grey
 }
 // ---------- main panel (panel.py draw) ----------
 const W = 430, M = 16, R_ = W - M;
-const ui = { open: true, menu: false };
+const ui = { open: true, menu: false }; const upd = { msg: "", err: false, url: false };
+function pill(msg, err, keep) { Object.assign(upd, { msg, err, url: msg.startsWith("\u2193") }); redraw(); if (!keep) setTimeout(() => { if (upd.msg === msg) { upd.msg = ""; redraw(); } }, 2000); }
+const closeMenu = () => { ui.menu = false; redraw(); };
 const PL_TOP = 172 + 46 + 10;
 function mainH(n) { const PL_H = 36 + 6 + n * 46 + 4; const base = PL_TOP + (ui.open ? PL_H : 36) + 10; return base + 56 + 46 + M; }
 function drawMain(s) {
@@ -71,7 +73,10 @@ function drawMain(s) {
   sprite("logo", M, 14, M + 32, 46);
   text(M + 44, 30, "AoE4 Spotify", 19, C.tx, true);
   let px = M + 44 + measure("AoE4 Spotify", 19, true) + 8;
-  rr(px, 21, px + 44, 39, 9, C.card); text(px + 22, 30, "v1.1", 10, C.mu, false, "center");
+  rr(px, 21, px + 44, 39, 9, C.card); text(px + 22, 30, "v1.1", 10, C.mu, false, "center"); px += 52;
+  if (upd.msg) { const col = upd.err ? C.red : G0, pw = measure(upd.msg, 10, true) + 20;     // 1.0.9 update pill
+    const p = rr(px, 21, px + pw, 39, 9, upd.err ? "#3d1a1a" : "#183d26", col); text(px + pw / 2, 30, upd.msg, 10, col, true, "center");
+    if (upd.url) { p.classList.add("hit"); p.onclick = () => invoke("menu", { kind: "github" }); } }
   const gx = R_ - 32; hit(rr(gx, 14, R_, 46, 10, "#2a2a2a"), () => { ui.menu = !ui.menu; redraw(); }); sprite("gear", gx + 6, 20, gx + 26, 40).style.pointerEvents = "none";
   hline(M, 62, R_, C.line);
   // Enabled
@@ -147,19 +152,19 @@ function drawMenu(H, sp, set) {
   rr(mx0, my0, R_, my0 + 180 + 38 - 32 + XTRA, 10, "#262626", "#3a3a3a");
   const gw = measure("\u2630  ", 12);
   const item = (y0, h, fn) => { const r = hit(rr(mx0 + 6, y0, R_ - 6, y0 + h, 7, "#262626"), fn); hov(r, () => r.style.background = "#303030", () => r.style.background = "#262626"); return r; };
-  item(my0 + 6, 32, () => invoke("noop").catch(() => {}));
+  item(my0 + 6, 32, () => invoke("menu", { kind: "replays" }));          // stays open: you see it flip
   sprite("m_rep", mx0 + 20 + (gw - 8) / 2 - 9, my0 + 13, mx0 + 20 + (gw - 8) / 2 + 9, my0 + 31).style.pointerEvents = "none";
-  text(mx0 + 20 + gw, my0 + 22, "Music in replays", 12, C.tx); toggle(R_ - 14 - 30, my0 + 22 - 8, set.music_in_replays, 30, 16).style.pointerEvents = "none";
+  text(mx0 + 20 + gw, my0 + 22, "Music in replays", 12, C.tx); toggle(R_ - 14 - 30, my0 + 22 - 8, sp.replays, 30, 16).style.pointerEvents = "none";
   hline(mx0 + 10, my0 + 41, R_ - 10, "#3a3a3a"); my0 += 38;
-  item(my0 + 6, 32); text(mx0 + 20, my0 + 22, "\u21bb  Check for updates", 12, C.tx);
-  item(my0 + 38, 32); text(mx0 + 20, my0 + 54, "\u2630  Open log", 12, C.tx);
-  item(my0 + 70, 32); sprite("m_gh", mx0 + 20 + (gw - 8) / 2 - 9, my0 + 77, mx0 + 20 + (gw - 8) / 2 + 9, my0 + 95).style.pointerEvents = "none";
+  item(my0 + 6, 32, () => { closeMenu(); pill("Checking\u2026", false, true); invoke("check_update").then((r) => pill(r, r.startsWith("Couldn"), r.startsWith("\u2193"))); }); text(mx0 + 20, my0 + 22, "\u21bb  Check for updates", 12, C.tx);
+  item(my0 + 38, 32, () => { closeMenu(); invoke("menu", { kind: "log" }); }); text(mx0 + 20, my0 + 54, "\u2630  Open log", 12, C.tx);
+  item(my0 + 70, 32, () => { closeMenu(); invoke("menu", { kind: "github" }); }); sprite("m_gh", mx0 + 20 + (gw - 8) / 2 - 9, my0 + 77, mx0 + 20 + (gw - 8) / 2 + 9, my0 + 95).style.pointerEvents = "none";
   text(mx0 + 20 + gw, my0 + 86, "GitHub", 12, C.tx);
   item(my0 + 102, 32, () => invoke("set_real", { on: !sp.real }));
   text(mx0 + 20, my0 + 118, "\u25b6  Real playback (1.1)", 12, C.tx); toggle(R_ - 14 - 30, my0 + 118 - 8, sp.real, 30, 16).style.pointerEvents = "none";
   const dy = -32 + XTRA;
   hline(mx0 + 10, my0 + 140 + dy, R_ - 10, "#3a3a3a");
-  item(my0 + 144 + dy, 30); text(mx0 + 20, my0 + 159 + dy, "\u2715  Uninstall", 12, C.red, true);
+  item(my0 + 144 + dy, 30, () => { closeMenu(); invoke("menu", { kind: "uninstall" }).then((m) => m && alert(m)); }); text(mx0 + 20, my0 + 159 + dy, "\u2715  Uninstall", 12, C.red, true);
 }
 
 // ---------- Age Intros overview (intros.py draw_overview) ----------

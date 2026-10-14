@@ -16,11 +16,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Default, serde::Serialize, Clone)]
 struct Status { game: String, log_path: String, watching: bool, in_match: bool, age: Option<String>, playing: Option<String>, log: Vec<String> }
 
-struct AppState { settings: Settings, ages: Vec<(String, String)>, status: Mutex<Status>, real: AtomicBool, busy: AtomicBool, spotify: Mutex<Spotify>, tx: Mutex<Sender<Action>>, dir: PathBuf }
+struct AppState { settings: Settings, ages: Vec<(String, String)>, status: Mutex<Status>, real: AtomicBool, replays: AtomicBool, busy: AtomicBool, spotify: Mutex<Spotify>, tx: Mutex<Sender<Action>>, dir: PathBuf }
 
 fn save_prefs(app: &AppState) {
     let _ = std::fs::create_dir_all(&app.dir);
-    let _ = std::fs::write(app.dir.join("settings.json"), serde_json::json!({ "real_playback": app.real.load(Ordering::SeqCst) }).to_string());
+    let _ = std::fs::write(app.dir.join("settings.json"), serde_json::json!({ "real_playback": app.real.load(Ordering::SeqCst), "music_in_replays": app.replays.load(Ordering::SeqCst) }).to_string());
 }
 
 /// Spotify worker: actions run one after another so fades never overlap and the log watcher never blocks.
@@ -98,7 +98,7 @@ fn get_state(app: tauri::State<Arc<AppState>>) -> serde_json::Value {
     let logged_in = app.spotify.lock().map(|s| s.logged_in()).ok();
     let keys: Vec<String> = app.ages.iter().map(|(k, _)| k.clone()).collect();
     serde_json::json!({ "settings": app.settings, "ages": app.ages, "status": st, "intros": aoe4core::intros::overview(&app.settings, &keys),
-        "spotify": { "logged_in": logged_in, "real": app.real.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
+        "spotify": { "logged_in": logged_in, "real": app.real.load(Ordering::SeqCst), "replays": app.replays.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
 }
 
 mod win {
@@ -205,6 +205,32 @@ fn dbg(window: tauri::WebviewWindow, s: String) {
     let _ = std::fs::write(std::env::temp_dir().join("aoe4s_dbg.txt"), format!("{s}\nouter {o:?} {os:?}\ninner {i:?} {is:?} scale {:?}", window.scale_factor()));
 }
 
+fn open_path(p: &str) { use std::os::windows::process::CommandExt; let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", p]).creation_flags(0x0800_0000).spawn(); }
+
+/// Cog menu rows (1.0.9 behaviour; 1.1 keeps its own files and never writes the 1.0.9 settings).
+#[tauri::command]
+fn menu(app: tauri::State<Arc<AppState>>, kind: String) -> String {
+    match kind.as_str() {
+        "github" => { open_path("https://github.com/Capstar1/aoe4-spotify"); String::new() }
+        "log" => { let p = app.dir.join("aoe4_spotify_1.1.log"); let _ = std::fs::create_dir_all(&app.dir);
+                   let _ = std::fs::write(&p, app.status.lock().unwrap().log.join("\r\n")); open_path(&p.display().to_string()); String::new() }
+        "replays" => { let v = !app.replays.load(Ordering::SeqCst); app.replays.store(v, Ordering::SeqCst); save_prefs(&app); String::new() }
+        "uninstall" => "Uninstaller not found (not installed?).".into(),   // the 1.1 preview runs from its folder
+        _ => String::new(),
+    }
+}
+
+/// "Check for updates": latest GitHub release vs this version (same endpoint 1.0.9 uses).
+#[tauri::command]
+async fn check_update() -> String {
+    let r = ureq::get("https://api.github.com/repos/Capstar1/aoe4-spotify/releases/latest").set("User-Agent", "aoe4-spotify-1.1").timeout(Duration::from_secs(8)).call();
+    let Ok(r) = r else { return "Couldn't check".into() };
+    let v: serde_json::Value = r.into_json().unwrap_or_default();
+    let tag = v["tag_name"].as_str().unwrap_or("").trim_start_matches(['v', 'V']).to_string();
+    let num = |s: &str| s.split('.').map(|x| x.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    if !tag.is_empty() && num(&tag) > num(env!("CARGO_PKG_VERSION")) { format!("\u{2193} Update {tag}") } else { "Up to date".into() }
+}
+
 #[tauri::command]
 fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some() }) }
 
@@ -226,16 +252,16 @@ fn main() {
     let dir = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify-1.1");
     let prefs: serde_json::Value = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     let spotify = Spotify::new(settings.client_id.clone(), dir.join("token.json"));
-    let (tx, rx) = channel();
+    let (tx, rx) = channel(); let replays0 = prefs["music_in_replays"].as_bool().unwrap_or(settings.music_in_replays);
     let app = Arc::new(AppState { settings, ages, status: Mutex::new(status), real: AtomicBool::new(prefs["real_playback"].as_bool() == Some(true)),
-        busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx), dir });
+        replays: AtomicBool::new(replays0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx), dir });
     let a2 = app.clone(); std::thread::spawn(move || watch(a2, path));
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));
     tauri::Builder::default()
         .manage(app)
         .setup(|a| { use tauri::Manager; if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, dbg])
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, dbg, menu, check_update])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
 }
