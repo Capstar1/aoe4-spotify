@@ -25,10 +25,16 @@ def entry_py():
 
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else _entry_file())
-CONFIG = os.path.join(HERE, "config.json")
-VERSION = "1.0.8"
-GITHUB_URL = "https://github.com/Capstar1/aoe4-spotify"
+VERSION = "1.0.9"
+from aoe4spotify.core.branding import APP_ID, GITHUB_URL
 ASSETS = getattr(sys, "_MEIPASS", HERE)
+def _find_config():
+    """Install config.json next to the exe (installer); else the copy bundled into the build (_MEIPASS)."""
+    for d in (HERE, ASSETS):
+        p = os.path.join(d, "config.json")
+        if os.path.isfile(p): return p
+    return os.path.join(HERE, "config.json")
+CONFIG = _find_config()
 
 def child_env():
     """Environment for processes we start: never pass PyInstaller's bootloader variables on."""
@@ -36,7 +42,14 @@ def child_env():
     if FROZEN: env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     return env
 
-DATA = os.path.join(os.environ.get("APPDATA") or HERE, "AoE4Spotify")
+# Steam marks the game's process tree with these (SteamGameId, SteamAppId, SteamOverlayGameId, ...): Steam then injects
+# its overlay into, and counts as "the game", every process that carries them. Only the game itself may get them.
+_STEAM_GAME_ENV = ("steam", "enable_vk_layer_valve")
+def clean_env():
+    """child_env() minus the Steam game-launch variables: for everything we start that is NOT the game (Spotify, explorer...)."""
+    return {k: v for k, v in child_env().items() if not k.lower().startswith(_STEAM_GAME_ENV)}
+
+DATA = os.path.join(os.environ.get("APPDATA") or HERE, APP_ID)
 os.makedirs(DATA, exist_ok=True)
 TOKEN = os.path.join(DATA, "token.json")
 LOGFILE = os.path.join(DATA, "aoe4_spotify.log")
@@ -53,7 +66,6 @@ def documents_dir():
         if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf) == 0 and buf.value: return buf.value  # CSIDL_PERSONAL
     except Exception: pass
     return os.path.join(os.path.expanduser("~"), "Documents")
-DEFAULT_LOG = os.path.join(documents_dir(), "My Games", "Age of Empires IV", "warnings.log")
 def atomic_write(path, text, mode="w"):
     """Write-then-rename (never a half-written file). Retries os.replace: on Windows it fails while another
     process has the target open for a moment (PermissionError)."""
@@ -159,7 +171,7 @@ def single_window(name, title):
         import ctypes
         k32, u32 = ctypes.windll.kernel32, ctypes.windll.user32
         k32.CreateMutexW.restype = ctypes.c_void_p
-        nm = "Local\\AoE4Spotify_window_%s%s" % (name, os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX", ""))  # suffix: tests only
+        nm = "Local\\%s_window_%s%s" % (APP_ID, name, os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX", ""))  # suffix: tests only
         h = k32.CreateMutexW(None, False, nm)
         if k32.GetLastError() == 183:             # ERROR_ALREADY_EXISTS
             if h: k32.CloseHandle(ctypes.c_void_p(h))
@@ -181,7 +193,7 @@ def single_window(name, title):
     except Exception:
         return True                               # not Windows / no ctypes: no guard
 def _hwnd_file(name):
-    return os.path.join(os.environ.get("TEMP", HERE), "AoE4Spotify_window_%s%s.hwnd" % (name, os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX", "")))
+    return os.path.join(os.environ.get("TEMP", HERE), "%s_window_%s%s.hwnd" % (APP_ID, name, os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX", "")))
 def note_window(name, win):
     """Remember our top-level window handle so a second launch focuses exactly this window."""
     try:
@@ -194,7 +206,7 @@ def release_window(name):
     if h:
         try: import ctypes; ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(h))
         except Exception: pass
-def _switcher_mutex(): return "AoE4SpotifySwitcherMutex" + os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX", "")
+def _switcher_mutex(): return APP_ID + "SwitcherMutex" + os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX", "")
 def single_instance():
     import ctypes; k = ctypes.windll.kernel32; k.CreateMutexW.restype = ctypes.c_void_p
     h = k.CreateMutexW(None, False, _switcher_mutex())
@@ -255,6 +267,8 @@ def dark_window(win, bg):
 def place_centered(win, over=None):
     """Centre on the primary monitor's work area, or over a visible parent window."""
     try:
+        if test_env("AOE4SPOTIFY_OFFSCREEN"):            # tests: map windows far off every monitor, never on screen
+            win.geometry("+-30000+-30000"); return
         win.update_idletasks()
         w, h = win.winfo_reqwidth(), win.winfo_reqheight()
         wa = None
@@ -321,6 +335,102 @@ def set_titlebar(win, dark):
         for attr in (20, 19):
             if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), 4) == 0: break
     except Exception: pass
+def _redraw_canvases(w):
+    """A freshly mapped Tk canvas only paints when its Expose event is handled (a frame later); configuring it
+    schedules a full redraw that update_idletasks performs right away."""
+    import tkinter
+    todo = [w]
+    while todo:
+        c = todo.pop()
+        if isinstance(c, tkinter.Canvas):
+            try: c.configure(bg=c.cget("bg"))
+            except Exception: pass
+        todo.extend(c.winfo_children())
+def swap_pages(top, old, new, w, h, x, y):
+    """Replace packed `old` by the already-built `new` in `top`, resized/moved to w x h at x,y (one geometry call)."""
+    top.geometry("%dx%d+%d+%d" % (w, h, x, y))
+    old.pack_forget(); new.pack()
+    top.update_idletasks(); _redraw_canvases(new); top.update_idletasks()
+    top.geometry("")
+def cover(top, grow, fn, done=None):
+    """Run fn() (a page swap that resizes/moves `top`) behind a still picture of the screen, so nobody sees the
+    in-between frames Windows produces: DWM composes a moved/resized window once with its OLD pixels before the
+    app repaints, and a freshly shown Tk canvas paints a frame late (blank). The picture is a screen grab of the
+    window area grown by grow=(l,t,r,b) px, shown in a borderless window that is painted while fully transparent
+    and then made opaque (an atomic DWM change, identical pixels: invisible). fn() runs underneath; the picture is
+    dropped once the new page has painted - the user sees one clean cut. Returns True if deferred (fn runs later)."""
+    if sys.platform != "win32" or test_env("AOE4SPOTIFY_OFFSCREEN"):
+        fn(); done and done(); return False
+    try:
+        import tkinter
+        from PIL import ImageGrab, ImageTk
+        top.update_idletasks()
+        l, t, r, b = _vis_rect(top)
+        gl, gt, gr, gb = grow; m = 24                       # + room for the window shadow
+        L, T, R, B_ = l - gl - m, t - gt - m, r + gr + m, b + gb + m
+        img = ImageGrab.grab(bbox=(L, T, R, B_), all_screens=True)
+        ov = tkinter.Toplevel(top); ov.withdraw(); ov.overrideredirect(True)
+        ov.attributes("-alpha", 0.0); ov.attributes("-topmost", True)
+        ph = ImageTk.PhotoImage(img, master=ov); ov._ph = ph
+        tkinter.Label(ov, image=ph, bd=0, highlightthickness=0).pack()
+        ov.geometry("%dx%d+%d+%d" % (R - L, B_ - T, L, T)); ov.deiconify()
+    except Exception:
+        fn(); done and done(); return False
+    def drop():
+        try: ov.destroy()
+        except Exception: pass
+        done and done()
+    def swap():
+        try: fn()
+        finally: top.after(70, drop)                        # new page painted underneath
+    def show():
+        try: ov.attributes("-alpha", 1.0)
+        except Exception: pass
+        top.after(25, swap)                                 # picture composed on screen
+    top.after(30, show)                                     # picture painted while invisible
+    return True
+def _vis_rect(top):
+    try:
+        import ctypes, ctypes.wintypes as wt
+        hwnd = ctypes.windll.user32.GetParent(top.winfo_id()) or top.winfo_id()
+        rc = wt.RECT()
+        if ctypes.windll.dwmapi.DwmGetWindowAttribute(wt.HWND(hwnd), 9, ctypes.byref(rc), ctypes.sizeof(rc)) == 0:
+            return rc.left, rc.top, rc.right, rc.bottom
+    except Exception: pass
+    x, y = top.winfo_rootx(), top.winfo_rooty()
+    return x, y, x + top.winfo_width(), y + top.winfo_height()
+def fit_shift(vis, work):
+    """(dx, dy) that brings the visible window rect (l, t, r, b) inside the work area: no move if it already
+    fits; up only when the bottom would leave the screen (and never above the top)."""
+    l, t, r, b = vis; L, T, R, B_ = work
+    dx = max(L - l, min(0, R - r)); dy = max(T - t, min(0, B_ - b))
+    return dx, dy
+def keep_on_screen(win):
+    """The window just grew (a wider page): nudge it back inside its monitor's work area. Returns the (dx, dy) moved."""
+    try:
+        if test_env("AOE4SPOTIFY_OFFSCREEN") or sys.platform != "win32": return (0, 0)
+        import ctypes, ctypes.wintypes as wt
+        class MI(ctypes.Structure):
+            _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT), ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+        win.update_idletasks(); u32 = ctypes.windll.user32; u32.MonitorFromWindow.restype = ctypes.c_void_p
+        h = u32.GetParent(win.winfo_id()) or win.winfo_id(); r = wt.RECT(); u32.GetWindowRect(h, ctypes.byref(r))
+        try:                                           # the VISIBLE frame: GetWindowRect includes Windows 10/11's
+            v = wt.RECT()                              # invisible ~7 px resize borders (left/right/bottom), which
+            if ctypes.windll.dwmapi.DwmGetWindowAttribute(h, 9, ctypes.byref(v), ctypes.sizeof(v)) == 0: r = v   # made a window snapped
+        except Exception: pass                         # to the taskbar / screen edge 'nudge' itself on every open
+        mon = u32.MonitorFromWindow(ctypes.c_void_p(h), 2); mi = MI(); mi.cbSize = ctypes.sizeof(MI)
+        if not (mon and u32.GetMonitorInfoW(ctypes.c_void_p(mon), ctypes.byref(mi))): return (0, 0)
+        dx, dy = fit_shift((r.left, r.top, r.right, r.bottom), (mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom))
+        if dx or dy: win.geometry("+%d+%d" % (win.winfo_x() + dx, win.winfo_y() + dy))
+        return (dx, dy)
+    except Exception as e:
+        log("Keep on screen: %r" % e); return (0, 0)
+_ONCE = set()
+def log_once(where, exc):
+    """Log an error the first time each (place, error type) happens; repeats stay quiet (no log spam in loops)."""
+    k = (where, type(exc).__name__)
+    if k in _ONCE: return False
+    _ONCE.add(k); log("%s failed: %r (repeats of this %s not logged)" % (where, exc, k[1])); return True
 def win_hidden(w):
     """Minimized or withdrawn: animations and polling can sleep."""
     try: return w.state() in ("iconic", "withdrawn") or not w.winfo_viewable()

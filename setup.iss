@@ -1,6 +1,6 @@
 ; Inno Setup script for AoE4 Spotify. Build: ISCC.exe setup.iss (after building the dist\AoE4 Spotify\ folder)
 #ifndef AppVer
-#define AppVer "1.0.8"
+#define AppVer "1.0.9"
 #endif
 #ifdef TEST
 ; test build (ISCC /DTEST): separate AppId/name/folder so it never touches a real install
@@ -38,7 +38,7 @@ Source: "dist\AoE4 Spotify\*"; DestDir: "{app}"; Flags: ignoreversion recursesub
 Source: "config.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"
 Source: "aoe4_spotify.py"; DestDir: "{app}\source"
-Source: "aoe4spotify\*"; DestDir: "{app}\source\aoe4spotify"; Excludes: "*\__pycache__\*,__pycache__\*,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "aoe4spotify\*"; DestDir: "{app}\source\aoe4spotify"; Excludes: "*\__pycache__\*,__pycache__\*,*.pyc,*.bak*"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "config.json"; DestDir: "{app}\source"
 Source: "setup.iss"; DestDir: "{app}\source"
 Source: "build.md"; DestDir: "{app}\source"
@@ -71,6 +71,8 @@ Filename: "{app}\AoE4 Spotify.exe"; WorkingDir: "{app}"; Description: "Log in to
 Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel --updated"; WorkingDir: "{app}"; Flags: nowait; Check: Relaunch
 ; any other install while AoE4 is running: quietly re-attach the music switcher to that game
 Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--attach"; WorkingDir: "{app}"; Flags: nowait runhidden; Check: not Relaunch
+; the control panel was open when setup started (setup closed it): open it again
+Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; Flags: nowait; Check: ReopenPanel
 
 [UninstallDelete]
 #ifndef TEST
@@ -88,10 +90,19 @@ Type: dirifempty; Name: "{app}"
   AoE4's launch option and reopened afterwards if it was running.
   Test-only switches: /STEAMPROC=<process name> /STEAMEXE=<path> /STEAMPATH=<dir> (or the matching
   AOE4SPOTIFY_STEAM_* environment variables) to use a dummy Steam. }
-var SteamWasRunning, LaunchOptionAlreadySet: Boolean;
+var SteamWasRunning, LaunchOptionAlreadySet, PanelWasOpen: Boolean;
+
+function GetWindowThreadProcessId(Wnd: HWND; var Pid: DWORD): DWORD; external 'GetWindowThreadProcessId@user32.dll stdcall';
 
 function Relaunch(): Boolean;
 begin Result := ExpandConstant('{param:RELAUNCH|0}') = '1'; end;
+
+{ /FROMSWITCHER=1: started by the app's own music switcher, which has checked that no match is running. }
+function FromSwitcher(): Boolean;
+begin Result := ExpandConstant('{param:FROMSWITCHER|0}') = '1'; end;
+
+function ReopenPanel(): Boolean;
+begin Result := PanelWasOpen and not Relaunch(); end;
 
 { True if AoE4's launch option in some Steam user's localconfig.vdf already starts this install's exe.
   Then nothing needs changing and Steam is left alone (typical for upgrades). /STEAMPATH= is for tests. }
@@ -140,6 +151,16 @@ begin
     if not RegQueryStringValue(HKCU, 'Software\Valve\Steam', 'SteamExe', Result) then Result := '';
 end;
 
+{ The game's process. Test-only: /GAMEPROC= or AOE4SPOTIFY_GAME_PROC (dummy game). }
+function GameProc(): String;
+begin
+  Result := ExpandConstant('{param:GAMEPROC|}');
+#ifdef TEST
+  if Result = '' then Result := GetEnv('AOE4SPOTIFY_GAME_PROC');
+#endif
+  if Result = '' then Result := 'RelicCardinal.exe';
+end;
+
 function ProcRunning(Name: String): Boolean;
 var Loc, Svc, Res: Variant;
 begin
@@ -168,6 +189,66 @@ begin
     Log('KillApp: ' + GetExceptionMessage);
   end;
   Sleep(700);
+end;
+
+{ Running copies of THIS install's exe: the control panel (--panel) or everything else (switcher, login, attach). }
+function AppProcs(Panel: Boolean): Variant;
+var Loc, Svc: Variant; P, Q: String;
+begin
+  P := ExpandConstant('{app}\AoE4 Spotify.exe');
+  StringChangeEx(P, '\', '\\', True);
+  Q := 'SELECT ProcessId FROM Win32_Process WHERE ExecutablePath=''' + P + ''' AND ';
+  if Panel then Q := Q + 'CommandLine LIKE ''%--panel%''' else Q := Q + '(CommandLine IS NULL OR NOT CommandLine LIKE ''%--panel%'')';
+  Loc := CreateOleObject('WbemScripting.SWbemLocator');
+  Svc := Loc.ConnectServer('.', 'root\CIMV2');
+  Result := Svc.ExecQuery(Q);
+end;
+
+function AppCount(Panel: Boolean): Integer;
+begin
+  try Result := AppProcs(Panel).Count; except Result := 0; end;
+end;
+
+{ Close the open control panel: ask its window to close (like clicking X), wait up to 6 s, then end only
+  the panel process. The window handle comes from the file the panel writes, and is used only if it
+  really belongs to a running panel process (a stale handle could be some other program's window). }
+procedure ClosePanel();
+var Res: Variant; I, J: Integer; Pid, Owner: DWORD; Wnd: Longint; S: AnsiString; F: String;
+begin
+  PanelWasOpen := False;
+  try
+    Res := AppProcs(True);
+    PanelWasOpen := Res.Count > 0;
+    if not PanelWasOpen then Exit;
+    F := GetEnv('TEMP') + '\AoE4Spotify_window_panel';
+#ifdef TEST
+    F := F + GetEnv('AOE4SPOTIFY_MUTEX_SUFFIX');
+#endif
+    F := F + '.hwnd';
+    Wnd := 0;
+    if LoadStringFromFile(F, S) then Wnd := StrToIntDef(Trim(String(S)), 0);
+    Owner := 0;
+    if Wnd <> 0 then GetWindowThreadProcessId(Wnd, Owner);
+    for I := 0 to Res.Count - 1 do begin
+      Pid := Res.ItemIndex(I).ProcessId;
+      if (Owner <> 0) and (Pid = Owner) then begin
+        Log('Closing the control panel (pid ' + IntToStr(Pid) + ') gracefully');
+        PostMessage(Wnd, $0010, 0, 0);              { WM_CLOSE }
+      end;
+    end;
+    for J := 1 to 24 do begin                        { up to 6 s }
+      if AppCount(True) = 0 then begin Log('Control panel closed gracefully'); Exit; end;
+      Sleep(250);
+    end;
+    Res := AppProcs(True);
+    for I := 0 to Res.Count - 1 do begin
+      Log('Control panel still open after 6 s - ending only the panel (pid ' + IntToStr(Res.ItemIndex(I).ProcessId) + ')');
+      Res.ItemIndex(I).Terminate();
+    end;
+    Sleep(500);
+  except
+    Log('ClosePanel: ' + GetExceptionMessage);
+  end;
 end;
 
 function IsSilentRun(): Boolean;
@@ -210,8 +291,19 @@ begin
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var R: Integer;
 begin
-  KillApp();
+  { Never touch the game, and never stop the app while it follows a game: only the app's own switcher
+    (/FROMSWITCHER=1, after it checked no match is on) may install while the game runs. }
+  if ProcRunning(GameProc()) and not FromSwitcher() then begin
+    Log('Age of Empires IV is running - setup stopped without changing anything');
+    Result := 'Age of Empires IV is running. Close the game first, then run setup again.';
+    if Relaunch() and (AppCount(True) = 0) then             { the panel's Update button closed it: bring it back }
+      Exec(ExpandConstant('{app}\AoE4 Spotify.exe'), '--panel', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, R);
+    Exit;
+  end;
+  ClosePanel();
+  KillApp();                                         { anything left: a switcher whose game has closed, login window }
   LaunchOptionAlreadySet := LaunchOptionOK();
   if LaunchOptionAlreadySet then begin Log('Launch option already set - Steam left alone'); Result := ''; Exit; end;
   if CloseSteam() then Result := '' else Result := 'Setup was cancelled because Steam must be closed while it finishes.';

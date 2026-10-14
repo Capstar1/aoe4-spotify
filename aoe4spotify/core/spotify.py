@@ -2,12 +2,12 @@
 """
 
 import base64, hashlib, http.server, json, os, random, secrets, sys, threading, time, urllib.error, urllib.parse, urllib.request, webbrowser
-from aoe4spotify.core.runtime import DATA, FileLock, REDIRECT, SCOPES, TOKEN, atomic_write, child_env, log, proc_running, test_env
-from aoe4spotify.core.settings import custom_tracks, is_custom
+from aoe4spotify.core.runtime import DATA, FileLock, REDIRECT, SCOPES, TOKEN, atomic_write, child_env, clean_env, log, log_once, proc_running, test_env
+from aoe4spotify.core.branding import APP_NAME
+from aoe4spotify.core import transition as _transition
+from aoe4spotify.core.settings import custom_tracks, is_custom, load_config
+from aoe4spotify.core import catalog as _cat
 
-def _g_gui():
-    import aoe4spotify.core.gui as _m
-    return _m
 
 STORE_APP = r"SpotifyAB.SpotifyMusic_zpdnekdrzrea0"
 def spotify_running(): return proc_running("Spotify.exe")
@@ -23,15 +23,18 @@ def launch_spotify():
     exe = os.path.join(os.environ.get("APPDATA", ""), "Spotify", "Spotify.exe")
     try:
         if os.path.isfile(exe):                                   # classic installer
-            subprocess.Popen([exe, "--minimized"], env=child_env(), creationflags=0x08000000); log("Started Spotify (minimized)"); return True
+            subprocess.Popen([exe, "--minimized"], env=clean_env(), creationflags=0x08000000, close_fds=True); log("Started Spotify (minimized)"); return True
         if os.path.isdir(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", STORE_APP)):   # Microsoft Store
-            subprocess.Popen(["explorer.exe", r"shell:AppsFolder\%s!Spotify" % STORE_APP], env=child_env()); log("Started Spotify (Microsoft Store app)"); return True
+            subprocess.Popen(["explorer.exe", r"shell:AppsFolder\%s!Spotify" % STORE_APP], env=clean_env(), close_fds=True); log("Started Spotify (Microsoft Store app)"); return True
         if _spotify_protocol_registered():
-            os.startfile("spotify:"); log("Started Spotify via spotify: link"); return True
+            subprocess.Popen(["explorer.exe", "spotify:"], env=clean_env(), close_fds=True); log("Started Spotify via spotify: link"); return True
     except Exception as e:
         log("Could not start Spotify: %r" % e); return False
     log("Spotify desktop app is NOT INSTALLED on this PC - install it from spotify.com to get music.")
     return False
+INTRO_LEAD = 1.2         # s before the intro ends: start the playlist (covers Spotify's ~1s start latency)
+INTRO_FADE_OUT = 0.4     # s: the intro's last moment dips fast; the playlist then fades in normally
+INTRO_OUTRO_MS = 12000                                 # last part of an intro song: often fades out on its own
 FADE_FLOOR_DB = -34.0                                  # quiet point of a switch (about 2% loudness, not silence)
 def fade_gain(t, floor_db=FADE_FLOOR_DB):
     """Amplitude for fade position t (0 = full, 1 = floor). Linear in decibels (even to the ear) with a
@@ -48,7 +51,7 @@ def local_guard(v, last=None):
         else:
             os.makedirs(DATA, exist_ok=True)
             atomic_write(p, json.dumps({"v": float(v), "last": None if last is None else float(last)}))
-    except Exception: pass
+    except Exception as e: log_once("Fade volume guard", e)
 def local_guard_restore():
     """After a crash mid-fade: undo our dip only if Spotify is still exactly where we left it (else it's the user's level)."""
     p = os.path.join(DATA, "fade_restore.json")
@@ -59,7 +62,7 @@ def local_guard_restore():
             sess.set(d["v"]); log("Restored Spotify app volume after an interrupted fade")
         else: log("Interrupted fade: volume was changed since, leaving it")
         os.remove(p)
-    except Exception: pass
+    except Exception as e: log_once("Fade volume restore", e)
 class SpotifySession:
     """Windows per-app volume of Spotify.exe (Core Audio session). Smooth and instant; local only."""
     def __init__(self, vols): self.vols = vols
@@ -148,12 +151,12 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
         L = _LOGIN; ver = L["states"].get(q.get("state") or "")
         if ver is None:                               # an old tab from an earlier attempt: keep waiting for the right one
             log("Login: ignored a callback from an outdated login tab")
-            self._page(400, "This login link is out of date", "Use the newest Spotify tab, or press Log in again in AoE4 Spotify."); return
+            self._page(400, "This login link is out of date", ("Use the newest Spotify tab, or press Log in again in " + APP_NAME + ".")); return
         if q.get("error"):
             L["got"] = ("error", str(q["error"])[:40]); self._page(200, "Spotify login cancelled", "You can close this tab."); return
         if not q.get("code"):
             self._page(400, "Spotify login failed", "No login code was returned. Try again."); return
-        L["got"] = ("code", q["code"], ver); self._page(200, "Spotify login done", "You can close this tab and return to AoE4 Spotify.")
+        L["got"] = ("code", q["code"], ver); self._page(200, "Spotify login done", ("You can close this tab and return to " + APP_NAME + "."))
     def log_message(self, *a): pass
 class Spotify:
     def __init__(self, cfg):
@@ -202,7 +205,7 @@ class Spotify:
             else:
                 try: srv = _CallbackServer(("127.0.0.1", 8888), _CallbackHandler)
                 except OSError:
-                    log("Login: port 8888 is busy (another AoE4 Spotify login window open?) - finish or close it and try again")
+                    log(("Login: port 8888 is busy (another " + APP_NAME + " login window open?) - finish or close it and try again"))
                     raise SystemExit("Login port 8888 is busy")
                 verifier = secrets.token_urlsafe(64)[:100]
                 challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
@@ -265,7 +268,7 @@ class Spotify:
                     if e.code in (400, 401):      # refresh token revoked/expired: forget it, user must log in again
                         d = self._disk_tok()
                         if d and d.get("refresh_token") != used: self.tok = d; raise   # someone saved a newer one: keep it
-                        log("Spotify login expired - open AoE4 Spotify and click Log in")
+                        log(("Spotify login expired - open " + APP_NAME + " and click Log in"))
                         self.tok = None
                         try: os.remove(TOKEN)
                         except OSError: pass
@@ -321,7 +324,7 @@ class Spotify:
             return ok
         payload = {"context_uri": uri}
         if self.shuffle and uri.startswith("spotify:playlist:"):
-            n = _g_gui().playlist_total(self, uri.split(":")[-1])
+            n = _cat.playlist_total(self, uri.split(":")[-1])
             payload["offset"] = {"position": random.randrange(n) if n > 0 else 0}
         self._last_fail = None
         ok = self._play(uri, payload, q)
@@ -347,6 +350,7 @@ class Spotify:
         if shuffle is not None: self._api("PUT", "/me/player/shuffle?state=%s%s" % ("true" if shuffle else "false", dq)); self._app_mode["shuffle"] = bool(shuffle)
         if repeat in ("off", "context", "track"): self._api("PUT", "/me/player/repeat?state=%s%s" % (repeat, dq)); self._app_mode["repeat"] = repeat
 
+    @_transition.wrap
     def hand_back(self, why, mode=None):
         """Put your shuffle / repeat back (volume has its own logic). Skipped if you changed them yourself meanwhile.
         mode: values to restore instead of the saved ones (Resume: the pre-match state)."""
@@ -385,6 +389,7 @@ class Spotify:
         self.device_id = dev["id"]
         return True
 
+    @_transition.wrap
     def _play(self, uri, payload, q):
         code, body = self._api("PUT", "/me/player/play" + q, payload)
         if code == 429 or code >= 500:               # rate limited / Spotify hiccup: one paced retry
@@ -438,6 +443,7 @@ class Spotify:
         self._pcache = (time.time(), c, st) if c == 200 else None
         return c, st
 
+    @_transition.wrap
     def pause(self):
         q = "?device_id=" + self.device_id if self.device_id else ""
         code, _ = self._api("PUT", "/me/player/pause" + q)
@@ -525,8 +531,10 @@ class Spotify:
         if not hasattr(self, "_tl"): self._tl = threading.local()
         return self._tl
 
-    def switch(self, uri, fade=2.0, player=None):
-        player = player or self.play
+    @_transition.wrap
+    def switch(self, uri, fade=2.0, player=None, fade_out=None):
+        """fade_out: seconds for the dip (default = fade); the intro hand-over uses a short one."""
+        player = player or self.play; fo = fade if fade_out is None else fade_out
         if not hasattr(self, "_glock"):
             self._glock = threading.Lock(); self._gen = 0
         with self._glock:
@@ -566,7 +574,7 @@ class Spotify:
         try:
             if not ctl:
                 return player(uri)
-            r = self._run_fade(ctl, fade, True, gen)
+            r = self._run_fade(ctl, fo, True, gen) if fo > 0.05 else "done"
             if r == "stop":
                 if gen != self._gen: return False
                 log("Spotify: volume control not allowed on this device, switching without fade")
@@ -574,7 +582,8 @@ class Spotify:
             if r == "user":
                 log("Volume changed during the fade: keeping your level, switching without fade")
                 return player(uri)
-            log("Fade: %s, %.1fs each way" % ("Windows app volume" if ctl["mode"] == "local" else "Spotify volume", fade))
+            log(("Fade: %s, %.1fs each way" % ("Windows app volume" if ctl["mode"] == "local" else "Spotify volume", fade)) if abs(fo - fade) < 0.05 else
+                ("Fade: %s, %.1fs out / %.1fs in" % ("Windows app volume" if ctl["mode"] == "local" else "Spotify volume", fo, fade)))
             ok = player(uri)
             if gen == self._gen: self._wait_started(old_item)
             r = self._run_fade(ctl, fade, False, gen)
@@ -631,6 +640,10 @@ class Spotify:
                 pend, self._pending = self._pending, None
             if pend:
                 log("Spotify resumed - switching to held %s playlist" % pend[0]); self.switch(pend[1], pend[2])
+                cb = getattr(self, "on_now_playing", None)
+                if cb:
+                    try: cb(pend[0])
+                    except Exception as e: log_once("Now-playing callback", e)
             return
 
     # ---- Age 4 Intro theme (config key boss_intro): play one track, then the age playlist (runs in a background thread)
@@ -646,23 +659,29 @@ class Spotify:
         if not ok: return self.switch(playlist, fade)
         _, tr = self._api("GET", "/tracks/" + track.split(":")[-1])
         dur = (tr or {}).get("duration_ms", 240000) if isinstance(tr, dict) else 240000
-        t0 = time.time(); started = False
+        t0 = time.time(); started = False; nap = 2.0
         while time.time() - t0 < dur / 1000.0 + 15:
-            time.sleep(2)
+            time.sleep(nap); nap = 2.0
             if gen != self._gen: return                     # a newer switch took over
             c, st = self._api("GET", "/me/player")
             if c != 200 or not isinstance(st, dict): continue
             item = (st.get("item") or {}).get("uri")
             if item == track: started = True
             if started and item != track: break             # ended or skipped by the user
-            if item == track and st.get("progress_ms", 0) >= dur - 2500: break   # about to end
+            if item == track and st.get("progress_ms", 0) >= dur - INTRO_OUTRO_MS: _transition.hold(INTRO_OUTRO_MS / 1000.0 + _transition.GRACE)   # quiet outro: not a pause
+            left = (dur - st.get("progress_ms", 0)) / 1000.0 if item == track else None
+            if left is not None and left <= INTRO_LEAD + 0.15: break           # hand over now: playlist starts as the intro ends
+            if left is not None and st.get("is_playing"): nap = max(0.1, min(2.0, left - INTRO_LEAD))   # wake exactly at the hand-over point
             if started and not st.get("is_playing") and st.get("progress_ms", 1) == 0: break
             if started and item == track and not st.get("is_playing"): t0 += 2   # paused by you: don't run the clock
         if gen != self._gen: return
         if self.user_paused(): return self.hold("playlist after intro", playlist, fade)
+        try: fade = float(load_config().get("fade_seconds", fade))           # Fade changed in the panel during the intro: use the new value
+        except Exception as e: log_once("Fade setting after intro", e)
         log("Age 4 Intro theme done -> playlist")
-        self.switch(playlist, fade)
+        self.switch(playlist, fade, fade_out=INTRO_FADE_OUT)                 # short dip on the intro's last second, normal fade-in
 
+    @_transition.wrap
     def switch_uris(self, track, fade):
         """Like switch(), but plays a single track (uris) instead of a playlist context."""
         q = "?device_id=" + self.device_id if self.device_id else ""
@@ -689,6 +708,7 @@ class Spotify:
     def pause_ours(self):
         self._paused_by_us = True; return self.pause()
 
+    @_transition.wrap
     def fade_pause(self, fade=2.0):
         """Fade out, pause, put the volume back (while paused). Our pause never counts as yours."""
         self._paused_by_us = True

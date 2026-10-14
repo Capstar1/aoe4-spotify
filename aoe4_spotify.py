@@ -16,16 +16,28 @@ Run:  python aoe4_spotify.py            (normal)
 """
 import os, sys, time, webbrowser
 
+if sys.argv[1:2] == ["--fire-preview"]:            # dev preview: run on a throwaway copy of your settings (never saved back)
+    import shutil, tempfile
+    _real = os.path.join(os.environ.get("APPDATA") or "", "AoE4Spotify"); _tmp = tempfile.mkdtemp(prefix="aoe4fire_")
+    os.makedirs(os.path.join(_tmp, "AoE4Spotify"))
+    for _n in ("config.json", "playlist_names.json"):
+        try: shutil.copy(os.path.join(_real, _n), os.path.join(_tmp, "AoE4Spotify", _n))
+        except Exception: pass
+    try: shutil.copytree(os.path.join(_real, "covers"), os.path.join(_tmp, "AoE4Spotify", "covers"))
+    except Exception: pass
+    os.environ["APPDATA"] = _tmp
+    os.environ["AOE4SPOTIFY_MUTEX_SUFFIX"] = os.environ.get("AOE4SPOTIFY_MUTEX_SUFFIX", "") + "_firepreview"
+
 from aoe4spotify.core import runtime as _runtime
 from aoe4spotify.core import settings as _settings
 from aoe4spotify.core import spotify as _spotify
 from aoe4spotify.core import playback as _playback
 from aoe4spotify.core import access as _access
 from aoe4spotify.core import updater as _updater
-from aoe4spotify.core import gui as _gui
 from aoe4spotify.core import byo as _byo
 from aoe4spotify.core import app as _app
-from aoe4spotify.games import aoe4 as _aoe4
+from aoe4spotify.games import registry as _registry
+from aoe4spotify.games import aoe4 as _aoe4          # the games this build ships register themselves on import
 from aoe4spotify.games import aoe4_setup as _aoe4_setup
 from aoe4spotify.games import base as _base
 
@@ -36,8 +48,13 @@ def _publish(mod):
             continue
         g[key] = value
 
-for _mod in (_runtime, _settings, _spotify, _playback, _aoe4, _aoe4_setup, _base, _access, _updater, _gui, _byo, _app):
+for _mod in (_runtime, _settings, _spotify, _playback, _aoe4, _aoe4_setup, _base, _registry, _access, _updater, _byo, _app):
     _publish(_mod)
+
+def __getattr__(name):                             # UI names (panel widgets, editor, ...) load on first use only
+    from aoe4spotify.core import gui as _gui
+    try: return getattr(_gui, name)
+    except AttributeError: raise AttributeError(name) from None
 
 if __name__ == "__main__":
     try:

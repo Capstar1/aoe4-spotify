@@ -1,27 +1,36 @@
 """Install config, the per-user settings overlay, playlists, and intro presets.
 """
 
-import base64, json, os, re, threading
+import base64, json, os, re, threading, time
 from aoe4spotify.core.runtime import CONFIG, DATA, TOKEN, atomic_write, log
+from aoe4spotify.core.branding import APP_NAME, LIST_PREFIX, SHARE_PREFIX
+from aoe4spotify.games.registry import active as game
+from aoe4spotify.core import catalog as _cat     # game catalogue (no UI import)
 
-def _g_gui():
-    import aoe4spotify.core.gui as _m
-    return _m
 
 USER_CONFIG = os.path.join(DATA, "config.json")   # settings from the control panel (overlay)
+class ConfigMissing(Exception):
+    """config.json is missing or unreadable (broken install)."""
 def load_config(user=True):
     """Install config.json, with the user's panel settings from %APPDATA%/AoE4Spotify laid on top."""
-    with open(CONFIG, encoding="utf-8") as f: cfg = json.load(f)
+    try:
+        with open(CONFIG, encoding="utf-8") as f: cfg = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ConfigMissing(("App settings file %s could not be read (%r) - reinstall " + APP_NAME) % (CONFIG, e))
     cfg.setdefault("default_playlists", dict(cfg.get("playlists", {})))
     if not user: return cfg
     return apply_user(cfg, load_user_settings())
 def load_user_settings():
     """Panel settings; a missing or damaged file just means 'no changes'."""
-    try:
-        with open(USER_CONFIG, encoding="utf-8") as f: u = json.load(f)
-        return u if isinstance(u, dict) else {}
-    except FileNotFoundError: return {}
-    except Exception as e: log("Settings file damaged, using defaults: %r" % e); return {}
+    err = None
+    for i in range(6):                     # the panel may be replacing it this very moment (other process): retry briefly
+        try:
+            with open(USER_CONFIG, encoding="utf-8") as f: u = json.load(f)
+            return u if isinstance(u, dict) else {}
+        except FileNotFoundError: return {}
+        except (PermissionError, ValueError) as e: err = e; time.sleep(0.05 * (i + 1))
+        except Exception as e: err = e; break
+    log("Settings file damaged, using defaults: %r" % err); return {}
 def client_id_ok(v):
     """A Spotify Client ID is 32 hex characters. The Client Secret is the same shape, so the screen has to say which."""
     return isinstance(v, str) and len(v) == 32 and all(c in "0123456789abcdefABCDEF" for c in v)
@@ -66,12 +75,14 @@ def apply_user(cfg, u):
     if isinstance(u.get("fade_seconds"), (int, float)): cfg["fade_seconds"] = max(0.0, min(5.0, float(u["fade_seconds"])))
     if isinstance(u.get("boss_intro_enabled"), bool): cfg.setdefault("boss_intro", {})["enabled"] = u["boss_intro_enabled"]
     if isinstance(u.get("after_match"), dict): cfg["after_match"] = u["after_match"]
+    cfg["music_in_replays"] = bool(u.get("music_in_replays", cfg.get("music_in_replays", False)))   # off by default
     cfg["intros"] = build_intros(cfg, u)
-    cfg["boss_intro"]["pools"] = cfg["intros"]["imperial"]["pools"]          # (older readers)
+    cfg["boss_intro"]["pools"] = cfg["intros"][DEFAULT_AGE]["pools"]          # (older readers)
     return cfg
-INTRO_AGES = ("dark", "feudal", "castle", "imperial")
+INTRO_AGES = tuple(game().intro_phase_keys())   # from the active game adapter (AoE4: dark/feudal/castle/imperial)
+DEFAULT_AGE = game().default_intro_key()        # phase with built-in default pools, on by default (AoE4: imperial)
 AFTER_MODES = ("stop", "playlist", "resume")
-CUSTOM_PREFIX = "aoe4s:list:"; CUSTOM_MAX = 100
+CUSTOM_PREFIX = LIST_PREFIX; CUSTOM_MAX = 100
 def is_custom(uri): return isinstance(uri, str) and uri.startswith(CUSTOM_PREFIX)
 def is_playable(uri): return isinstance(uri, str) and (uri.startswith("spotify:") or is_custom(uri)) and "PASTE" not in uri
 def custom_get(uri, u=None):
@@ -82,8 +93,8 @@ def custom_get(uri, u=None):
 def custom_tracks(uri, u=None):
     return [t["uri"] for t in ((custom_get(uri, u) or {}).get("tracks") or [])
             if isinstance(t, dict) and str(t.get("uri", "")).startswith("spotify:track:")][:CUSTOM_MAX]
-def custom_cover(uri): return os.path.join(_g_gui().COVERS, "list_%s.png" % uri[len(CUSTOM_PREFIX):])
-RE_AM_URI = re.compile(r"(spotify:(playlist|track):[A-Za-z0-9]{22}|aoe4s:list:[A-Za-z0-9]{1,32})$")
+def custom_cover(uri): return os.path.join(_cat.COVERS, "list_%s.png" % uri[len(CUSTOM_PREFIX):])
+RE_AM_URI = re.compile(r"(spotify:(playlist|track):[A-Za-z0-9]{22}|" + re.escape(LIST_PREFIX) + r"[A-Za-z0-9]{1,32})$")
 def after_match_cfg(cfg):
     a = cfg.get("after_match") if isinstance(cfg.get("after_match"), dict) else {}
     def u(k):
@@ -101,10 +112,10 @@ def user_intro_pools(u, base_pools=None):
     (a civ with no songs has no intro). Before v2 the other ages were copies of the Imperial defaults:
     civ lists that are just those defaults are dropped (blank), genuine edits are kept."""
     ip = u.get("intro_pools") if isinstance(u.get("intro_pools"), dict) else {}
-    if isinstance(u.get("boss_pools"), dict) and "imperial" not in ip: ip = {**ip, "imperial": u["boss_pools"]}
+    if isinstance(u.get("boss_pools"), dict) and DEFAULT_AGE not in ip: ip = {**ip, DEFAULT_AGE: u["boss_pools"]}
     if not u.get("intro_v2") and base_pools is not None:
         ip = dict(ip)
-        for age in ("dark", "feudal", "castle"):
+        for age in (a for a in INTRO_AGES if a != DEFAULT_AGE):
             if isinstance(ip.get(age), dict):
                 ip[age] = {c: l for c, l in ip[age].items() if isinstance(l, list) and l and sorted(l) != sorted(base_pools.get(c) or base_pools.get("__default__") or [])}
                 if not ip[age]: ip.pop(age)
@@ -120,16 +131,16 @@ def build_intros(cfg, u):
     """{age: {"enabled": bool, "pools": {civ: [track uris]}}}. Every age starts from the default pools;
     only the ages listed in boss_intro.ages (default Imperial) are on until you switch others on."""
     b = cfg.setdefault("boss_intro", {}); base_pools = dict(b.get("pools") or {})
-    ages_on = b.get("ages") or ["imperial"]; ia = u.get("intro_ages") if isinstance(u.get("intro_ages"), dict) else {}
+    ages_on = b.get("ages") or [DEFAULT_AGE]; ia = u.get("intro_ages") if isinstance(u.get("intro_ages"), dict) else {}
     ip = user_intro_pools(u, {**base_pools, "__default__": b.get("default") or []}); out = {}
     for age in INTRO_AGES:
-        pools = dict(base_pools) if age == "imperial" else {}           # other ages start blank
+        pools = dict(base_pools) if age == DEFAULT_AGE else {}           # other ages start blank
         for civ, lst in (ip.get(age) or {}).items():
-            if isinstance(lst, list) and (lst or age == "imperial") and all(isinstance(x, str) and x.startswith("spotify:track:") for x in lst):
+            if isinstance(lst, list) and (lst or age == DEFAULT_AGE) and all(isinstance(x, str) and x.startswith("spotify:track:") for x in lst):
                 pools[civ] = list(lst)
         out[age] = {"enabled": ia[age] if isinstance(ia.get(age), bool) else age in ages_on, "pools": pools}
     return out
-PRESET_VER = 1; PRESET_PREFIX = "AOE4S%d:" % PRESET_VER; DEFAULT_PRESET_NAME = "Default"
+PRESET_VER = 1; PRESET_PREFIX = SHARE_PREFIX + "%d:" % PRESET_VER; DEFAULT_PRESET_NAME = "Default"
 _TRACK_RE = re.compile(r"^spotify:track:[A-Za-z0-9]{22}$")
 def preset_from_user(u, name):
     """A preset = every age's civ->song lists, age on/off and the custom songs those lists use."""
@@ -146,7 +157,7 @@ def preset_key(u, p=None):
     ages = (p or {}).get("ages") if p is not None else u.get("intro_ages")
     pk = {a: {c: sorted(v) for c, v in (d or {}).items() if v} for a, d in (pools or {}).items()}
     pk = {a: d for a, d in pk.items() if d}
-    on = {a: bool((ages or {}).get(a, a == "imperial")) for a in INTRO_AGES}
+    on = {a: bool((ages or {}).get(a, a == DEFAULT_AGE)) for a in INTRO_AGES}
     return json.dumps([pk, on], sort_keys=True)
 def apply_preset(u, p):
     """Switch the user's lists to preset p (custom songs it uses are added to YOURS; nothing is removed)."""
@@ -165,6 +176,22 @@ def unique_preset_name(u, name):
     n = 2
     while ("%s (%d)" % (name, n)).lower() in names: n += 1
     return "%s (%d)" % (name, n)
+AUTO_PRESET_NAME = "Custom"
+def autosave_preset(u):
+    """Autosave: write the current lists into the current user preset. The built-in Default is never written:
+    editing while on it creates a new 'Custom' preset (unique name) and switches to it. Returns the created name, else None."""
+    n = u.get("intro_preset") or DEFAULT_PRESET_NAME
+    cur = next((p for p in user_presets(u) if p["name"] == n), None)
+    if cur is not None and preset_key(u, cur) == preset_key(u): return None
+    ps = [p for p in (u.get("intro_presets") or []) if isinstance(p, dict)]
+    if cur is not None and not cur.get("builtin"):
+        u["intro_presets"] = [preset_from_user(u, n) if p.get("name") == n else p for p in ps]; return None
+    name = unique_preset_name(u, AUTO_PRESET_NAME if (cur is not None or n == DEFAULT_PRESET_NAME) else n)
+    u["intro_presets"] = ps + [preset_from_user(u, name)]; u["intro_preset"] = name; return name
+def migrate_autosave(u):
+    """One-time: unsaved edits from the old Save-button era go into the current user preset (or a new 'Custom' if on Default)."""
+    if u.get("intro_autosave"): return False
+    autosave_preset(u); u["intro_autosave"] = True; return True
 def encode_preset(p):
     import zlib
     d = {k: p.get(k) for k in ("v", "name", "pools", "ages", "custom")}; d["v"] = PRESET_VER
@@ -174,9 +201,9 @@ def decode_preset(code):
     """(preset, None) or (None, short reason). Accepts surrounding whitespace / line breaks."""
     import zlib
     code = re.sub(r"\s+", "", code or "")
-    m = re.match(r"^AOE4S(\d+):(.*)$", code)
-    if not m: return None, "Not an AoE4 Spotify code"
-    if int(m.group(1)) != PRESET_VER: return None, "Made with a newer version - update AoE4 Spotify"
+    m = re.match(r"^" + re.escape(SHARE_PREFIX) + r"(\d+):(.*)$", code)
+    if not m: return None, ("Not an " + APP_NAME + " code")
+    if int(m.group(1)) != PRESET_VER: return None, ("Made with a newer version - update " + APP_NAME)
     try:
         b = m.group(2)
         if len(b) > 1 << 18: return None, "Code is too big"
@@ -185,8 +212,8 @@ def decode_preset(code):
         d = json.loads(raw.decode("utf-8"))
     except Exception: return None, "Code is incomplete or damaged"
     if not isinstance(d, dict): return None, "Code is incomplete or damaged"
-    if d.get("v") != PRESET_VER: return None, "Made with a newer version - update AoE4 Spotify"
-    civs = {c for c, _ in _g_gui().CIV_LIST}; pools = {}; ages = {}; custom = []
+    if d.get("v") != PRESET_VER: return None, ("Made with a newer version - update " + APP_NAME)
+    civs = {c for c, _ in _cat.CIV_LIST}; pools = {}; ages = {}; custom = []
     for a, dd in (d.get("pools") or {}).items() if isinstance(d.get("pools"), dict) else ():
         if a in INTRO_AGES and isinstance(dd, dict):
             ok_ = {c: list(dict.fromkeys(x for x in v if isinstance(x, str) and _TRACK_RE.match(x)))[:12]
@@ -201,7 +228,7 @@ def decode_preset(code):
             e = {"uri": c["uri"], "name": str(c.get("name") or "Song")[:80], "artist": str(c.get("artist") or "")[:80]}
             if isinstance(c.get("cover"), str) and c["cover"].startswith("https://"): e["cover"] = c["cover"][:300]
             custom.append(e)
-    known = {x[3] for x in _g_gui().BUILTIN_SONGS} | {c["uri"] for c in custom}
+    known = {x[3] for x in _cat.BUILTIN_SONGS} | {c["uri"] for c in custom}
     if used - known: return None, "Code uses songs it doesn't include"
     if "pools" not in d and "ages" not in d: return None, "Code has no intro lists"
     name = str(d.get("name") or "Shared").strip()[:40] or "Shared"
@@ -211,13 +238,13 @@ def preset_counts(base_cfg, p):
     out = {}
     for a in INTRO_AGES:
         dd = (p.get("pools") or {}).get(a) or {}
-        out[a] = sum(1 for c, _ in _g_gui().CIV_LIST if (dd[c] if c in dd else (_g_gui().default_pool(base_cfg, c) if a == "imperial" else [])))
+        out[a] = sum(1 for c, _ in _cat.CIV_LIST if (dd[c] if c in dd else (_cat.default_pool(base_cfg, c) if a == DEFAULT_AGE else [])))
     return out
 def preset_songs(base_cfg, p):
     """Distinct songs a preset uses (canonical order)."""
-    us = [x for a in INTRO_AGES for c, _ in _g_gui().CIV_LIST
-          for x in ((((p.get("pools") or {}).get(a) or {})[c] if c in ((p.get("pools") or {}).get(a) or {}) else None) or (_g_gui().default_pool(base_cfg, c) if a == "imperial" and c not in ((p.get("pools") or {}).get(a) or {}) else []))]
-    return _g_gui().song_sorted(us)
+    us = [x for a in INTRO_AGES for c, _ in _cat.CIV_LIST
+          for x in ((((p.get("pools") or {}).get(a) or {})[c] if c in ((p.get("pools") or {}).get(a) or {}) else None) or (_cat.default_pool(base_cfg, c) if a == DEFAULT_AGE and c not in ((p.get("pools") or {}).get(a) or {}) else []))]
+    return _cat.song_sorted(us)
 def load_user(): return load_user_settings()
 _save_lock = threading.RLock()
 _LIVE_USER = []                                     # the panel's in-memory settings dict (when the panel runs)

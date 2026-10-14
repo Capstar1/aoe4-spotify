@@ -6,6 +6,7 @@ the per-user settings overlay, so an update does not wipe it.
 
 from aoe4spotify.core.access import ACCESS_THEMES, ACCOUNT_URL
 from aoe4spotify.core.runtime import REDIRECT, dark_window, log, release_window, reveal, set_titlebar, single_window, test_env, windows_light
+from aoe4spotify.core.branding import APP_NAME
 from aoe4spotify.core.settings import clear_own_client, client_id_ok, load_user_settings, save_own_client, using_own_app
 
 def _g_gui():
@@ -24,7 +25,7 @@ def byo_dialog(parent=None, on_saved=None, on_shared=None, problem=False):
     to the shared app. Either way the previous Spotify login is dropped when the
     id actually changes, and the caller logs in again.
     """
-    if not single_window("byo", "AoE4 Spotify - Your Spotify app"): return None
+    if not single_window("byo", (APP_NAME + " - Your Spotify app")): return None
     import tkinter as tk, webbrowser as wb
     own = parent is None
     win = tk.Tk() if own else tk.Toplevel(parent)
@@ -32,7 +33,7 @@ def byo_dialog(parent=None, on_saved=None, on_shared=None, problem=False):
     th = {"light": windows_light()}
     P = lambda: ACCESS_THEMES["light" if th["light"] else "dark"]
     p0 = P()
-    dark_window(win, p0["bg"]); win.title("AoE4 Spotify"); win.resizable(False, False)
+    dark_window(win, p0["bg"]); win.title(APP_NAME); win.resizable(False, False)
     win.bind("<Destroy>", lambda e: release_window("byo") if e.widget is win else None, add="+")
     S = win.winfo_fpixels("1i") / 96.0
     F = lambda sz, b=True: ("Segoe UI", -int(round(sz * S)), "bold" if b else "normal")
@@ -104,7 +105,7 @@ def byo_dialog(parent=None, on_saved=None, on_shared=None, problem=False):
 
     c1 = card(); num(c1, 1).grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, int(10 * S)))
     title(c1, "Create an app").grid(row=0, column=1, sticky="w")
-    body(c1, "Open the dashboard and log in with the Spotify account you play with. Click Create app, name it AoE4 Spotify, tick Web API, and save.").grid(row=1, column=1, sticky="w")
+    body(c1, ("Open the dashboard and log in with the Spotify account you play with. Click Create app, name it " + APP_NAME + ", tick Web API, and save.")).grid(row=1, column=1, sticky="w")
     ghost(c1, "Open Spotify Dashboard", lambda: wb.open(DASHBOARD_URL)).grid(row=2, column=1, sticky="w", pady=(int(8 * S), 0))
 
     c2 = card(); num(c2, 2).grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, int(10 * S)))

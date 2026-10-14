@@ -3,6 +3,7 @@
 
 import json, os, re, threading, time, urllib.error, urllib.parse, urllib.request
 from aoe4spotify.core.runtime import VERSION, dark_window, log, release_window, reveal, set_canvas_height, set_titlebar, single_window, test_env, windows_light
+from aoe4spotify.core.branding import APP_NAME
 from aoe4spotify.core.settings import load_config, load_user_settings, merge_user
 from aoe4spotify.core.spotify import Spotify
 
@@ -40,8 +41,7 @@ def access_status(sp):
     c, r = sp._api("GET", "/me")
     if c == 200: return "ok"
     return "blocked" if not_invited(c, r) else None
-ACCESS_URL = "https://capstar.app/api/aoe4-spotify/access-request"     # capstar.app relay; holds the routine key server-side
-ACCESS_PREFIX = "https://capstar.app/api/aoe4-spotify/"
+from aoe4spotify.core.branding import ACCESS_PREFIX, ACCESS_URL, APP_ID     # capstar.app relay; holds the routine key server-side
 def webhook_ok(url):
     """Only the capstar.app relay (test mode may also use a local fake server)."""
     if not isinstance(url, str) or not url: return False
@@ -66,7 +66,7 @@ def send_access_request(cfg=None, email=None, name=None, now=None):
     if not email: return "bad"
     u = load_user_settings()
     if now - float(u.get("access_last") or 0) < ACCESS_GAP: return "wait"
-    hdr = {"Content-Type": "application/json", "User-Agent": "AoE4Spotify/" + VERSION}
+    hdr = {"Content-Type": "application/json", "User-Agent": APP_ID + "/" + VERSION}
     body = {"email": email}
     if name: body["name"] = name
     try:
@@ -91,7 +91,7 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000, on_
     """Simple 3-step 'Not invited yet' guide. Everything is drawn on one canvas from 4x-supersampled images on a
     strict grid (cards r=12, pill buttons, box r=8); follows the Windows light/dark theme live.
     Rechecks every minute; closes and calls on_allowed() once access works."""
-    if not single_window("access", "AoE4 Spotify - Get access"): return None
+    if not single_window("access", (APP_NAME + " - Get access")): return None
     import tkinter as tk, webbrowser as wb
     from PIL import Image, ImageDraw, ImageTk, ImageFont
     own = parent is None
@@ -99,7 +99,7 @@ def access_dialog(parent=None, on_allowed=None, name=None, recheck_ms=60000, on_
     if own: _g_gui().install_edit_menu(win)
     if own: win.withdraw()
     th = {"light": windows_light()}; P = lambda: ACCESS_THEMES["light" if th["light"] else "dark"]
-    dark_window(win, P()["bg"]); win.title("AoE4 Spotify"); win.resizable(False, False)
+    dark_window(win, P()["bg"]); win.title(APP_NAME); win.resizable(False, False)
     win.bind("<Destroy>", lambda e: release_window("access") if e.widget is win else None, add="+")
     S = win.winfo_fpixels("1i") / 96.0; F = lambda sz, b=True: ("Segoe UI", -int(round(sz * S)), "bold" if b else "normal")
     cfg = load_config(); st = {"sent": False, "job": None, "clip": None, "allowed": False, "hov": None, "focus": False, "b3": "disabled", "b3t": "Send request", "note": None}
