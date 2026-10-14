@@ -23,3 +23,12 @@ body.inactive #tbtitle, body.inactive .tbb i { background: #797979; }
 .hit { cursor: pointer; }
 .chip { position: absolute; border-radius: 50%; pointer-events: none; }
 .chip img { position: absolute; left: 2px; top: 2px; border-radius: 50%; }
+.glow { position: absolute; pointer-events: none; border-radius: 50%;
+  background: radial-gradient(circle closest-side, transparent calc(var(--r) - 0.5px), rgba(29,185,84,.55) var(--r), rgba(29,185,84,.18) calc(var(--r) + 7px), rgba(29,185,84,0) 100%);
+  animation: breathe 1.8s ease-in-out infinite; }
+.glow::after { content: ""; position: absolute; inset: calc(16px - 1.6px - 0.7px); border-radius: 50%; border: 1.4px solid #8fe0aa; opacity: .92; }
+@keyframes breathe { 0%,100% { opacity: .55; transform: scale(.94); } 50% { opacity: 1; transform: scale(1.04); } }
+.eq { position: absolute; width: 12px; height: 12px; border-radius: 50%; background: #121212; box-sizing: border-box; border: 1.2px solid #1DB954; pointer-events: none; }
+.eq i { position: absolute; bottom: 3.3px; width: 1.7px; height: 4px; border-radius: 1px; background: #1DB954; transform-origin: bottom; animation: eq .9s ease-in-out infinite alternate; }
+@keyframes eq { from { transform: scaleY(.45); } to { transform: scaleY(1.35); } }
+

@@ -190,7 +190,7 @@ function drawIntros(s) {
   sprite("share", IW - 121, y - 15, IW - 91, y + 15); sprite("import", IW - 73, y - 15, IW - 43, y + 15);
   s.ages.forEach(([k, lab], i) => {
     const cy = OV_TOP + i * OV_STEP, o = s.intros[k], on = o.on, n = o.n;
-    const card = rr(20, cy, IW - 20, cy + OV_CARD, 18, C.card); card.classList.add("hit");
+    const card = rr(20, cy, IW - 20, cy + OV_CARD, 18, C.card); card.classList.add("hit"); card.onclick = () => openAge(k);
     let more = null;
     hov(card, () => { card.style.background = "#262626"; card.style.border = "1px solid #464646"; if (more) more.style.background = "#262626"; },
               () => { card.style.background = C.card; card.style.border = "none"; if (more) more.style.background = C.card; });
@@ -233,18 +233,19 @@ async function apply(p) {
   setFrame(p); page = p; applied = p;
   await frames(3); await invoke("region", b);
 }
-function render(s) { S = s; const mh = drawMain(s), ih = drawIntros(s); sizes = { main: [W, mh], intros: [IW, ih] }; }
+function render(s) { S = s; const mh = drawMain(s), ih = drawIntros(s), ah = drawAge(s); sizes = { main: [W, mh], intros: [IW, ih], age: [IW, ah] }; }
 async function redraw(geom) { if (!S) return; render(S); if (geom || (applied && frameRect(applied).h !== parseFloat($("frame").style.height))) await apply(page); }
 async function go(p) { await apply(p); }
 window.go = go;
-document.addEventListener("keydown", (e) => { if ((e.key === "Escape" || e.key === "Backspace") && page === "intros") go("main"); });
+document.addEventListener("keydown", (e) => { if ((e.key === "Escape" || e.key === "Backspace") && page === "intros") go("main"); else if ((e.key === "Escape" || e.key === "Backspace") && page === "age") { go("intros"); age.k = null; } });
 const W_ = window.__TAURI__.window.getCurrentWindow();
 $("tbmin").onclick = () => W_.minimize(); $("tbclose").onclick = () => W_.close();
 window.addEventListener("blur", () => document.body.classList.add("inactive")); window.addEventListener("focus", () => document.body.classList.remove("inactive"));
 let lastJ = "";
 async function tick() {
   try { const s = await invoke("get_state"); const j = JSON.stringify([s.settings, s.spotify, s.status.in_match, s.status.age, s.status.watching, s.intros]);
-    if (j !== lastJ) { const first = !lastJ; lastJ = j; render(s); if (first) { await apply("main"); invoke("cfg").then((c) => { if (c.menutest) setTimeout(() => menuTest().catch((e) => invoke("dbg", { s: "ERROR " + e + "\n" + (window.__mt || []).join("\n") })), 1500); }); } else await redraw(); } } catch (e) { console.error(e); }
+    if (j !== lastJ) { const first = !lastJ; lastJ = j; render(s); if (first) { await apply("main"); invoke("cfg").then((c) => { if (c.open) setTimeout(() => { const [pg, k, tr, hv, pl] = c.open.split(":"); if (tr) age.tray = tr; if (pg === "age") openAge(k); else go(pg);
+      setTimeout(() => { const d = S.agedata; if (hv) { age.hovTray = +hv; redraw(); } if (pl) { age.song = d.songs[+pl][0]; redraw(); } }, 300); }, 300); if (c.menutest) setTimeout(() => menuTest().catch((e) => invoke("dbg", { s: "ERROR " + e + "\n" + (window.__mt || []).join("\n") })), 1500); }); } else await redraw(); } } catch (e) { console.error(e); }
   setTimeout(tick, 500);
 }
 tick();
