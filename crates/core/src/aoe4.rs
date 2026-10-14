@@ -20,6 +20,7 @@ pub struct Aoe4 {
     in_match: bool,
     replay: bool,
     result: Option<i32>,
+    ended: bool,
     ages: HashMap<i32, String>,
     resolver: IdResolver,
 }
@@ -52,7 +53,7 @@ impl Aoe4 {
                 end: r(r"MOD -- Game Over at frame|GameObj::ShutdownGameObj"),
             },
             me_name: None, me_profile: None, humans: vec![], first_human: None, my_slot: None, my_civ: None,
-            my_hidx: None, my_id: None, in_match: false, replay: false, result: None, ages: HashMap::new(), resolver,
+            my_hidx: None, my_id: None, in_match: false, replay: false, result: None, ended: false, ages: HashMap::new(), resolver,
         }
     }
 
@@ -69,7 +70,7 @@ impl Aoe4 {
 
     fn reset_match(&mut self) {
         self.humans.clear(); self.first_human = None; self.my_slot = None; self.my_civ = None; self.my_hidx = None;
-        self.my_id = None; self.in_match = false; self.replay = false; self.result = None; self.ages.clear();
+        self.my_id = None; self.in_match = false; self.replay = false; self.result = None; self.ended = false; self.ages.clear();
     }
 
     fn is_player(&mut self, out: &mut Vec<GameEvent>) -> bool {
@@ -129,7 +130,10 @@ impl GameAdapter for Aoe4 {
         if let Some(c) = self.re.steam.captures(line) { self.me_name = Some(c[1].to_string()); self.me_profile = None; }
         if self.me_profile.is_none() { if let Some(c) = self.re.profile.captures(line) { self.me_profile = Some(c[1].to_string()); } }
         if let Some(c) = self.re.result.captures(line) {
-            if Some(&c[1]) == self.me_profile.as_deref() { self.result = c[2].parse().ok(); }
+            if Some(&c[1]) == self.me_profile.as_deref() {
+                self.result = c[2].parse().ok();
+                if self.ended && !self.replay { if let Some(r @ (0 | 1)) = self.result { out.push(GameEvent::MatchResult { result: r }); self.ended = false; } }
+            }
             return out;
         }
         if self.re.begin.is_match(line) { self.reset_match(); return out; }
@@ -164,7 +168,7 @@ impl GameAdapter for Aoe4 {
             return out;
         }
         if self.re.end.is_match(line) && self.in_match {
-            self.in_match = false;
+            self.in_match = false; self.ended = self.result.is_none();
             out.push(GameEvent::MatchEnd { result: self.result });
             return out;
         }

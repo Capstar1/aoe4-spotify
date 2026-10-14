@@ -38,6 +38,14 @@ fn match_switches_ages_and_restores() {
 }
 
 #[test]
+fn result_after_end_is_captured() {
+    let mut l = MATCH.to_vec(); let r = l.remove(9); l.push(r);       // real logs: result line comes AFTER Game Over
+    let (evs, _) = run(&l);
+    assert!(evs.contains(&GameEvent::MatchEnd { result: None }));
+    assert_eq!(evs.last(), Some(&GameEvent::MatchResult { result: 1 }));
+}
+
+#[test]
 fn result_reported() {
     let (evs, _) = run(MATCH);
     assert!(evs.contains(&GameEvent::MatchEnd { result: Some(1) }));

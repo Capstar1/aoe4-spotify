@@ -9,6 +9,8 @@ pub enum GameEvent {
     Age { key: String, reason: String },
     Replay,
     MatchEnd { result: Option<i32> },
+    /// The game reports win/loss a moment AFTER the end line: 1 victory, 0 defeat.
+    MatchResult { result: i32 },
 }
 
 /// One supported game. Core only talks to this trait.

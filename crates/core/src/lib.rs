@@ -3,4 +3,5 @@ pub mod aoe4;
 pub mod game;
 pub mod logtail;
 pub mod settings;
+pub mod spotify;
 pub mod switcher;
