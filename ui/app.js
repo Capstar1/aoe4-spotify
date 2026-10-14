@@ -5,7 +5,8 @@ const $ = (id) => document.getElementById(id);
 const C = { bg: "#121212", card: "#1f1f1f", tx: "#f2f2f2", mu: "#9a9a9a", off: "#3a3a3a", line: "#2a2a2a", ib: "#2a2a2a",
             idle: "#8a8a8a", red: "#e5484d", acc: "#1DB954", dis: "#555555", org: "#f0a030" };
 const ROMAN = ["I", "II", "III", "IV"];
-const G0 = "#1DB954", GREY_ACC = "#5a5a5a";
+const G0 = "#1DB954", GREY_ACC = "#6e6e6e", CORAL = "#e5675f", CORAL_TX = "#f0d6d4";
+const ACC_SPRITES = new Set(["fade", "plicon", "crown", "flag", "icrown", "power"]);   // single-colour icons: drawn as masks in the current accent
 const DPR = () => window.devicePixelRatio || 1;
 const fpx = (sz) => Math.floor(sz * DPR()) / DPR();          // Tk: font size -int(sz * S) device px
 let host = null;
@@ -29,9 +30,15 @@ function text(x, y, s, sz, c, b, anchor) {
   if (anchor === "e") { e.style.right = (host._w - x) + "px"; } else if (anchor === "center") { e.style.left = x + "px"; e.style.transform = "translateX(-50%)"; } else e.style.left = x + "px";
   return e;
 }
-function sprite(name, x0, y0, x1, y1) {
+function sprite(name, x0, y0, x1, y1, col) {
+  if (ACC_SPRITES.has(name)) {
+    const m = `image-set(url(img/mk_${name}@1.png) 1x, url(img/mk_${name}@1.5.png) 1.5x)`;
+    return el("div", "a", { left: x0 + "px", top: y0 + "px", width: (x1 - x0) + "px", height: (y1 - y0) + "px", background: col || C.acc,
+      webkitMaskImage: m, webkitMaskSize: "100% 100%", pointerEvents: "none" });
+  }
   const e = el("img", "a", { left: x0 + "px", top: y0 + "px", width: (x1 - x0) + "px", height: (y1 - y0) + "px" });
-  e.srcset = `img/${name}@1.png 1x, img/${name}@1.5.png 1.5x`; e.src = `img/${name}@1.png`; e.draggable = false; return e;
+  e.srcset = `img/${name}@1.png 1x, img/${name}@1.5.png 1.5x`; e.src = `img/${name}@1.png`; e.draggable = false;
+  return e;
 }
 const covers = {};
 function coverImg(uri, x0, y0, sz, r) {
@@ -81,9 +88,11 @@ function drawMain(s) {
   hline(M, 62, R_, C.line);
   // Enabled
   C.acc = set.enabled ? G0 : GREY_ACC;
-  if (set.enabled) rr(M, 72, R_, 120, 12, C.card); else rr(M, 72, R_, 120, 12, "#2a1c1c", "#5a3330");
-  sprite("power", M + 10, 82, M + 38, 110); if (!set.enabled) host.lastChild.style.filter = "grayscale(1) brightness(0.8)";
-  text(M + 50, 96, set.enabled ? "Enabled" : "Disabled", 16, set.enabled ? C.tx : "#f08a80", true); toggle(R_ - 12 - 52, 96 - 14, set.enabled, 52, 28);
+  if (set.enabled) rr(M, 72, R_, 120, 12, C.card);
+  else { rr(M, 72, R_, 120, 12, "#2a1c1c", "#5a3330").style.boxShadow = "0 0 9px 1px rgba(229,103,95,0.27)"; }   // 1.0.9 red tint + soft glow
+  const pw = sprite("power", M + 10, 82, M + 38, 110, set.enabled ? G0 : CORAL);                                       // off: coral, turned upside down
+  if (!set.enabled) { pw.style.transform = "rotate(180deg)"; pw.style.transformOrigin = "50% 54%"; }
+  text(M + 50, 96, set.enabled ? "Enabled" : "Disabled", 16, set.enabled ? C.tx : CORAL_TX, true); toggle(R_ - 12 - 52, 96 - 14, set.enabled, 52, 28);
   // Spotify / Game chips
   const cw = (W - 2 * M - 10) / 2; let x = M;
   const sc = hit(rr(x, 130, x + cw, 162, 16, "#242424", "#3a3a3a"), () => invoke(sp.logged_in ? "logout" : "login"));
@@ -125,7 +134,7 @@ function drawMain(s) {
   // Age Intros
   const base = PL_TOP + (ui.open ? PL_H : 36) + 10; y = base;
   hit(rr(M, y, R_, y + 46, 10, C.card), () => go("intros"));
-  sprite("crown", M + 12, y + 11, M + 36, y + 35).style.pointerEvents = "none";
+  sprite("crown", M + 12, y + 11, M + 36, y + 35, set.enabled && set.boss_on ? G0 : GREY_ACC);   // crown_color: green only when intros AND app are on
   text(M + 46, y + 23, "Age Intros", 13, C.tx, true).style.pointerEvents = "none";
   const sx = M + 46 + measure("Age Intros", 13, true) + 14;
   s.ages.forEach(([k], j) => { const lit = s.intros[k].on && set.boss_on; const p = sx + 11 + j * 25;
@@ -174,7 +183,7 @@ function drawIntros(s) {
   const n = s.ages.length, H = introsH(n, mainH(n)); begin("intros", IW, H);
   const bk = hit(oval(18, 24, 50, 56, C.card), () => go("main")); sprite("back", 18, 24, 50, 56).style.pointerEvents = "none";
   hov(bk, () => { bk.style.background = "#2a2a2a"; bk.nextSibling.style.opacity = 0; }, () => { bk.style.background = C.card; bk.nextSibling.style.opacity = 1; });
-  sprite("icrown", 64, 28, 92, 52); text(102, HY, "Age Intros", 18, C.tx, true);
+  sprite("icrown", 64, 28, 92, 52, S && S.settings.enabled && S.settings.boss_on ? G0 : GREY_ACC); text(102, HY, "Age Intros", 18, C.tx, true);
   // preset bar
   const y = 84; rr(20, y - 18, IW - 140, y + 18, 18, C.card, "#3e3e3e"); oval(34, y - 6, 46, y + 6, C.acc);
   text(56, y, "Custom", 13, C.tx, true); text(IW - 176, y, "Auto-saved", 10, C.mu, true, "e"); sprite("pchev", IW - 166, y - 6, IW - 154, y + 6);
