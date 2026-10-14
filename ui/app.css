@@ -3,7 +3,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: transparen
 body { font-family: "Segoe UI", sans-serif; color: #f2f2f2; cursor: default; }
 /* drawn window frame = 1.0.9's native dark frame: 1px #3a3a3a edge, 8px corners, 30px #202020 caption */
 #frame { position: absolute; border: 1px solid #3a3a3a; border-radius: 8px; overflow: hidden; background: #121212;
-         box-shadow: 0 4px 14px rgba(0,0,0,0.55), 0 0 2px rgba(0,0,0,0.6); }
+ }
 #tb { position: relative; height: 30px; background: #202020; }
 #tbicon { position: absolute; left: 7px; top: 6px; width: 16px; height: 16px; }
 #tbtitle { position: absolute; left: 25px; top: 0; width: 94px; height: 30px; background: #ffffff;

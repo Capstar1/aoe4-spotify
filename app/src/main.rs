@@ -149,6 +149,13 @@ fn switch_test(win_: tauri::WebviewWindow, dir: PathBuf) {
         ev.push(format!("[\"{name}\", {t0}]")); ev.push(format!("[\"{name}_end\", {}]", t0 + 0.06));
         std::thread::sleep(Duration::from_millis(390));
     }
+    {
+        #[repr(C)] struct P { x: i32, y: i32 }
+        #[link(name = "user32")] extern "system" { fn WindowFromPoint(p: P) -> isize; fn GetAncestor(h: isize, f: u32) -> isize; }
+        let mut o = win::Rect::default(); unsafe { win::GetWindowRect(hwnd, &mut o); }
+        let probe = |x: i32, y: i32| unsafe { GetAncestor(WindowFromPoint(P { x: o.l + x, y: o.t + y }), 2) == hwnd };
+        let _ = std::fs::write(dir.join("clickthrough.txt"), format!("margin(8,300) ours={} inside(100,300) ours={} right-margin(545,300) ours={}", probe(8, 300), probe(100, 300), probe(545, 300)));
+    }
     let _ = std::fs::write(dir.join("events.json"), format!("[{}]", ev.join(",")));
     let _ = std::fs::write(dir.join("done"), "");
     std::thread::sleep(Duration::from_millis(800));
@@ -199,7 +206,7 @@ fn dbg(window: tauri::WebviewWindow, s: String) {
 }
 
 #[tauri::command]
-fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default() }) }
+fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some() }) }
 
 #[tauri::command]
 fn logout(app: tauri::State<Arc<AppState>>) { app.real.store(false, Ordering::SeqCst); save_prefs(&app); app.spotify.lock().unwrap().logout(); push(&app.status, "Spotify: logged out, real playback off".into()); }

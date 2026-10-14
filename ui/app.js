@@ -205,7 +205,7 @@ function drawIntros(s) {
 const SH = 16, WW = 522, TB = 30;
 let S = null, page = "main", sizes = { main: [430, 586], intros: [520, 586] }, applied = null;
 function frameRect(p) { const [w, h] = sizes[p]; const fw = w + 2, fh = h + TB + 2; return { x: SH + (WW - fw) / 2, y: SH, w: fw, h: fh }; }
-function regionOf(r) { return { x: r.x - SH, y: 0, w: r.w + 2 * SH, h: r.h + 2 * SH }; }
+function regionOf(r) { return { x: r.x, y: r.y, w: r.w, h: r.h }; }   // exactly the drawn frame: everything else is click-through
 function setFrame(p) {
   const r = frameRect(p), f = $("frame"); Object.assign(f.style, { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px" });
   $("client").style.height = sizes[p][1] + "px";
@@ -215,7 +215,7 @@ function setFrame(p) {
 const frames = (n) => new Promise((res) => { const f = () => (n-- <= 0 ? res() : requestAnimationFrame(f)); requestAnimationFrame(f); });
 async function apply(p) {
   const a = applied ? regionOf(frameRect(applied)) : null, b = regionOf(frameRect(p));
-  if (a) { const x = Math.min(a.x, b.x), y = 0; await invoke("region", { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.h, b.h) }); }
+  if (a) { const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y); await invoke("region", { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y }); }
   setFrame(p); page = p; applied = p;
   await frames(3); await invoke("region", b);
 }
