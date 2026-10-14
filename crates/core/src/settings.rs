@@ -14,6 +14,15 @@ pub struct Settings {
     /// public PKCE app id from the install config (not shown in the UI)
     #[serde(skip)]
     pub client_id: String,
+    /// Age Intros: install boss_intro (default pools) + your per-age pools; after-match choice; intros master switch
+    #[serde(skip)]
+    pub base_boss: Value,
+    #[serde(skip)]
+    pub user_pools: Value,
+    pub after_match: Value,
+    pub boss_on: bool,
+    pub default_playlists: HashMap<String, String>,
+    pub music_in_replays: bool,
 }
 
 fn read(p: &Path) -> Value { std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null) }
@@ -36,6 +45,12 @@ pub fn load(install_cfg: &Path, user_cfg: &Path, names: &Path) -> Settings {
         playlists,
         playlist_names: str_map(&read(names)),
         intro_ages,
+        base_boss: base["boss_intro"].clone(),
+        user_pools: user["intro_pools"].clone(),
+        after_match: user["after_match"].clone(),
+        default_playlists: str_map(&base["default_playlists"]),
+        boss_on: user["boss_intro_enabled"].as_bool().or(base["boss_intro"]["enabled"].as_bool()).unwrap_or(true),
+        music_in_replays: get("music_in_replays").as_bool().unwrap_or(false),
         client_id: base["client_id"].as_str().unwrap_or_default().to_string(),
         log_path: get("log_path").as_str().filter(|s| !s.is_empty()).map(|s| s.to_string()),
     }

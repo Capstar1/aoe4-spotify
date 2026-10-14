@@ -1,0 +1,155 @@
+{
+ "factions": [
+  [
+   "french",
+   "French"
+  ],
+  [
+   "hre",
+   "HRE"
+  ],
+  [
+   "templar",
+   "Templar"
+  ],
+  [
+   "french_ha_01",
+   "Jeanne d'Arc"
+  ],
+  [
+   "abbasid",
+   "Abbasid"
+  ],
+  [
+   "abbasid_ha_01",
+   "Ayyubids"
+  ],
+  [
+   "byzantine",
+   "Byzantines"
+  ],
+  [
+   "malian",
+   "Malians"
+  ],
+  [
+   "sultanate",
+   "Delhi"
+  ],
+  [
+   "ottoman",
+   "Ottomans"
+  ],
+  [
+   "english",
+   "English"
+  ],
+  [
+   "hre_ha_01",
+   "Dragon"
+  ],
+  [
+   "lancaster",
+   "Lancaster"
+  ],
+  [
+   "mongol",
+   "Mongols"
+  ],
+  [
+   "mongol_ha_gol",
+   "Golden Horde"
+  ],
+  [
+   "rus",
+   "Rus"
+  ],
+  [
+   "chinese_ha_01",
+   "Zhu Xi"
+  ],
+  [
+   "chinese",
+   "Chinese"
+  ],
+  [
+   "japanese",
+   "Japanese"
+  ],
+  [
+   "jin_dynasty",
+   "Jin"
+  ],
+  [
+   "japanese_ha_sen",
+   "Sengoku"
+  ],
+  [
+   "sultanate_ha_tug",
+   "Tughlaq"
+  ],
+  [
+   "byzantine_ha_mac",
+   "Macedonian"
+  ]
+ ],
+ "songs": [
+  [
+   "light",
+   "For Light",
+   "Ophilia",
+   "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+   "#e8d9a0"
+  ],
+  [
+   "truth",
+   "For Truth",
+   "Cyrus",
+   "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+   "#6fa8dc"
+  ],
+  [
+   "treasure",
+   "For Treasure",
+   "Tressa",
+   "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+   "#e0b040"
+  ],
+  [
+   "redemption",
+   "For Redemption",
+   "Olberic",
+   "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+   "#b0b0b0"
+  ],
+  [
+   "revenge",
+   "For Revenge",
+   "Primrose",
+   "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+   "#c0506a"
+  ],
+  [
+   "succor",
+   "For Succor",
+   "Alfyn",
+   "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
+   "#7cc47c"
+  ],
+  [
+   "freedom",
+   "For Freedom",
+   "Therion",
+   "spotify:track:3LxsqAQ0rXaLEHonDax63B",
+   "#d9a066"
+  ],
+  [
+   "master",
+   "For Master",
+   "H'aanit",
+   "spotify:track:5X8te47Qx2kIeAqAicMrgC",
+   "#8fbf6a"
+  ]
+ ],
+ "asset_dir": "assets"
+}

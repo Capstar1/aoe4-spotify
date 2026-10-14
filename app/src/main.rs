@@ -96,7 +96,8 @@ fn watch(app: Arc<AppState>, path: PathBuf) {
 fn get_state(app: tauri::State<Arc<AppState>>) -> serde_json::Value {
     let st = app.status.lock().unwrap().clone();
     let logged_in = app.spotify.lock().map(|s| s.logged_in()).ok();
-    serde_json::json!({ "settings": app.settings, "ages": app.ages, "status": st,
+    let keys: Vec<String> = app.ages.iter().map(|(k, _)| k.clone()).collect();
+    serde_json::json!({ "settings": app.settings, "ages": app.ages, "status": st, "intros": aoe4core::intros::overview(&app.settings, &keys),
         "spotify": { "logged_in": logged_in, "real": app.real.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
 }
 
@@ -130,12 +131,14 @@ fn wall() -> f64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_sec
 /// AOE4S_SWITCHTEST=<dir>: drive N page switches for the frame-capture harness, then quit.
 fn switch_test(win_: tauri::WebviewWindow, dir: PathBuf) {
     let _ = win_.set_always_on_top(true);
+    let _ = win_.set_position(tauri::PhysicalPosition::new(0, 60));   // screen-left: away from other windows
+    let _ = win_.eval("document.body.style.pointerEvents=\"none\"");      // test: no hover effects from a resting mouse
     std::thread::sleep(Duration::from_secs(3));
     let hwnd = win_.hwnd().map(|x| x.0 as isize).unwrap_or(0);
     let mut o = win::Rect::default(); unsafe { win::GetWindowRect(hwnd, &mut o); }
     let _ = std::fs::write(dir.join("rect.json"), format!("{{\"x\": {}, \"y\": {}}}", o.l, o.t));
     let _ = std::fs::write(dir.join("ready"), "");
-    std::thread::sleep(Duration::from_millis(1500));
+    std::thread::sleep(Duration::from_millis(700));
     let n: usize = std::env::var("AOE4S_N").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
     let mut ev = vec![];
     for i in 0..n {
@@ -144,7 +147,7 @@ fn switch_test(win_: tauri::WebviewWindow, dir: PathBuf) {
         let _ = win_.eval(if i % 2 == 0 { "go(\"intros\")" } else { "go(\"main\")" });
         std::thread::sleep(Duration::from_millis(60));
         ev.push(format!("[\"{name}\", {t0}]")); ev.push(format!("[\"{name}_end\", {}]", t0 + 0.06));
-        std::thread::sleep(Duration::from_millis(640));
+        std::thread::sleep(Duration::from_millis(390));
     }
     let _ = std::fs::write(dir.join("events.json"), format!("[{}]", ev.join(",")));
     let _ = std::fs::write(dir.join("done"), "");
@@ -162,6 +165,37 @@ fn login(app: tauri::State<Arc<AppState>>) {
         push(&a.status, match r { Ok(_) => "Spotify: logged in (1.1 has its own login)".into(), Err(e) => format!("Spotify login: {e}") });
         a.busy.store(false, Ordering::SeqCst);
     });
+}
+
+/// Cached 1.0.9 cover (playlist <id>_<snapshot>.jpg newest, or track_<id>.jpg) as a data URL; None if missing.
+#[tauri::command]
+fn cover(uri: String) -> Option<String> {
+    use base64::Engine;
+    let dir = PathBuf::from(std::env::var("APPDATA").ok()?).join(r"AoE4Spotify\covers");
+    let id = uri.rsplit(':').next()?.to_string();
+    if uri.contains(":list:") { let b = std::fs::read(dir.join(format!("list_{id}.png"))).ok()?; return Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))); }
+    let path = if uri.starts_with("spotify:track:") { dir.join(format!("track_{id}.jpg")) } else {
+        std::fs::read_dir(&dir).ok()?.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{id}_")))
+            .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())?.path() };
+    let b = std::fs::read(path).ok()?;
+    Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(b)))
+}
+
+/// Visible part of the (fixed, transparent, borderless) window: everything outside is clipped away and clicks pass through.
+#[tauri::command]
+fn region(window: tauri::WebviewWindow, x: f64, y: f64, w: f64, h: f64) {
+    #[link(name = "gdi32")] extern "system" { fn CreateRectRgn(a: i32, b: i32, c: i32, d: i32) -> isize; }
+    #[link(name = "user32")] extern "system" { fn SetWindowRgn(h: isize, r: isize, redraw: i32) -> i32; }
+    let hwnd = window.hwnd().map(|v| v.0 as isize).unwrap_or(0);
+    let k = window.scale_factor().unwrap_or(1.0) * zoom();
+    let r = |v: f64| (v * k).round() as i32;
+    unsafe { let rg = CreateRectRgn(r(x), r(y), r(x + w), r(y + h)); SetWindowRgn(hwnd, rg, 1); }
+}
+
+#[tauri::command]
+fn dbg(window: tauri::WebviewWindow, s: String) {
+    let o = window.outer_position().ok(); let i = window.inner_position().ok(); let os = window.outer_size().ok(); let is = window.inner_size().ok();
+    let _ = std::fs::write(std::env::temp_dir().join("aoe4s_dbg.txt"), format!("{s}\nouter {o:?} {os:?}\ninner {i:?} {is:?} scale {:?}", window.scale_factor()));
 }
 
 #[tauri::command]
@@ -192,9 +226,9 @@ fn main() {
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));
     tauri::Builder::default()
         .manage(app)
-        .setup(|a| { use tauri::Manager; if zoom() != 1.0 { let _ = a.get_webview_window("main").unwrap().set_zoom(zoom()); }
+        .setup(|a| { use tauri::Manager; if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg])
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, dbg])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
 }

@@ -1,3 +1,14 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><title>AoE4 Spotify</title><link rel="stylesheet" href="app.css"></head>
-<body><div id="main" class="page on"></div><div id="intros" class="page"></div><script src="app.js"></script></body></html>
+<body>
+<div id="frame">
+  <div id="tb" data-tauri-drag-region>
+    <img id="tbicon" src="img/tb_icon@1.png" data-tauri-drag-region>
+    <div id="tbtitle" data-tauri-drag-region></div>
+    <div class="tbb" id="tbmin"><i style="-webkit-mask-image:url(img/tb_min@1.png)"></i></div>
+    <div class="tbb dis" id="tbmax"><i style="-webkit-mask-image:url(img/tb_max@1.png)"></i></div>
+    <div class="tbb" id="tbclose"><i style="-webkit-mask-image:url(img/tb_close@1.png)"></i></div>
+  </div>
+  <div id="client"><div id="main" class="page on"></div><div id="intros" class="page"></div></div>
+</div>
+<script src="app.js"></script></body></html>

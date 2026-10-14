@@ -65,6 +65,7 @@ name = "aoe4spotify"
 version = "1.1.0"
 dependencies = [
  "aoe4core",
+ "base64 0.22.1",
  "serde",
  "serde_json",
  "tauri",
