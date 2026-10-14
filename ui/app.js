@@ -69,7 +69,7 @@ function revert(rx, y, isDef, tag) {   // 1.0.9 undo button: outlined pill, grey
 }
 // ---------- main panel (panel.py draw) ----------
 const W = 430, M = 16, R_ = W - M;
-const ui = { open: true, menu: false }; const upd = { msg: "", err: false, url: false };
+const ui = { open: true, menu: false, pmenu: false, dialog: null }; const upd = { msg: "", err: false, url: false };
 function pill(msg, err, keep) { Object.assign(upd, { msg, err, url: msg.startsWith("\u2193") }); redraw(); if (!keep) setTimeout(() => { if (upd.msg === msg) { upd.msg = ""; redraw(); } }, 2000); }
 const closeMenu = () => { ui.menu = false; redraw(); };
 const PL_TOP = 172 + 46 + 10;
@@ -184,10 +184,15 @@ function drawIntros(s) {
   const bk = hit(oval(18, 24, 50, 56, C.card), () => go("main")); sprite("back", 18, 24, 50, 56).style.pointerEvents = "none";
   hov(bk, () => { bk.style.background = "#2a2a2a"; bk.nextSibling.style.opacity = 0; }, () => { bk.style.background = C.card; bk.nextSibling.style.opacity = 1; });
   sprite("icrown", 64, 28, 92, 52, S && S.settings.enabled && S.settings.boss_on ? G0 : GREY_ACC); text(102, HY, "Age Intros", 18, C.tx, true);
-  // preset bar
-  const y = 84; rr(20, y - 18, IW - 140, y + 18, 18, C.card, "#3e3e3e"); oval(34, y - 6, 46, y + 6, C.acc);
-  text(56, y, "Custom", 13, C.tx, true); text(IW - 176, y, "Auto-saved", 10, C.mu, true, "e"); sprite("pchev", IW - 166, y - 6, IW - 154, y + 6);
-  sprite("share", IW - 121, y - 15, IW - 91, y + 15); sprite("import", IW - 73, y - 15, IW - 43, y + 15);
+  // preset bar (intros.py draw_bar): current preset, menu, share, import
+  const y = 84, u = s.ed || {}, menuOpen = ui.pmenu, pb = hit(rr(20, y - 18, IW - 140, y + 18, 18, menuOpen ? "#2a2a2a" : C.card, menuOpen ? C.acc : "#3e3e3e"), () => { ui.pmenu = !ui.pmenu; redraw(); });
+  if (!menuOpen) hov(pb, () => pb.style.background = "#2a2a2a", () => pb.style.background = C.card);
+  oval(34, y - 6, 46, y + 6, C.acc).style.pointerEvents = "none"; const nm = u.intro_preset || "Default";
+  text(56, y, nm.length <= 30 ? nm : nm.slice(0, 29) + "\u2026", 13, C.tx, true); text(IW - 176, y, "Auto-saved", 10, C.mu, true, "e"); sprite("pchev", IW - 166, y - 6, IW - 154, y + 6).style.pointerEvents = "none";
+  const sh = hit(oval(IW - 121, y - 15, IW - 91, y + 15, "transparent"), () => sharePreset()); sprite("share", IW - 121, y - 15, IW - 91, y + 15).style.pointerEvents = "none";
+  const im = hit(oval(IW - 73, y - 15, IW - 43, y + 15, "transparent"), () => importDialog()); sprite("import", IW - 73, y - 15, IW - 43, y + 15).style.pointerEvents = "none";
+  hov(sh, () => sh.style.background = "rgba(255,255,255,.07)", () => sh.style.background = "transparent"); hov(im, () => im.style.background = "rgba(255,255,255,.07)", () => im.style.background = "transparent");
+  if (typeof tipOn === "function") { tipOn(sh, ["share"], "Share preset (copies a code)", [IW - 122, y - 16, IW - 90, y + 16]); tipOn(im, ["import"], "Import preset from code", [IW - 74, y - 16, IW - 42, y + 16]); }
   s.ages.forEach(([k, lab], i) => {
     const cy = OV_TOP + i * OV_STEP, o = s.intros[k], on = o.on, n = o.n;
     const card = rr(20, cy, IW - 20, cy + OV_CARD, 18, C.card); card.classList.add("hit"); card.onclick = () => openAge(k);
@@ -198,7 +203,8 @@ function drawIntros(s) {
     text(62, cy + 31, ROMAN[i], 18 * 0.62, on ? C.acc : C.mu, true, "center");
     text(100, cy + 22, lab.replace(" Age", ""), 17, C.tx, true);
     text(100, cy + 40, n ? `${n}/${o.civs} civs` : "Empty", 11, n && on ? C.acc : C.mu, true);
-    toggle(IW - 66 - 44, cy + 32 - 12, on, 44, 24, null, !n); sprite("ichev", IW - 51, cy + 21, IW - 29, cy + 43).style.pointerEvents = "none";
+    toggle(IW - 66 - 44, cy + 32 - 12, on, 44, 24, null, !n);
+    const tg = hit(rr(IW - 112, cy + 18, IW - 64, cy + 46, 0, "transparent"), (e) => { e.stopPropagation(); if (n) setAgeOn(k, !on); }); if (!n) { tg.style.cursor = "not-allowed"; tipOn(tg, ["swoff", k], "Add a song first", [IW - 78, cy + 20, IW - 54, cy + 44]); } sprite("ichev", IW - 51, cy + 21, IW - 29, cy + 43).style.pointerEvents = "none";
     rr(100, cy + 62, IW - 270, cy + 66, 3, "#323232").style.pointerEvents = "none";
     if (n) rr(100, cy + 62, 100 + Math.max(6, Math.floor((IW - 370) * n / o.civs)), cy + 66, 3, on ? C.acc : "#5a5a5a").style.pointerEvents = "none";
     if (o.chips.length) {
@@ -209,7 +215,11 @@ function drawIntros(s) {
         text(ox, cy + 64, "+" + o.more, 11, "#dcdcdc", true, "center"); }
     } else for (let j = 0; j < 3; j++) oval(IW - 240 + j * 24, cy + 48, IW - 210 + j * 24, cy + 78, C.card, "#464646").style.pointerEvents = "none";
   });
-  text(IW / 2, H - 20, "Click an age to edit", 10, "#5a5a5a", false, "center");
+  if (age.toast) { const tw = measure(age.toast, 13, true) + 70, x0 = IW / 2 - tw / 2; rr(x0, H - 46, x0 + tw, H - 8, 19, "#282828", C.acc);
+    oval(x0 + 14, H - 38, x0 + 36, H - 16, C.acc); text(x0 + 25, H - 27, "\u2713", 13, "#0a0a0a", true, "center"); text(x0 + 45, H - 27, age.toast, 13, C.tx, true); }
+  else text(IW / 2, H - 20, "Click an age to edit", 10, "#5a5a5a", false, "center");
+  if (ui.pmenu && s.agedata) drawPresetMenu(s);
+  if (ui.dialog) ui.dialog(H);
   return H;
 }
 
@@ -243,9 +253,9 @@ $("tbmin").onclick = () => W_.minimize(); $("tbclose").onclick = () => W_.close(
 window.addEventListener("blur", () => document.body.classList.add("inactive")); window.addEventListener("focus", () => document.body.classList.remove("inactive"));
 let lastJ = "";
 async function tick() {
-  try { const s = await invoke("get_state"); const j = JSON.stringify([s.settings, s.spotify, s.status.in_match, s.status.age, s.status.watching, s.intros]);
-    if (j !== lastJ) { const first = !lastJ; lastJ = j; render(s); if (first) { await apply("main"); invoke("cfg").then((c) => { if (c.open) setTimeout(() => { const [pg, k, tr, hv, pl] = c.open.split(":"); if (tr) age.tray = tr; if (pg === "age") openAge(k); else go(pg);
-      setTimeout(() => { const d = S.agedata; if (hv) { age.hovTray = +hv; redraw(); } if (pl) { age.song = d.songs[+pl][0]; redraw(); } }, 300); }, 300); if (c.menutest) setTimeout(() => menuTest().catch((e) => invoke("dbg", { s: "ERROR " + e + "\n" + (window.__mt || []).join("\n") })), 1500); }); } else await redraw(); } } catch (e) { console.error(e); }
+  try { const v0 = window.EDV || 0; const s = await invoke("get_state"); if ((window.EDV || 0) !== v0) { setTimeout(tick, 100); return; } const j = JSON.stringify([s.settings, s.spotify, s.status.in_match, s.status.age, s.status.watching, s.intros]);
+    if (j !== lastJ) { const first = !lastJ; lastJ = j; render(s); if (first) { await apply("main"); invoke("cfg").then((c) => { if (c.open) setTimeout(() => { const [pg, k, tr, hv, pl, x] = c.open.split(":"); if (tr) S.ed.intro_pack_open = tr === "octo"; if (pg === "age") openAge(k); else go(pg);
+      setTimeout(() => { const d = S.agedata; if (hv) { age.hovTray = +hv; redraw(); } if (pl) { age.song = d.songs[+pl][0]; redraw(); } shotState(x); if (x === "dom") domDump(); }, 300); }, 300); if (c.edtest) setTimeout(() => edTest().catch((e) => invoke("dbg", { s: "ERROR " + e.stack })), 1500); if (c.menutest) setTimeout(() => menuTest().catch((e) => invoke("dbg", { s: "ERROR " + e + "\n" + (window.__mt || []).join("\n") })), 1500); }); } else await redraw(); } } catch (e) { console.error(e); }
   setTimeout(tick, 500);
 }
 tick();

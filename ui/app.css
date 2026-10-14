@@ -32,3 +32,15 @@ body.inactive #tbtitle, body.inactive .tbb i { background: #797979; }
 .eq i { position: absolute; bottom: 3.3px; width: 1.7px; height: 4px; border-radius: 1px; background: #1DB954; transform-origin: bottom; animation: eq .9s ease-in-out infinite alternate; }
 @keyframes eq { from { transform: scaleY(.45); } to { transform: scaleY(1.35); } }
 
+.glowf { position: absolute; pointer-events: none; animation: glowf 1.782s steps(54) infinite; }
+.glowf.fadein { animation: glowf 1.782s steps(54) infinite, gin .33s linear; }
+@keyframes glowf { from { background-position: 0 0; } to { background-position: calc(-54 * var(--D)) 0; } }
+@keyframes gin { from { opacity: 0; } to { opacity: 1; } }
+.gtip { position: absolute; z-index: 20; max-width: 260px; padding: 7px 12px; border-radius: 8px; background: rgba(36,36,38,.965); color: #f2f2f2;
+  font: 700 12px/17px "Segoe UI"; text-align: center; box-shadow: 0 0 0 1px rgba(255,255,255,.12), 0 3px 10px rgba(0,0,0,.47);
+  opacity: 0; transition: opacity 120ms cubic-bezier(.33,1,.68,1), top 120ms cubic-bezier(.33,1,.68,1); pointer-events: none; white-space: normal; }
+.gtip::before { content: ""; position: absolute; left: calc(var(--ax) - 6px); border: 6px solid transparent; }
+.gtip.up::before { top: -12px; border-bottom-color: rgba(36,36,38,.965); }
+.gtip.down::before { bottom: -12px; border-top-color: rgba(36,36,38,.965); }
+.ctx { position: absolute; z-index: 30; background: #1f1f1f; border: 1px solid #3a3a3a; padding: 2px 0; font: 400 12px "Segoe UI"; color: #f2f2f2; box-shadow: 0 2px 8px rgba(0,0,0,.5); }
+.ctx div { padding: 4px 22px; cursor: default; } .ctx div:hover { background: #2a2a2a; }

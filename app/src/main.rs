@@ -17,7 +17,68 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Default, serde::Serialize, Clone)]
 struct Status { game: String, log_path: String, watching: bool, in_match: bool, age: Option<String>, playing: Option<String>, log: Vec<String> }
 
-struct AppState { settings: Settings, ages: Vec<(String, String)>, status: Mutex<Status>, real: AtomicBool, replays: AtomicBool, busy: AtomicBool, spotify: Mutex<Spotify>, tx: Mutex<Sender<Action>>, dir: PathBuf }
+struct AppState { settings: Settings, ages: Vec<(String, String)>, status: Mutex<Status>, real: AtomicBool, replays: AtomicBool, busy: AtomicBool, spotify: Mutex<Spotify>, tx: Mutex<Sender<Action>>, dir: PathBuf, ed: Mutex<serde_json::Value> }
+
+const ED_KEYS: [&str; 6] = ["intro_pools", "intro_ages", "custom_songs", "intro_presets", "intro_preset", "intro_pack_open"];
+/// Age Intros edits made in 1.1 live in 1.1's own intros.json (seeded once from 1.0.9's settings), so the
+/// installed 1.0.9 config is never written.
+fn load_ed(dir: &std::path::Path) -> serde_json::Value {
+    if let Some(v) = std::fs::read_to_string(dir.join("intros.json")).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) { return v; }
+    let ad = std::env::var("APPDATA").unwrap_or_default();
+    let u: serde_json::Value = std::fs::read_to_string(PathBuf::from(ad).join(r"AoE4Spotify\config.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let mut m = serde_json::Map::new(); for k in ED_KEYS { if !u[k].is_null() { m.insert(k.into(), u[k].clone()); } } serde_json::Value::Object(m)
+}
+fn with_ed(s: &Settings, ed: &serde_json::Value) -> Settings {
+    let mut s = s.clone(); s.user_pools = ed["intro_pools"].clone(); s.custom_songs = ed["custom_songs"].clone();
+    s.intro_ages = ed["intro_ages"].as_object().map(|o| o.iter().filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b))).collect()).unwrap_or_default(); s
+}
+#[tauri::command]
+fn save_ed(app: tauri::State<Arc<AppState>>, u: serde_json::Value) {
+    let mut m = serde_json::Map::new(); for k in ED_KEYS { if !u[k].is_null() { m.insert(k.into(), u[k].clone()); } }
+    let v = serde_json::Value::Object(m); let _ = std::fs::create_dir_all(&app.dir);
+    let _ = std::fs::write(app.dir.join("intros.json"), serde_json::to_string_pretty(&v).unwrap_or_default()); *app.ed.lock().unwrap() = v;
+}
+/// 1.0.9 share codes: "AOE4S1:" + urlsafe base64 (no padding) of zlib(json {v,name,pools,ages,custom}).
+#[tauri::command]
+fn encode_preset(p: serde_json::Value) -> String {
+    use std::io::Write; use base64::Engine;
+    let d = serde_json::json!({ "v": 1, "name": p["name"], "pools": p["pools"], "ages": p["ages"], "custom": p["custom"] });
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best()); let _ = z.write_all(d.to_string().as_bytes());
+    format!("AOE4S1:{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(z.finish().unwrap_or_default()))
+}
+#[tauri::command]
+fn decode_preset(app: tauri::State<Arc<AppState>>, code: String) -> Result<serde_json::Value, String> {
+    use std::io::Read; use base64::Engine; use serde_json::{json, Value};
+    let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    let Some(rest) = code.strip_prefix("AOE4S") else { return Err("Not an AoE4 Spotify code".into()) };
+    let (ver, b) = rest.split_once(':').ok_or("Not an AoE4 Spotify code")?;
+    if ver != "1" { return Err("Made with a newer version - update AoE4 Spotify".into()); }
+    if b.len() > 1 << 18 { return Err("Code is too big".into()); }
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b.trim_end_matches('=')).map_err(|_| "Code is incomplete or damaged")?;
+    let mut out = Vec::new(); flate2::read::ZlibDecoder::new(&raw[..]).take((1 << 18) + 1).read_to_end(&mut out).map_err(|_| "Code is incomplete or damaged")?;
+    if out.len() > 1 << 18 { return Err("Code is too big".into()); }
+    let d: Value = serde_json::from_slice(&out).map_err(|_| "Code is incomplete or damaged")?;
+    if d["v"] != json!(1) { return Err("Made with a newer version - update AoE4 Spotify".into()); }
+    let track = |s: &str| s.len() == 36 && s.starts_with("spotify:track:") && s[14..].chars().all(|c| c.is_ascii_alphanumeric());
+    let cat: Value = serde_json::from_str(aoe4core::intros::CATALOG).unwrap_or_default();
+    let civs: Vec<String> = cat["factions"].as_array().cloned().unwrap_or_default().iter().filter_map(|f| f[0].as_str().map(String::from)).collect();
+    let ages: Vec<String> = app.ages.iter().map(|a| a.0.clone()).collect();
+    let mut pools = serde_json::Map::new(); let mut used: Vec<String> = vec![];
+    if let Some(o) = d["pools"].as_object() { for (a, dd) in o { if !ages.contains(a) { continue; } let mut m = serde_json::Map::new();
+        if let Some(dd) = dd.as_object() { for (c, v) in dd { if !civs.contains(c) { continue; } let mut l: Vec<String> = vec![];
+            for x in v.as_array().cloned().unwrap_or_default() { if let Some(x) = x.as_str() { if track(x) && !l.iter().any(|y| y == x) && l.len() < 12 { l.push(x.into()); } } }
+            if !l.is_empty() { used.extend(l.clone()); m.insert(c.clone(), json!(l)); } } }
+        if !m.is_empty() { pools.insert(a.clone(), Value::Object(m)); } } }
+    let mut ag = serde_json::Map::new(); if let Some(o) = d["ages"].as_object() { for (a, v) in o { if ages.contains(a) && v.is_boolean() { ag.insert(a.clone(), v.clone()); } } }
+    let mut custom = vec![]; let mut known: Vec<String> = cat["songs"].as_array().cloned().unwrap_or_default().iter().filter_map(|s| s[3].as_str().map(String::from)).collect();
+    for c in d["custom"].as_array().cloned().unwrap_or_default() { if let Some(u) = c["uri"].as_str() { if track(u) && used.iter().any(|x| x == u) {
+        let n: String = c["name"].as_str().unwrap_or("Song").chars().take(80).collect(); let ar: String = c["artist"].as_str().unwrap_or("").chars().take(80).collect();
+        custom.push(json!({ "uri": u, "name": n, "artist": ar })); known.push(u.into()); } } }
+    if used.iter().any(|u| !known.contains(u)) { return Err("Code uses songs it doesn't include".into()); }
+    if d.get("pools").is_none() && d.get("ages").is_none() { return Err("Code has no intro lists".into()); }
+    let name: String = d["name"].as_str().unwrap_or("Shared").trim().chars().take(40).collect();
+    Ok(json!({ "v": 1, "name": if name.is_empty() { "Shared".to_string() } else { name }, "pools": pools, "ages": ag, "custom": custom }))
+}
 
 fn save_prefs(app: &AppState) {
     let _ = std::fs::create_dir_all(&app.dir);
@@ -98,7 +159,8 @@ fn get_state(app: tauri::State<Arc<AppState>>) -> serde_json::Value {
     let st = app.status.lock().unwrap().clone();
     let logged_in = app.spotify.lock().map(|s| s.logged_in()).ok();
     let keys: Vec<String> = app.ages.iter().map(|(k, _)| k.clone()).collect();
-    serde_json::json!({ "settings": app.settings, "ages": app.ages, "status": st, "intros": aoe4core::intros::overview(&app.settings, &keys), "agedata": aoe4core::intros::age_data(&app.settings, &keys),
+    let ed = app.ed.lock().unwrap().clone(); let es = with_ed(&app.settings, &ed);
+    serde_json::json!({ "settings": app.settings, "ages": app.ages, "status": st, "intros": aoe4core::intros::overview(&es, &keys), "agedata": aoe4core::intros::age_data(&es, &keys), "ed": ed,
         "spotify": { "logged_in": logged_in, "real": app.real.load(Ordering::SeqCst), "replays": app.replays.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
 }
 
@@ -263,7 +325,7 @@ async fn check_update() -> String {
 }
 
 #[tauri::command]
-fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some(), "menutest": std::env::var_os("AOE4S_MENUTEST").is_some(), "open": std::env::var("AOE4S_OPEN").unwrap_or_default() }) }
+fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some(), "menutest": std::env::var_os("AOE4S_MENUTEST").is_some(), "open": std::env::var("AOE4S_OPEN").unwrap_or_default(), "edtest": std::env::var_os("AOE4S_EDTEST").is_some() }) }
 
 #[tauri::command]
 fn logout(app: tauri::State<Arc<AppState>>) { app.real.store(false, Ordering::SeqCst); save_prefs(&app); app.spotify.lock().unwrap().logout(); push(&app.status, "Spotify: logged out, real playback off".into()); }
@@ -285,14 +347,14 @@ fn main() {
     let spotify = Spotify::new(settings.client_id.clone(), dir.join("token.json"));
     let (tx, rx) = channel(); let replays0 = prefs["music_in_replays"].as_bool().unwrap_or(settings.music_in_replays);
     let app = Arc::new(AppState { settings, ages, status: Mutex::new(status), real: AtomicBool::new(prefs["real_playback"].as_bool() == Some(true)),
-        replays: AtomicBool::new(replays0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx), dir });
+        replays: AtomicBool::new(replays0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx), ed: Mutex::new(load_ed(&dir)), dir });
     let a2 = app.clone(); std::thread::spawn(move || watch(a2, path));
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));
     tauri::Builder::default()
         .manage(app)
         .setup(|a| { use tauri::Manager; if let Some(h) = a.get_webview_window("main").and_then(|w| w.hwnd().ok()) { shadow::init(h.0 as isize); } if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, dbg, menu, check_update])
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, dbg, menu, check_update])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
 }
