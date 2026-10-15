@@ -35,13 +35,25 @@ function gdraw() {
 }
 $("grid").addEventListener("wheel", (e) => { P.sc = Math.max(0, Math.min(gmax(), P.sc + (e.deltaY / 100) * GR * 0.6)); gdraw(); e.preventDefault(); }, { passive: false });
 function useSel() { const it = P.items.find((x) => x.uri === P.sel); if (!it || P.use) return; finish(it.uri, it.name, it.img); }
-function draw() {
+function draw() { if (B.on) return;
   $("title").textContent = P.info.title || "Playlist";
   const hint = $("hint"); hint.textContent = P.err || (P.drag ? "Drop here" : `Paste a link or drag a ${P.info.tracks ? "playlist or song" : "playlist"} from Spotify`); hint.style.color = P.err ? "#e5675f" : P.drag ? "#1DB954" : "#9a9a9a";
   const d = $("drop"); d.style.background = P.drag ? "#1b2a20" : "#181818"; $("dropi").style.background = P.drag ? "#1DB954" : "#9a9a9a";
   d.innerHTML = `<svg width="364" height="46"><rect x="0.7" y="0.7" width="362.6" height="44.6" rx="9.3" fill="none" stroke="${P.drag ? "#1DB954" : "#4a4a4a"}" stroke-width="1.4" stroke-dasharray="5 4"/></svg>`;
   // your app lists (1.0.9 'Your lists': up to 4, not the current one)
-  let y = 313 + 184; const L = $("lists"); L.innerHTML = "";        // (the builder card 'Make your own' sits here in 1.0.9)
+  let y = 313 + 184; const L = $("lists"); L.innerHTML = "";
+  // make your own card: one button (tile, title, grey subline, chevron) -> builder
+  const cur = P.info.current || "", curL = cur.startsWith("aoe4s:list:") && !cur.endsWith(":liked") ? (P.info.custom_lists || {})[cur.split(":").pop()] : null, mk = $("mk"); mk.style.top = y + "px";
+  mk.innerHTML = `<div class="a" id="mkt" style="left:11px;top:9px;width:36px;height:36px;border-radius:9px;background:#1f4630"></div>` +
+    `<div class="t" style="left:61px;top:19px;font:700 12.5px 'Segoe UI'"></div><div class="t" style="left:61px;top:37px;font:400 10.5px 'Segoe UI';color:#9a9a9a">Saved in this app, not Spotify</div>` +
+    `<svg class="a" id="mkc" style="left:367px;top:20px" width="10" height="14"><polyline points="2.5,2 7.5,7 2.5,12" fill="none" stroke="#9a9a9a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  mk.children[1].textContent = curL ? "Edit \u00b7 " + trunc(curL.name || "My list", 22) : "Make your own";
+  if (curL) invoke("cover", { uri: cur }).then((u) => { if (u) $("mkt").outerHTML = `<img class="a" src="${u}" style="left:11px;top:9px;width:36px;height:36px;border-radius:9px">`; });
+  else $("mkt").innerHTML = `<div class="mk" style="left:7px;top:7px;width:22px;height:22px;background:#1DB954;-webkit-mask-image:image-set(url(img/mk_pk_plus22@1.png) 1x,url(img/mk_pk_plus22@1.5.png) 1.5x)"></div>`;
+  mk.onmouseenter = () => { $("mkc").style.left = "369px"; $("mkc").firstChild.setAttribute("stroke", "#1DB954"); const t = $("mkt"); if (t.tagName === "DIV") t.style.background = "#24553a"; };
+  mk.onmouseleave = () => { $("mkc").style.left = "367px"; $("mkc").firstChild.setAttribute("stroke", "#9a9a9a"); const t = $("mkt"); if (t.tagName === "DIV") t.style.background = "#1f4630"; };
+  mk.onclick = () => openBuilder(curL ? cur : null);
+  y += 68;
   const lists = Object.entries(P.info.custom_lists || {}).filter(([k, v]) => v && typeof v === "object" && "aoe4s:list:" + k !== P.info.current && k !== "liked").slice(-4);
   if (lists.length) { const h = document.createElement("div"); h.className = "t"; Object.assign(h.style, { left: "20px", top: (y + 8) + "px", font: "700 10.5px 'Segoe UI'", color: "#9a9a9a" }); h.textContent = "Your lists"; L.appendChild(h); y += 20;
     for (const [k, v] of lists) { const r = document.createElement("div"); r.className = "ls"; r.style.top = y + "px"; r.innerHTML = `<div class="ph"></div><div class="t" style="left:48px;top:20px;font:700 12px 'Segoe UI'"></div><div class="t" style="right:14px;top:20px;font:400 10.5px 'Segoe UI';color:#9a9a9a">${(v.tracks || []).length} songs</div>`;
@@ -67,10 +79,11 @@ $("ok").onclick = okLink; $("ent").onkeydown = (e) => { if (e.key === "Enter") o
 $("ent").addEventListener("paste", () => setTimeout(() => { const u = parseLink($("ent").value.trim()); if (u) finish(u); }, 10));
 $("sq").addEventListener("input", () => { P.sc = 0; gdraw(); }); $("sq").onkeydown = (e) => { if (e.key === "Escape" && $("sq").value) { $("sq").value = ""; P.sc = 0; gdraw(); e.stopPropagation(); } };
 let dragN = 0;
-document.addEventListener("dragenter", (e) => { e.preventDefault(); dragN++; if (!P.drag) { P.drag = true; draw(); } });
-document.addEventListener("dragleave", () => { if (--dragN <= 0) { dragN = 0; P.drag = false; draw(); } });
+document.addEventListener("dragenter", (e) => { e.preventDefault(); dragN++; if (!P.drag) { P.drag = true; B.on ? bdraw() : draw(); } });
+document.addEventListener("dragleave", () => { if (--dragN <= 0) { dragN = 0; P.drag = false; B.on ? bdraw() : draw(); } });
 document.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; });
-document.addEventListener("drop", (e) => { e.preventDefault(); dragN = 0; P.drag = false; const t = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain"); const u = parseLink(t);
+document.addEventListener("drop", (e) => { e.preventDefault(); if (B.on) return bDrop(e); dragN = 0; P.drag = false; const t = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain"); const u = parseLink(t);
   if (u) finish(u); else { P.err = `Not a Spotify ${P.info.tracks ? "playlist or song" : "playlist"} link`; draw(); } });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") Wn.close(); });
-(async () => { P.info = await invoke("pick_info"); draw(); gdraw(); await Wn.show(); await Wn.setFocus(); load(); })();
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !B.on) Wn.close(); });
+(async () => { P.info = await invoke("pick_info"); const c = P.info.current || ""; if (c.startsWith("aoe4s:list:") && !c.endsWith(":liked") && (P.info.custom_lists || {})[c.split(":").pop()]) { draw(); openBuilder(c); } else { draw(); gdraw(); }
+  await Wn.show(); await Wn.setFocus(); load(); })();

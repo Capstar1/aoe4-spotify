@@ -31,8 +31,30 @@
 .ls{position:absolute;left:16px;width:388px;height:40px;border-radius:10px;background:#1f1f1f;cursor:pointer}.ls:hover{background:#262626}
 .ls img,.ls .ph{position:absolute;left:10px;top:6px;width:28px;height:28px;border-radius:7px;background:#2a2a2a}
 #use{left:16px;width:388px;height:48px;border-radius:24px;font-size:13.5px}#use.off{background:#262626;color:#6c6c6c;cursor:default}
+
+/* builder (picker.py draw_build) */
+#mk{left:16px;width:388px;height:56px;border-radius:12px;background:#1c241f;border:1.2px solid #2f6b46;cursor:pointer}#mk:hover{background:#22302a;border-color:#1DB954}
+#build .a,#build .t{position:absolute}
+.ib{background:#2a2a2a}.bin{position:absolute;background:transparent;border:0;outline:0;color:#f2f2f2;caret-color:#f2f2f2}
+#bname{font:700 12px "Segoe UI"}#bse{font:400 11px "Segoe UI"}#bse::placeholder{color:#6c6c6c}
+#blist{position:absolute;left:0;top:138px;width:420px;height:336px;overflow:hidden}
+.br{position:absolute;left:20px;width:380px;height:44px;border-radius:10px;cursor:pointer}
+.br .th{position:absolute;left:32px;top:6px;width:32px;height:32px;border-radius:5px;background:#2a2a2a;object-fit:cover}
+.br .ov{position:absolute;left:32px;top:6px;width:32px;height:32px;border-radius:6px;background:rgba(0,0,0,.47);display:none;align-items:center;justify-content:center}
+.br:hover .ov{display:flex}.br:hover .rm,.br:hover .hd,.br:hover .d2{display:block}.br:hover .d1{display:none}
+.br .rm{position:absolute;left:349px;top:11px;width:22px;height:22px;border-radius:50%;background:#2a2a2a;display:none}.br .rm:hover{background:#3a3a3a}
+.br .hd{position:absolute;left:299px;top:13px;width:18px;height:18px;display:none;cursor:grab}
+.br .d2{display:none}
+.glw{position:absolute;left:24px;top:-2px;width:48px;height:48px;pointer-events:none;border-radius:8px;box-shadow:0 0 0 1.6px #1DB954 inset,0 0 8px 2px rgba(29,185,84,.45);animation:gb 1.7s ease-in-out infinite}
+@keyframes gb{0%,100%{box-shadow:0 0 0 1.6px #1DB954 inset,0 0 6px 1px rgba(29,185,84,.25)}50%{box-shadow:0 0 0 1.6px #1DB954 inset,0 0 10px 3px rgba(29,185,84,.55)}}
+.eqb{position:absolute;left:55px;top:27px;width:18px;height:18px;border-radius:50%;background:#1DB954;box-shadow:0 0 0 1.5px #121212;pointer-events:none}
+.eqb i{position:absolute;bottom:5px;width:1.8px;height:7px;background:#121212;transform-origin:bottom;animation:eqa .8s ease-in-out infinite alternate}
+@keyframes eqa{from{transform:scaleY(.43)}to{transform:scaleY(1)}}
+.cb{position:absolute;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:16px}
+.sr{position:absolute;left:24px;width:300px;height:42px;border-radius:8px;cursor:pointer}
 </style></head>
 <body>
+<div id="pickp">
 <div class="t" id="title" style="left:20px;top:24px;font:700 15px 'Segoe UI'"></div>
 <div class="a card" style="left:16px;top:44px;width:388px;height:301px"></div>
 <div class="a ic" style="left:26px;top:54px;width:28px;height:28px"></div><div class="mk" id="i_note" style="left:29px;top:57px;width:22px;height:22px;background:#1DB954;-webkit-mask-image:image-set(url(img/mk_pk_note22@1.png) 1x,url(img/mk_pk_note22@1.5.png) 1.5x)"></div>
@@ -50,5 +72,8 @@
 <div class="t" id="hint" style="left:30px;top:465px;font:400 10.5px 'Segoe UI';color:#9a9a9a"></div>
 <div id="lists"></div>
 <div class="btn off" id="use"></div>
-<script src="pick.js"></script>
+<div id="mk" class="a"></div>
+</div>
+<div id="build" style="display:none"></div>
+<script src="build.js"></script><script src="pick.js"></script>
 </body></html>

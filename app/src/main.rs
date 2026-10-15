@@ -407,7 +407,7 @@ fn norm(t: &serde_json::Value) -> Option<serde_json::Value> {
     let imgs = t["album"]["images"].as_array().cloned().unwrap_or_default();
     let img = imgs.iter().min_by_key(|i| (i["width"].as_i64().unwrap_or(640) - 64).abs()).and_then(|i| i["url"].as_str()).unwrap_or("");
     let ar = t["artists"].as_array().map(|a| a.iter().take(2).filter_map(|x| x["name"].as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-    Some(serde_json::json!({ "uri": u, "name": t["name"].as_str().unwrap_or("Song"), "artist": ar, "img": img }))
+    Some(serde_json::json!({ "uri": u, "name": t["name"].as_str().unwrap_or("Song"), "artist": ar, "img": img, "ms": t["duration_ms"].as_i64().unwrap_or(0) }))
 }
 fn fake_sp(kind: &str, arg: &str) -> serde_json::Value {
     let tr = |k: usize, n: &str| serde_json::json!({ "uri": format!("spotify:track:{}", k.to_string().repeat(22)), "name": n, "artist": "Yasunori Nishiki", "img": "" });
@@ -483,6 +483,31 @@ async fn open_pick(app: tauri::AppHandle, st: tauri::State<'_, Arc<AppState>>, t
     *st.pick.lock().unwrap() = serde_json::json!({ "target": target, "title": title, "tracks": tracks, "current": current });
     small_window(&app, "pick", "pick.html", 420.0, 640.0); Ok(())
 }
+
+/// 1.0.9 list builder save: app-only list (custom_lists in your settings, max 100 songs) + its 2x2 mosaic cover.
+#[tauri::command]
+fn save_list(app: tauri::State<Arc<AppState>>, id: String, name: String, tracks: serde_json::Value, mosaic: String) -> String {
+    use base64::Engine;
+    let id: String = if id.chars().all(|c| c.is_ascii_alphanumeric()) && !id.is_empty() && id != "liked" { id } else { format!("{:08x}", (wall() * 1000.0) as u64 as u32) };
+    let tr: Vec<serde_json::Value> = tracks.as_array().cloned().unwrap_or_default().into_iter().filter(|t| t["uri"].as_str().map_or(false, |u| u.starts_with("spotify:track:"))).take(100)
+        .map(|t| serde_json::json!({ "uri": t["uri"], "name": t["name"], "artist": t["artist"], "ms": t["ms"] })).collect();
+    if tr.is_empty() { return String::new(); }
+    let name: String = { let n: String = name.trim().chars().take(40).collect(); if n.is_empty() { "My list".into() } else { n } };
+    let mut cl = read_user(&app.dir)["custom_lists"].clone(); if !cl.is_object() { cl = serde_json::json!({}); }
+    cl[&id] = serde_json::json!({ "name": name, "tracks": tr }); set_user_(&app, "custom_lists", cl);
+    if let Some(b) = mosaic.strip_prefix("data:image/png;base64,") { if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(b) { let d = app.dir.join("covers"); let _ = std::fs::create_dir_all(&d); let _ = std::fs::write(d.join(format!("list_{id}.png")), b); } }
+    format!("{LIST_PREFIX}{id}")
+}
+/// Delete list (pressed twice): ages and After match picks that used it go back to their defaults / empty.
+#[tauri::command]
+fn delete_list(app: tauri::State<Arc<AppState>>, id: String) {
+    let u = read_user(&app.dir); let uri = format!("{LIST_PREFIX}{id}");
+    let mut cl = u["custom_lists"].clone(); if let Some(o) = cl.as_object_mut() { o.remove(&id); } set_user_(&app, "custom_lists", cl);
+    let mut pl = u["playlists"].clone(); if let Some(o) = pl.as_object_mut() { o.retain(|_, v| v.as_str() != Some(uri.as_str())); set_user_(&app, "playlists", pl); }
+    let mut am = u["after_match"].clone(); if am.is_object() { for k in ["playlist", "win", "loss"] { if am[k].as_str() == Some(uri.as_str()) { am[k] = serde_json::json!(""); } } set_user_(&app, "after_match", am); }
+    let _ = std::fs::remove_file(app.dir.join("covers").join(format!("list_{id}.png")));
+    launcher::log(&format!("Deleted app list {id}"));
+}
 #[tauri::command]
 fn pick_info(app: tauri::State<Arc<AppState>>) -> serde_json::Value { let mut v = app.pick.lock().unwrap().clone(); v["custom_lists"] = read_user(&app.dir)["custom_lists"].clone(); v }
 #[tauri::command]
@@ -537,8 +562,78 @@ fn do_login(h: tauri::AppHandle, a: Arc<AppState>) {
         let r = Spotify::login_code(&cid).and_then(|(c, v)| a.spotify.lock().unwrap().login_finish(&c, &v));
         push(&a.status, match r { Ok(_) => "Spotify: logged in".into(), Err(e) => format!("Spotify login: {e}") });
         a.busy.store(false, Ordering::SeqCst);
-        show_gtg(&h, &a);
+        after_login(&h, &a);
     });
+}
+
+// ---- 1.0.9 access.py: shared-app access request (capstar.app relay) and the 'Not invited yet' guide
+const ACCESS_URL: &str = "https://capstar.app/api/aoe4-spotify/access-request";
+const ACCESS_GAP: f64 = 600.0;   // one request per 10 min per install
+/// "ok", "blocked" (Spotify refuses this account: not on the shared app's user list, dev-mode 403) or None (offline / not logged in).
+fn access_status(a: &AppState) -> Option<&'static str> {
+    let mut sp = a.spotify.lock().unwrap(); if !sp.logged_in() { return None; }
+    let (c, r) = sp.get("/me").ok()?; if c == 200 { return Some("ok"); }
+    let t = r.to_string().to_lowercase();
+    if c == 403 && (t.contains("not registered") || t.contains("developer dashboard") || t.contains("user may not be registered")) { Some("blocked") } else { None }
+}
+/// After a login: good to go, or the not-invited guide when the shared app refuses this account.
+fn after_login(h: &tauri::AppHandle, a: &Arc<AppState>) { if access_status(a) == Some("blocked") { show_access(h); } else { show_gtg(h, a); } }
+fn show_access(h: &tauri::AppHandle) { let h2 = h.clone(); let _ = h.run_on_main_thread(move || small_window(&h2, "access", "access.html", 500.0, 701.0)); }
+/// Asked for access earlier: check once on start (1.0.9 pending_access).
+fn pending_access(h: tauri::AppHandle, a: Arc<AppState>) {
+    if read_user(&a.dir)["access_pending"].as_bool() != Some(true) { return; }
+    std::thread::spawn(move || match access_status(&a) { Some("ok") => { set_user_(&a, "access_pending", serde_json::Value::Null); show_gtg(&h, &a); } Some("blocked") => show_access(&h), _ => {} });
+}
+#[tauri::command]
+fn access_info(app: tauri::State<Arc<AppState>>) -> serde_json::Value {
+    let u = read_user(&app.dir); let last = u["access_last"].as_f64().unwrap_or(0.0);
+    serde_json::json!({ "pending": u["access_pending"].as_bool() == Some(true) && wall() - last < ACCESS_GAP, "on": true, "light": windows_light() })
+}
+/// Windows app theme (1.0.9 windows_light): HKCU ...\Themes\Personalize AppsUseLightTheme = 1.
+fn windows_light() -> bool {
+    #[cfg(windows)] { use std::os::windows::process::CommandExt;
+        if let Ok(o) = std::process::Command::new("reg").args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "/v", "AppsUseLightTheme"]).creation_flags(0x0800_0000).output() {
+            return String::from_utf8_lossy(&o.stdout).contains("0x1"); } }
+    false
+}
+/// The 'Send request' button: one POST {email[, name]} to the relay (no key in the app). sent | wait | bad | busy | down | error.
+#[tauri::command]
+async fn access_send(app: tauri::State<'_, Arc<AppState>>, email: String) -> Result<String, String> {
+    let a = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let e = email.trim().to_string(); let at = e.find('@').unwrap_or(0);
+        if e.len() > 100 || at == 0 || !e[at + 1..].contains('.') || e.chars().any(|c| c.is_whitespace() || c == ',' || c == ';') || e.ends_with('.') { return "bad".to_string(); }
+        let u = read_user(&a.dir); if wall() - u["access_last"].as_f64().unwrap_or(0.0) < ACCESS_GAP { return "wait".into(); }
+        let name: Option<String> = { let me = a.spotify.lock().unwrap().get("/me").ok().map(|(_, v)| v["display_name"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+            let n: String = me.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).filter(|c| c.is_alphanumeric() || " ._-".contains(*c)).collect();
+            let n = n.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(40).collect::<String>().trim().to_string(); if n.is_empty() { None } else { Some(n) } };
+        let mut body = serde_json::json!({ "email": e }); if let Some(n) = name { body["name"] = serde_json::json!(n); }
+        let r = ureq::post(ACCESS_URL).timeout(Duration::from_secs(15)).set("User-Agent", &format!("AoE4Spotify/{}", env!("CARGO_PKG_VERSION"))).send_json(body);
+        let code = match r { Ok(r) => r.status(), Err(ureq::Error::Status(c, _)) => c, Err(_) => { launcher::log("Access request failed: network"); return "down".into(); } };
+        if !(200..300).contains(&code) { launcher::log(&format!("Access request failed: HTTP {code}")); return match code { 400 => "bad", 429 => "busy", 502 | 503 => "down", _ => "error" }.into(); }
+        set_user_(&a, "access_last", serde_json::json!(wall())); set_user_(&a, "access_pending", serde_json::json!(true)); launcher::log("Access request sent"); "sent".into()
+    }).await.map_err(|e| e.to_string())
+}
+/// Rechecked every minute while the guide is open: once access works, close it and show good to go.
+#[tauri::command]
+async fn access_check(h: tauri::AppHandle, app: tauri::State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
+    let a = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || { let r = access_status(&a);
+        if r == Some("ok") { set_user_(&a, "access_pending", serde_json::Value::Null); show_gtg(&h, &a); use tauri::Manager; if let Some(w) = h.get_webview_window("access") { let _ = w.close(); } }
+        r.map(String::from) }).await.map_err(|e| e.to_string())
+}
+/// Windows clipboard text (the guide fills the email box as soon as you copy one; builder Paste).
+#[tauri::command]
+fn clip_text() -> String {
+    #[cfg(windows)] unsafe {
+        #[link(name = "user32")] extern "system" { fn OpenClipboard(h: isize) -> i32; fn CloseClipboard() -> i32; fn GetClipboardData(f: u32) -> isize; }
+        #[link(name = "kernel32")] extern "system" { fn GlobalLock(h: isize) -> *const u16; fn GlobalUnlock(h: isize) -> i32; }
+        if OpenClipboard(0) == 0 { return String::new(); }
+        let h = GetClipboardData(13); let mut out = String::new();
+        if h != 0 { let p = GlobalLock(h); if !p.is_null() { let mut n = 0; while *p.add(n) != 0 && n < 100_000 { n += 1; } out = String::from_utf16_lossy(std::slice::from_raw_parts(p, n)); GlobalUnlock(h); } }
+        CloseClipboard(); return out;
+    }
+    #[allow(unreachable_code)] String::new()
 }
 #[tauri::command]
 fn show_panel(app: tauri::AppHandle) { use tauri::Manager; if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.unminimize(); let _ = w.set_focus(); } }
@@ -595,6 +690,7 @@ fn menu(app: tauri::State<Arc<AppState>>, kind: String) -> String {
     match kind.as_str() {
         k if k.starts_with("pl:") => { let id: String = k[3..].chars().filter(|c| c.is_ascii_alphanumeric()).collect(); if id.len() == 22 { open_path(&format!("spotify:playlist:{id}")); } String::new() }
         "github" => { open_path("https://github.com/Capstar1/aoe4-spotify"); String::new() }
+        "account" => { open_path("https://www.spotify.com/account/overview/"); String::new() }
         "log" => { let p = app.dir.join("aoe4_spotify.log"); let _ = std::fs::create_dir_all(&app.dir);   // 1.0.9: the app's own log file
                    if !p.exists() { let _ = std::fs::write(&p, ""); } open_path(&p.display().to_string()); String::new() }
         "replays" => { let v = !app.replays.load(Ordering::SeqCst); app.replays.store(v, Ordering::SeqCst); save_prefs(&app); String::new() }
@@ -751,13 +847,14 @@ fn main() {
                   std::thread::spawn(move || auto_update(a6));
                   std::thread::spawn(move || launcher::follow_game(move || { install_pending(&a5); if !win::visible(h) { ah.exit(0) } })); }
               else { let a5 = a.state::<Arc<AppState>>().inner().clone(); std::thread::spawn(move || { if let Ok(Some(i)) = latest() { let mut u = a5.upd.lock().unwrap(); if u["phase"] == "idle" || u["phase"] == "done" { *u = serde_json::json!({ "phase": "avail", "info": i }); } } }); }
+              if !login_first && std::env::args().nth(1).is_none() { pending_access(a.handle().clone(), a.state::<Arc<AppState>>().inner().clone()); }
               if login_first { let a7 = a.state::<Arc<AppState>>().inner().clone(); let h7 = a.handle().clone();
-                  if a7.spotify.lock().unwrap().logged_in() { std::thread::spawn(move || show_gtg(&h7, &a7)); } else { do_login(h7, a7); } }
+                  if a7.spotify.lock().unwrap().logged_in() { std::thread::spawn(move || after_login(&h7, &a7)); } else { do_login(h7, a7); } }
               else if !hidden { let _ = w.show(); let _ = w.set_focus(); } }
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
-        .on_window_event(|w, e| { use tauri::Manager; if w.label() == "gtg" && matches!(e, tauri::WindowEvent::Destroyed) {
+        .on_window_event(|w, e| { use tauri::Manager; if (w.label() == "gtg" || w.label() == "access") && matches!(e, tauri::WindowEvent::Destroyed) {
             let h = w.app_handle().clone(); if let Some(m) = h.get_webview_window("main") { if !m.is_visible().unwrap_or(true) && std::env::args().nth(1).is_none() { h.exit(0); } } } })
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, sp, cache_covers, open_add, dbg, menu, check_update, show_panel, set_user, set_enabled, start_update, open_pick, pick_done, pick_info, gtg_info, gtg_fix])
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, sp, cache_covers, open_add, dbg, menu, check_update, show_panel, set_user, set_enabled, start_update, open_pick, pick_done, pick_info, gtg_info, gtg_fix, save_list, delete_list, access_info, access_send, access_check, clip_text])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
 }

@@ -185,7 +185,7 @@ function drawMain(s) {
     const yy = PL_TOP + 42 + i * 46, uri = set.playlists[k] || "", id = uri.split(":").pop(), rx = XR - 6 - 30, isDef = uri === (set.default_playlists[k] || "");
     if (i < n - 1) hline(X + 48, yy + 44, XR, "#2a2a2a");
     const row = rr(X - 6, yy, XR + 6, yy + 42, 9, "transparent");
-    if (st.age === k) row.style.boxShadow = "inset 0 0 0 1px " + C.acc;
+    if (st.in_match && st.playing && st.age === k) FIRE.place(host, X - 6, yy, XR + 6, yy + 42, 9);   // 1.0.9 glow pool fire, under the row's text
     if (!coverImg(uri, X + 9, yy + 6, 30, 6)) { rr(X + 9, yy + 6, X + 39, yy + 36, 6, C.ib).style.pointerEvents = "none"; }
     const zone = rr(X + 38, yy + 7, rx - 76, yy + 35, 8, "transparent");            // name zone: open in Spotify (1.0.9 opn%d)
     text(X + 48, yy + 21, lab.replace(" Age", ""), 13, C.tx, true);
@@ -415,4 +415,4 @@ async function menuTest() {   // AOE4S_MENUTEST: click every cog row like a user
     if (n === "real") { row(i).click(); await sleep(300); out.push("real back -> " + (await st()).real); if (ui.menu) gear().click(); await sleep(100); }
   }
   await invoke("dbg", { s: out.join("\n") }); await sleep(200); W_.close();
-}
+}
