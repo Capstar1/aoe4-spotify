@@ -10,7 +10,9 @@ use std::collections::HashMap;
 #[serde(tag = "do", rename_all = "snake_case")]
 pub enum Action {
     Play { age: String, uri: String, fade_s: f32 },
-    /// Match over: give the music back (After match: Resume, the default).
+    /// Match over, resume: the player may wait for the current track when Finish current song is on.
+    HandBack,
+    /// Give the music back now. Replay ignored, switcher disabled, game closed.
     Restore,
     /// Fade out and pause (After match: Stop).
     Stop,
@@ -126,7 +128,7 @@ impl Switcher {
                 self.in_match = false; self.current = None; self.clear_replay_hold();
                 if !self.enabled { return vec![]; }
                 let a = &self.after;
-                if !a.wl && (a.mode == "resume" || a.mode.is_empty()) { return vec![Action::Restore]; }
+                if !a.wl && (a.mode == "resume" || a.mode.is_empty()) { return vec![Action::HandBack]; }
                 if !a.wl && a.mode == "stop" { return vec![Action::Stop]; }
                 vec![Action::AfterMatch { mode: if a.mode.is_empty() { "resume".into() } else { a.mode.clone() }, playlist: a.playlist.clone(), wl: a.wl, win: a.win.clone(), loss: a.loss.clone(), fade_s: self.fade_s }]
             }

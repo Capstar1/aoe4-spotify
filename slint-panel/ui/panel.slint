@@ -11,13 +11,14 @@ component Chev inherits Icon { width: 20px; height: 20px; tint: #9a9a9a; }
 
 component MenuRow inherits Rectangle {
     callback clicked();
+    in property <string> tip;
     height: 32px; border-radius: 7px; background: ta.has-hover ? #303030 : #262626;
-    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    ta := TipArea { tip: root.tip; mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
-// 1.1 cog menu (drawMenu): dimmed backdrop, green gear, 6 rows.
+// 1.1 cog menu (drawMenu): dimmed backdrop, green gear. Finish song first sits under Music in replays.
 component CogMenu inherits Rectangle {
-    in property <bool> replays; in property <length> R; in property <color> acc: Pal.green;   // 1.0.9 C[acc]: grey while Disabled
+    in property <bool> replays; in property <bool> finish; in property <length> R; in property <color> acc: Pal.green;   // 1.0.9 C[acc]: grey while Disabled
     callback close(); callback action(string);
     property <length> mx0: R - 190px;
     property <length> gw: 20px;   // measure("\u2630  ", 12)
@@ -25,24 +26,28 @@ component CogMenu inherits Rectangle {
     Rectangle { x: R - 32px; y: 14px; width: 32px; height: 32px; border-radius: 10px; background: #2a2a2a;
         Icon { x: 6px; y: 6px; width: 20px; height: 20px; source: @image-url("../../ui/img/mk_gear@1.png"); tint: acc; }
         TouchArea { mouse-cursor: pointer; clicked => { root.close(); } } }
-    Rectangle { x: mx0; y: 52px; width: 190px; height: 186px; border-radius: 10px; background: #262626; border-width: 1px; border-color: #3a3a3a; }
+    Rectangle { x: mx0; y: 52px; width: 190px; height: 218px; border-radius: 10px; background: #262626; border-width: 1px; border-color: #3a3a3a; }
     MenuRow { x: mx0 + 6px; y: 58px; width: 178px; clicked => { root.action("replays"); } }
     Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 65px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_rep@1.png"); tint: #f2f2f2; }
     Label { ax: mx0 + 20px + gw; cy: 74px; text: "Music in replays"; font-size: 12px; color: Pal.tx; }
     Toggle { x: R - 14px - 30px; y: 66px; width: 30px; height: 16px; on: replays; acc: acc; enabled: false; }
-    Hline { x: mx0 + 10px; y: 93px; width: 170px; background: #3a3a3a; }
-    MenuRow { x: mx0 + 6px; y: 96px; width: 178px; clicked => { root.close(); root.action("check"); } }
-    Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 103px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_upd@1.png"); tint: #f2f2f2; }
-    Label { ax: mx0 + 20px + gw; cy: 112px; text: "Check for updates"; font-size: 12px; color: Pal.tx; }
-    MenuRow { x: mx0 + 6px; y: 128px; width: 178px; clicked => { root.close(); root.action("log"); } }
-    Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 135px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_log@1.png"); tint: #f2f2f2; }
-    Label { ax: mx0 + 20px + gw; cy: 144px; text: "Open log"; font-size: 12px; color: Pal.tx; }
-    MenuRow { x: mx0 + 6px; y: 160px; width: 178px; clicked => { root.close(); root.action("github"); } }
-    Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 167px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_gh@1.png"); tint: #f2f2f2; }
-    Label { ax: mx0 + 20px + gw; cy: 176px; text: "GitHub"; font-size: 12px; color: Pal.tx; }
-    Hline { x: mx0 + 10px; y: 198px; width: 170px; background: #3a3a3a; }
-    MenuRow { x: mx0 + 6px; y: 202px; width: 178px; height: 30px; clicked => { root.close(); root.action("uninstall"); } }
-    Label { ax: mx0 + 20px; cy: 217px; text: "\u{2715}  Uninstall"; font-size: 12px; bold: true; color: Pal.red; }
+    MenuRow { x: mx0 + 6px; y: 90px; width: 178px; tip: "Finish current song before changing"; clicked => { root.action("finish"); } }
+    Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 97px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_note@1.png"); tint: #f2f2f2; }
+    Label { ax: mx0 + 20px + gw; cy: 106px; text: "Finish song first"; font-size: 12px; color: Pal.tx; }
+    Toggle { x: R - 14px - 30px; y: 98px; width: 30px; height: 16px; on: finish; acc: acc; enabled: false; }
+    Hline { x: mx0 + 10px; y: 125px; width: 170px; background: #3a3a3a; }
+    MenuRow { x: mx0 + 6px; y: 128px; width: 178px; clicked => { root.close(); root.action("check"); } }
+    Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 135px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_upd@1.png"); tint: #f2f2f2; }
+    Label { ax: mx0 + 20px + gw; cy: 144px; text: "Check for updates"; font-size: 12px; color: Pal.tx; }
+    MenuRow { x: mx0 + 6px; y: 160px; width: 178px; clicked => { root.close(); root.action("log"); } }
+    Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 167px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_log@1.png"); tint: #f2f2f2; }
+    Label { ax: mx0 + 20px + gw; cy: 176px; text: "Open log"; font-size: 12px; color: Pal.tx; }
+    MenuRow { x: mx0 + 6px; y: 192px; width: 178px; clicked => { root.close(); root.action("github"); } }
+    Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 199px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_gh@1.png"); tint: #f2f2f2; }
+    Label { ax: mx0 + 20px + gw; cy: 208px; text: "GitHub"; font-size: 12px; color: Pal.tx; }
+    Hline { x: mx0 + 10px; y: 230px; width: 170px; background: #3a3a3a; }
+    MenuRow { x: mx0 + 6px; y: 234px; width: 178px; height: 30px; clicked => { root.close(); root.action("uninstall"); } }
+    Label { ax: mx0 + 20px; cy: 249px; text: "\u{2715}  Uninstall"; font-size: 12px; bold: true; color: Pal.red; }
 }
 component TitleBar inherits Rectangle {
     in property <bool> active: true;
@@ -72,6 +77,7 @@ export component Panel inherits Window {
     in property <bool> in-match;              // Game chip: Running while a match is on (1.1 st.in_match)
     in property <bool> busy;                  // Spotify login in progress
     in property <bool> replays;               // cog menu: Music in replays
+    in property <bool> finish;                // cog menu: Finish current song before changing
     in property <string> pill-text;           // update pill ('' = none)
     in property <bool> pill-err;
     in property <bool> pill-click;            // pill starts the update
@@ -322,7 +328,7 @@ export component Panel inherits Window {
                         Icon { x: XR2 - 2px - 7px; y: ry - 6px; width: 12px; height: 12px; source: @image-url("../../ui/img/mk_chevr12@1.png"); tint: Pal.mu; } }
                 }
             }
-            if menu-open: CogMenu { width: W; height: client-h; replays: replays; R: R; acc: acc;
+            if menu-open: CogMenu { width: W; height: client-h; replays: replays; finish: finish; R: R; acc: acc;
                 close => { root.menu-open = false; } action(k) => { root.menu-action(k); } }
         }
     }

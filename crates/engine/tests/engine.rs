@@ -46,6 +46,7 @@ fn menu_opens_and_replays_toggle() {
     let log = d.join("dry.txt"); std::env::set_var("AOE4S_DRYOPEN", &log);
     menu::menu(&e, "github"); menu::menu(&e, "pl:37i9dQZF1DX8Uebhn9wzrS"); menu::menu(&e, "pl:short");
     let r0 = aoe4core::userstore::replays(&d, false); menu::menu(&e, "replays"); assert_ne!(aoe4core::userstore::replays(&d, false), r0);
+    let f0 = aoe4core::userstore::finish_song(&d, false); menu::menu(&e, "finish"); assert_ne!(aoe4core::userstore::finish_song(&d, false), f0); assert!(e.finish.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(menu::menu(&e, "uninstall"), "Uninstaller not found (not installed?).");
     let t = std::fs::read_to_string(&log).unwrap();
     assert_eq!(t.lines().collect::<Vec<_>>(), vec!["https://github.com/Capstar1/aoe4-spotify", "spotify:playlist:37i9dQZF1DX8Uebhn9wzrS"]);

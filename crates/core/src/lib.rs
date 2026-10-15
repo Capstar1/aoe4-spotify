@@ -5,6 +5,7 @@ pub mod logtail;
 pub mod settings;
 pub mod spotify;
 pub mod switcher;
+pub mod finish;
 pub mod intros;
 pub mod aftermatch;
 pub mod os;

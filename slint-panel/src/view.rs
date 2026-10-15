@@ -60,7 +60,7 @@ pub fn playing_row(s: &Value) -> i32 {
 pub fn fill(ui: &Panel, s: &Value, dir: &Path) {
     let set = &s["settings"]; let sp = &s["spotify"]; let st = &s["status"];
     ui.set_enabled(set["enabled"].as_bool().unwrap_or(true));
-    ui.set_logged_in(sp["logged_in"] == true); ui.set_busy(sp["busy"] == true); ui.set_replays(sp["replays"] == true);
+    ui.set_logged_in(sp["logged_in"] == true); ui.set_busy(sp["busy"] == true); ui.set_replays(sp["replays"] == true); ui.set_finish(sp["finish"] == true);
     ui.set_in_match(st["in_match"] == true);
     ui.set_fade(set["fade_seconds"].as_f64().unwrap_or(2.0) as f32);
     ui.set_default_fade(set["default_fade"].as_f64().unwrap_or(2.0) as f32);

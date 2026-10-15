@@ -107,7 +107,11 @@ pub fn with_ed(s: &Settings, ed: &serde_json::Value) -> Settings {
 }
 pub fn save_prefs(app: &Engine) {
     let _ = std::fs::create_dir_all(&app.dir);
-    let _ = std::fs::write(app.dir.join("settings.json"), serde_json::json!({ "music_in_replays": app.replays.load(Ordering::SeqCst) }).to_string());
+    let p = app.dir.join("settings.json");
+    let mut u = aoe4core::userstore::read_json(&p);
+    u["music_in_replays"] = serde_json::json!(app.replays.load(Ordering::SeqCst));
+    u["finish_song"] = serde_json::json!(app.finish.load(Ordering::SeqCst));
+    let _ = aoe4core::userstore::write_atomic(&p, &u);
 }
 
 /// Your settings (config.json), parsed once and reused until the file changes (size / modified time) or set_user_ writes it.

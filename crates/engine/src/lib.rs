@@ -22,13 +22,13 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Default, serde::Serialize, Clone, Debug)]
-pub struct Status { pub result: Option<i32>, pub match_n: u64, pub game: String, pub log_path: String, pub watching: bool, pub in_match: bool, pub age: Option<String>, pub playing: Option<String>, pub log: Vec<String> }
+pub struct Status { pub result: Option<i32>, pub match_n: u64, pub game: String, pub log_path: String, pub watching: bool, pub in_match: bool, pub age: Option<String>, pub playing: Option<String>, pub civ: Option<String>, pub log: Vec<String> }
 
 /// Everything the app knows (Tauri 1.1 AppState without the window bits).
 pub struct Engine {
     pub settings: Mutex<Settings>, pub ver: AtomicU64, pub upd: Mutex<serde_json::Value>, pub ages: Vec<(String, String)>,
     pub status: Mutex<Status>, pub cv: Condvar, pub logged: AtomicBool, pub stat: Mutex<Option<(u64, serde_json::Value)>>,
-    pub replays: AtomicBool, pub busy: AtomicBool, pub spotify: Mutex<Spotify>, pub tx: Mutex<Sender<Action>>, pub dir: PathBuf, pub ed: Mutex<serde_json::Value>,
+    pub replays: AtomicBool, pub finish: AtomicBool, pub busy: AtomicBool, pub spotify: Mutex<Spotify>, pub tx: Mutex<Sender<Action>>, pub dir: PathBuf, pub ed: Mutex<serde_json::Value>,
     pub pick: Mutex<serde_json::Value>, pub gtg: Mutex<serde_json::Value>,
     /// Set when the game closes so the log watcher leaves the loop.
     pub stop: AtomicBool,
@@ -44,11 +44,12 @@ impl Engine {
         let status = Status { game: probe.label().into(), log_path: path.display().to_string(), ..Default::default() };
         let spotify = Spotify::new(settings.client_id.clone(), dir.join("token.json")); let logged0 = spotify.logged_in();
         let (tx, rx) = channel(); let replays0 = aoe4core::userstore::replays(&dir, settings.music_in_replays);
+        let finish0 = aoe4core::userstore::finish_song(&dir, false);
         let updated = std::env::args().any(|a| a == "--updated");
         let e = Arc::new(Engine { settings: Mutex::new(settings), ver: AtomicU64::new(0),
             upd: Mutex::new(serde_json::json!({ "phase": if updated { "done" } else { "idle" }, "msg": format!("Updated to {}", env!("CARGO_PKG_VERSION")) })),
             ages, status: Mutex::new(status), cv: Condvar::new(), logged: AtomicBool::new(logged0), stat: Mutex::new(None),
-            replays: AtomicBool::new(replays0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx),
+            replays: AtomicBool::new(replays0), finish: AtomicBool::new(finish0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx),
             ed: Mutex::new(data::load_ed(&dir)), dir, pick: Mutex::new(serde_json::Value::Null), gtg: Mutex::new(serde_json::Value::Null),
             stop: AtomicBool::new(false) });
         (e, rx, path)
@@ -73,7 +74,7 @@ impl Engine {
     pub fn live_state(&self) -> serde_json::Value {
         let st = self.status.lock().unwrap().clone();
         let logged_in = match self.spotify.try_lock() { Ok(s) => { let v = s.logged_in(); self.logged.store(v, Ordering::SeqCst); v } Err(_) => self.logged.load(Ordering::SeqCst) };
-        serde_json::json!({ "upd": self.upd.lock().unwrap().clone(), "status": st, "spotify": { "logged_in": logged_in, "replays": self.replays.load(Ordering::SeqCst), "busy": self.busy.load(Ordering::SeqCst) } })
+        serde_json::json!({ "upd": self.upd.lock().unwrap().clone(), "status": st, "spotify": { "logged_in": logged_in, "replays": self.replays.load(Ordering::SeqCst), "finish": self.finish.load(Ordering::SeqCst), "busy": self.busy.load(Ordering::SeqCst) } })
     }
     /// Full state, like the Tauri `get_state` (since = settings version the caller already has).
     pub fn state(&self, since: Option<u64>) -> serde_json::Value {
@@ -85,7 +86,7 @@ impl Engine {
     pub fn fingerprint(&self) -> String {
         let st = self.status.lock().unwrap().clone();
         serde_json::json!([self.ver.load(Ordering::SeqCst), self.upd.lock().unwrap().clone(), st.in_match, st.age, st.watching, st.playing, st.result, st.match_n,
-            self.logged.load(Ordering::SeqCst), self.replays.load(Ordering::SeqCst), self.busy.load(Ordering::SeqCst)]).to_string()
+            self.logged.load(Ordering::SeqCst), self.replays.load(Ordering::SeqCst), self.finish.load(Ordering::SeqCst), self.busy.load(Ordering::SeqCst)]).to_string()
     }
     pub fn push(&self, line: String) { run::push(&self.status, line) }
     pub fn sync_logged(&self) { if let Ok(s) = self.spotify.lock() { self.logged.store(s.logged_in(), Ordering::SeqCst); } }

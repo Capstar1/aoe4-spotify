@@ -66,3 +66,27 @@ pub fn age_data(s: &Settings, ages: &[String]) -> Value {
     }
     json!({ "civs": civs, "songs": songs, "nb": nb, "pools": pools, "defs": defs, "custom": custom, "default_age": DEFAULT_AGE })
 }
+
+fn track_list(v: &Value) -> Vec<String> {
+    v.as_array().map(|a| a.iter().filter_map(|x| x.as_str()).filter(|u| u.starts_with("spotify:track:")).map(String::from).collect()).unwrap_or_default()
+}
+
+/// Intro track for this age and civ, or None when intros are off or that civ has no songs.
+/// `n` picks among the pool. The previous uri is skipped when another song is available.
+pub fn intro_track(s: &Settings, age: &str, civ: &str, last: Option<&str>, n: u64) -> Option<String> {
+    if civ.is_empty() || !s.boss_on { return None; }
+    if !s.intro_ages.get(age).copied().unwrap_or(age == DEFAULT_AGE) { return None; }
+    let mine = track_list(&s.user_pools[age][civ]);
+    let pool = if !mine.is_empty() {
+        mine
+    } else if age == DEFAULT_AGE {
+        let p = track_list(&s.base_boss["pools"][civ]);
+        if !p.is_empty() { p } else { track_list(&s.base_boss["default"]) }
+    } else {
+        Vec::new()
+    };
+    if pool.is_empty() { return None; }
+    let alt: Vec<&String> = pool.iter().filter(|u| last != Some(u.as_str())).collect();
+    let pick = if alt.is_empty() { pool.iter().collect::<Vec<_>>() } else { alt };
+    Some(pick[(n as usize) % pick.len()].clone())
+}

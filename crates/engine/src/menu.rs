@@ -13,6 +13,7 @@ pub fn menu(app: &Engine, kind: &str) -> String {
         "log" => { let p = app.dir.join("aoe4_spotify.log"); let _ = std::fs::create_dir_all(&app.dir);
                    if !p.exists() { let _ = std::fs::write(&p, ""); } sys::open_path(&p.display().to_string()); String::new() }
         "replays" => { let v = !app.replays.load(Ordering::SeqCst); app.replays.store(v, Ordering::SeqCst); aoe4core::userstore::set_replays(&app.dir, v); String::new() }
+        "finish" => { let v = !app.finish.load(Ordering::SeqCst); app.finish.store(v, Ordering::SeqCst); aoe4core::userstore::set_finish_song(&app.dir, v); String::new() }
         "uninstall" => {
             let dry = std::env::var_os("AOE4S_DRYOPEN").is_some();
             let unins = sys::install_dir().join("unins000.exe");

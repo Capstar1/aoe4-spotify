@@ -33,6 +33,12 @@ pub fn set_replays(dir: &Path, on: bool) -> bool {
     let p = dir.join("settings.json"); let mut u = read_json(&p); u["music_in_replays"] = json!(on); write_atomic(&p, &u).is_ok()
 }
 
+/// "Finish current song before changing" (settings.json). Other keys in that file stay. Default off.
+pub fn finish_song(dir: &Path, default: bool) -> bool { read_json(&dir.join("settings.json"))["finish_song"].as_bool().unwrap_or(default) }
+pub fn set_finish_song(dir: &Path, on: bool) -> bool {
+    let p = dir.join("settings.json"); let mut u = read_json(&p); u["finish_song"] = json!(on); write_atomic(&p, &u).is_ok()
+}
+
 /// What the switcher is playing, for the panel's row fire. Missing file means nothing (do not trust a stale read).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NowPlay { pub in_match: bool, pub age: Option<String>, pub playing: Option<String> }

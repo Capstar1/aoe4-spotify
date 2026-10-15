@@ -11,6 +11,8 @@ fn set_and_remove_keys() {
     assert!(!replays(&d, false)); assert!(set_replays(&d, true)); assert!(replays(&d, false));
     let mut extra = read_json(&d.join("settings.json")); extra["kept"] = json!(1); assert!(write_atomic(&d.join("settings.json"), &extra).is_ok());
     assert!(set_replays(&d, false)); assert!(!replays(&d, true)); assert_eq!(read_json(&d.join("settings.json"))["kept"], json!(1));
+    assert!(!finish_song(&d, false)); assert!(set_finish_song(&d, true)); assert!(finish_song(&d, false));
+    assert!(set_finish_song(&d, false)); assert!(!finish_song(&d, true)); assert_eq!(read_json(&d.join("settings.json"))["kept"], json!(1));
     assert!(read_now(&d).is_none());
     assert!(write_now(&d, true, Some("dark"), Some("spotify:playlist:x")));
     assert_eq!(read_now(&d), Some(NowPlay { in_match: true, age: Some("dark".into()), playing: Some("spotify:playlist:x".into()) }));

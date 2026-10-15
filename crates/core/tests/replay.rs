@@ -34,7 +34,7 @@ fn match_switches_ages_and_restores() {
     let (_, acts) = run(MATCH);
     let ages: Vec<_> = acts.iter().filter_map(|a| match a { Action::Play { age, .. } => Some(age.as_str()), _ => None }).collect();
     assert_eq!(ages, ["dark", "feudal", "castle"]);
-    assert_eq!(acts.last(), Some(&Action::Restore));
+    assert_eq!(acts.last(), Some(&Action::HandBack));
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn watched_replay_restores_when_the_match_ends() {
     s.set_now(9.0);
     for e in a.feed("MOD -- Game Over at frame 9") { acts.extend(s.on_event(&e)); }
     assert_eq!(play_ages(&acts), ["dark"]);
-    assert_eq!(acts.last(), Some(&Action::Restore));
+    assert_eq!(acts.last(), Some(&Action::HandBack));
 }
 
 #[test]
