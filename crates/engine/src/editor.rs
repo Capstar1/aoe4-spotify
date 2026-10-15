@@ -84,19 +84,30 @@ impl Ctx {
         if !names.contains(&name.to_lowercase()) { return name; }
         let mut n = 2; while names.contains(&format!("{name} ({n})").to_lowercase()) { n += 1; } format!("{name} ({n})")
     }
+    /// Settings equal the defaults while an auto-created preset (forked from Default by editing) is current: that preset
+    /// goes away and Default is current again (true = changed). Presets you named yourself are never removed.
+    pub fn back_to_default(&self, u: &mut Value) -> bool {
+        let n = u["intro_preset"].as_str().unwrap_or(DEFAULT_PRESET).to_string();
+        let Some(c) = self.presets(u).into_iter().find(|p| p["name"] == json!(n)) else { return false };
+        if !is_auto(&c) || self.preset_key(u, None) != self.preset_key(u, Some(&self.presets(u)[0])) { return false; }
+        let ps: Vec<Value> = u["intro_presets"].as_array().cloned().unwrap_or_default().into_iter().filter(|p| p.is_object() && p["name"] != c["name"]).collect();
+        u["intro_presets"] = json!(ps); u["intro_preset"] = json!(DEFAULT_PRESET); true
+    }
     /// Keep the current preset in step with the edit; editing Default (built-in) forks a new "Custom" preset (its name is returned).
     pub fn autosave(&self, u: &mut Value) -> Option<String> {
+        if self.back_to_default(u) { return None; }
         let n = u["intro_preset"].as_str().unwrap_or(DEFAULT_PRESET).to_string();
         let cur = self.presets(u).into_iter().find(|p| p["name"] == json!(n));
         if let Some(c) = &cur { if self.preset_key(u, Some(c)) == self.preset_key(u, None) { return None; } }
         let ps: Vec<Value> = u["intro_presets"].as_array().cloned().unwrap_or_default().into_iter().filter(|p| p.is_object()).collect();
         if cur.as_ref().is_some_and(|c| c["builtin"] != json!(true)) {
-            let me = self.preset_from_user(u, &n);
+            let mut me = self.preset_from_user(u, &n); if cur.as_ref().is_some_and(is_auto) { me["auto"] = json!(true); }
             u["intro_presets"] = json!(ps.into_iter().map(|p| if p["name"] == json!(n) { me.clone() } else { p }).collect::<Vec<_>>());
             return None;
         }
         let name = self.unique_name(u, if cur.is_some() || n == DEFAULT_PRESET { "Custom" } else { &n });
-        let mut ps = ps; ps.push(self.preset_from_user(u, &name));
+        let mut fork = self.preset_from_user(u, &name); fork["auto"] = json!(true);   // auto-created (not named by you)
+        let mut ps = ps; ps.push(fork);
         u["intro_presets"] = json!(ps); u["intro_preset"] = json!(name); Some(name)
     }
     pub fn apply_preset(&self, u: &mut Value, p: &Value) {
@@ -161,6 +172,12 @@ impl Ctx {
     }
 }
 
+/// Auto-created by editing Default: flagged, or (older files, before the flag) named "Custom" / "Custom (n)" by autosave.
+pub fn is_auto(p: &Value) -> bool {
+    if p["builtin"] == json!(true) { return false; }
+    if p["auto"] == json!(true) { return true; }
+    let n = p["name"].as_str().unwrap_or(""); n == "Custom" || n.strip_prefix("Custom (").and_then(|r| r.strip_suffix(')')).is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+}
 fn song(x: &Value) -> Song { let s = |i: usize| x[i].as_str().unwrap_or("").to_string(); Song { key: s(0), name: s(1), artist: s(2), uri: s(3), col: s(4) } }
 fn set_obj(u: &mut Value, k: &str, a: &str, v: Value) { let mut m = u[k].as_object().cloned().unwrap_or_default(); m.insert(a.into(), v); u[k] = Value::Object(m); }
 pub fn set_age_on(cx: &Ctx, u: &mut Value, a: &str, on: bool) -> bool { if on && cx.age_empty(u, a) { return false; } set_obj(u, "intro_ages", a, json!(on)); true }

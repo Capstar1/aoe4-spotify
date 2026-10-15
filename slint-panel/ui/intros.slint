@@ -26,7 +26,7 @@ export global IntroUi {
     in property <[Chip]> imp-chips; in property <[ImpAge]> imp-ages;
     // age page
     in property <string> label; in property <image> badge; in property <bool> on; in property <bool> empty; in property <bool> custom;
-    in property <bool> emblem; in property <length> div; in property <int> count-n: -1; in property <length> count-cx; in property <length> plus-cx; in property <length> plus-r: 19px;
+    in property <bool> emblem; in property <float> emblem-k: 1; in property <float> count-k: 1; in property <length> div; in property <int> count-n: -1; in property <length> count-cx; in property <length> plus-cx; in property <length> plus-r: 19px;
     in property <[TrayChip]> tray;
     in property <[CivRow]> rows;
     in property <bool> default-age;
@@ -318,9 +318,9 @@ export component AgePage inherits Rectangle {
     Label { ax: IntroUi.div + 14px; cy: 81px; text: IntroUi.drop-over ? "DROP TO ADD" : "YOURS"; font-size: 8.5px; bold: true; color: Pal.green; }
     if !IntroUi.drop-over: Label { ax: IntroUi.plus-cx; centre: true; cy: 150px; text: "or drop songs here"; font-size: 8.5px; color: #7a7a7a; }
     Rectangle { x: IntroUi.div; y: 84px; width: 1px; height: 66px; background: #2e2e2e; }
-    if IntroUi.emblem: Rectangle { x: EX - 25px; y: TY - 25px; width: 50px; height: 50px;
+    if IntroUi.emblem: Rectangle { x: EX - 25px * IntroUi.emblem-k; y: TY - 25px * IntroUi.emblem-k; width: 50px * IntroUi.emblem-k; height: self.width;
         Sprite { width: parent.width; height: parent.height; source: ema.has-hover ? @image-url("../../ui/img/age/emblem_h@1.png") : @image-url("../../ui/img/age/emblem@1.png"); }
-        ema := TipArea { tip: "Octopath Traveler — 8 songs (click to show)"; mouse-cursor: pointer; clicked => { IntroUi.pack(true); } } }
+        ema := TipArea { tip: "Octopath Traveler — 8 songs"; mouse-cursor: pointer; clicked => { IntroUi.pack(true); } } }
     for t[n] in IntroUi.tray: Rectangle { x: 0; y: 0; width: W; height: H;   // left to right: the right neighbour is drawn later = on top
         SongChip { cx: t.cx; cy: TY; r: t.r; img: t.img; ring: t.col; }
         if (ta.has-hover && !IntroUi.drag-on) || (IntroUi.drag-on && IntroUi.drag-tray == t.idx): Ring { cx: t.cx; cy: TY; R: t.r + 3px; }
@@ -328,10 +328,10 @@ export component AgePage inherits Rectangle {
         ta := DragArea { x: t.cx - t.r; y: TY - t.r; width: t.hit-w; height: 2 * t.r; kind: "tray"; i: t.idx; j: 0; tip: t.tip;
             right(x, y) => { if (t.custom) { IntroUi.tray-ctx(t.idx, x, y); } } }
     }
-    if IntroUi.count-n >= 0: Rectangle { x: IntroUi.count-cx - 19.5px; y: TY - 19.5px; width: 39px; height: 39px; border-radius: 19.5px;
+    if IntroUi.count-n >= 0: Rectangle { x: IntroUi.count-cx - 19.5px * IntroUi.count-k; y: TY - 19.5px * IntroUi.count-k; width: 39px * IntroUi.count-k; height: self.width; border-radius: self.width / 2;
         border-width: 1.6px; border-color: Pal.green; background: cna.has-hover ? #1db95426 : transparent;
         CText { width: parent.width; height: parent.height; text: IntroUi.count-n; font-size: 14px; font-weight: 700; color: Pal.green; }
-        cna := TipArea { tip: "Your songs (" + IntroUi.count-n + ") — click to show"; mouse-cursor: pointer; clicked => { IntroUi.pack(false); } } }
+        cna := TipArea { tip: "Your songs (" + IntroUi.count-n + ")"; mouse-cursor: pointer; clicked => { IntroUi.pack(false); } } }
     Rectangle { x: IntroUi.plus-cx - IntroUi.plus-r; y: TY - IntroUi.plus-r; width: 2 * IntroUi.plus-r; height: self.width;
         Sprite { x: (parent.width - self.width) / 2; y: self.x; width: 42px * IntroUi.plus-r / 19px; height: self.width;
             source: pla.has-hover ? @image-url("../../ui/img/age/plus_h@1.png") : @image-url("../../ui/img/age/plus@1.png"); }

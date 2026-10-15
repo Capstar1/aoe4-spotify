@@ -25,24 +25,24 @@ component CogMenu inherits Rectangle {
     Rectangle { x: R - 32px; y: 14px; width: 32px; height: 32px; border-radius: 10px; background: #2a2a2a;
         Icon { x: 6px; y: 6px; width: 20px; height: 20px; source: @image-url("../../ui/img/mk_gear@1.png"); tint: acc; }
         TouchArea { mouse-cursor: pointer; clicked => { root.close(); } } }
-    Rectangle { x: mx0; y: 52px; width: 190px; height: 218px; border-radius: 10px; background: #262626; border-width: 1px; border-color: #3a3a3a; }
+    Rectangle { x: mx0; y: 52px; width: 190px; height: 186px; border-radius: 10px; background: #262626; border-width: 1px; border-color: #3a3a3a; }
     MenuRow { x: mx0 + 6px; y: 58px; width: 178px; clicked => { root.action("replays"); } }
     Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 65px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_rep@1.png"); tint: #f2f2f2; }
     Label { ax: mx0 + 20px + gw; cy: 74px; text: "Music in replays"; font-size: 12px; color: Pal.tx; }
     Toggle { x: R - 14px - 30px; y: 66px; width: 30px; height: 16px; on: replays; acc: acc; enabled: false; }
     Hline { x: mx0 + 10px; y: 93px; width: 170px; background: #3a3a3a; }
     MenuRow { x: mx0 + 6px; y: 96px; width: 178px; clicked => { root.close(); root.action("check"); } }
-    Label { ax: mx0 + 20px; cy: 112px; text: "\u{21bb}  Check for updates"; font-size: 12px; color: Pal.tx; }
+    Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 103px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_upd@1.png"); tint: #f2f2f2; }
+    Label { ax: mx0 + 20px + gw; cy: 112px; text: "Check for updates"; font-size: 12px; color: Pal.tx; }
     MenuRow { x: mx0 + 6px; y: 128px; width: 178px; clicked => { root.close(); root.action("log"); } }
-    Label { ax: mx0 + 20px; cy: 144px; text: "\u{2630}  Open log"; font-size: 12px; color: Pal.tx; }
+    Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 135px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_log@1.png"); tint: #f2f2f2; }
+    Label { ax: mx0 + 20px + gw; cy: 144px; text: "Open log"; font-size: 12px; color: Pal.tx; }
     MenuRow { x: mx0 + 6px; y: 160px; width: 178px; clicked => { root.close(); root.action("github"); } }
     Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 167px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_gh@1.png"); tint: #f2f2f2; }
     Label { ax: mx0 + 20px + gw; cy: 176px; text: "GitHub"; font-size: 12px; color: Pal.tx; }
-    MenuRow { x: mx0 + 6px; y: 192px; width: 178px; clicked => { root.close(); root.action("own"); } }
-    Label { ax: mx0 + 20px; cy: 208px; text: "\u{266b}  Your Spotify app"; font-size: 12px; color: Pal.tx; }
-    Hline { x: mx0 + 10px; y: 230px; width: 170px; background: #3a3a3a; }
-    MenuRow { x: mx0 + 6px; y: 234px; width: 178px; height: 30px; clicked => { root.close(); root.action("uninstall"); } }
-    Label { ax: mx0 + 20px; cy: 249px; text: "\u{2715}  Uninstall"; font-size: 12px; bold: true; color: Pal.red; }
+    Hline { x: mx0 + 10px; y: 198px; width: 170px; background: #3a3a3a; }
+    MenuRow { x: mx0 + 6px; y: 202px; width: 178px; height: 30px; clicked => { root.close(); root.action("uninstall"); } }
+    Label { ax: mx0 + 20px; cy: 217px; text: "\u{2715}  Uninstall"; font-size: 12px; bold: true; color: Pal.red; }
 }
 component TitleBar inherits Rectangle {
     in property <bool> active: true;

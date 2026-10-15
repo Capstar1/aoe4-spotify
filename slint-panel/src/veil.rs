@@ -1,4 +1,4 @@
-﻿//! Page-switch resize with zero stale frames. DWM composes a moved/resized window with its OLD surface until the
+//! Page-switch resize with zero stale frames. DWM composes a moved/resized window with its OLD surface until the
 //! new-size frame is presented, so any in-place resize shows one warped/shifted frame. Instead:
 //!  1. "veil": a topmost, click-through layered copy of the screen over the area that will change (old + new rect
 //!     and the shadow margin) - pixel-identical to what is already on screen, so nothing visibly changes;
@@ -20,6 +20,7 @@ use std::ffi::c_void;
     fn ShowWindow(h: isize, c: i32) -> i32; fn DestroyWindow(h: isize) -> i32;
     fn SetWindowPos(h: isize, after: isize, x: i32, y: i32, w: i32, h2: i32, f: u32) -> i32;
     fn RedrawWindow(h: isize, r: *const Rect, rgn: isize, f: u32) -> i32;
+    fn GetCursorPos(p: *mut Pt) -> i32; fn SetCursorPos(x: i32, y: i32) -> i32;
 }
 #[link(name = "gdi32")] extern "system" {
     fn CreateCompatibleDC(dc: isize) -> isize; fn DeleteDC(dc: isize) -> i32; fn SelectObject(dc: isize, o: isize) -> isize; fn DeleteObject(o: isize) -> i32;
@@ -39,8 +40,9 @@ fn veil(r: Rect) -> Option<isize> {
         let cls = wide("AoE4SpotifyVeil");
         let wc = Wc { size: std::mem::size_of::<Wc>() as u32, style: 0, proc_: DefWindowProcW, cls: 0, wnd: 0, inst: GetModuleHandleW(std::ptr::null()), icon: 0, cur: 0, bg: 0, menu: std::ptr::null(), name: cls.as_ptr(), sm: 0 };
         RegisterClassExW(&wc);   // (already registered on later calls: fine)
-        // WS_EX_LAYERED|TRANSPARENT|TOPMOST|TOOLWINDOW|NOACTIVATE, WS_POPUP
-        let hw = CreateWindowExW(0x80000 | 0x20 | 0x8 | 0x80 | 0x0800_0000, cls.as_ptr(), cls.as_ptr(), 0x8000_0000, r.l, r.t, w, h, 0, 0, wc.inst, std::ptr::null());
+        // WS_EX_LAYERED|TOPMOST|TOOLWINDOW|NOACTIVATE, WS_POPUP. NOT click-through: while the panel is cloaked the veil takes
+        // the mouse, so the window behind never gets hover for those frames.
+        let hw = CreateWindowExW(0x80000 | 0x8 | 0x80 | 0x0800_0000, cls.as_ptr(), cls.as_ptr(), 0x8000_0000, r.l, r.t, w, h, 0, 0, wc.inst, std::ptr::null());
         if hw == 0 { return None; }
         let scr = GetDC(0); let mem = CreateCompatibleDC(scr);
         let bih = Bih { size: 40, w, h: -h, planes: 1, bits: 32, comp: 0, img: 0, xp: 0, yp: 0, used: 0, imp: 0, mask: [0; 4] };
@@ -68,6 +70,8 @@ pub fn place(h: isize, old: Rect, x: i32, y: i32, w: i32, hh: i32) {
         SetWindowPos(h, 0, x, y, w, hh, 0x4 | 0x10 | 0x100 | 0x8);           // NOZORDER|NOACTIVATE|NOCOPYBITS|NOREDRAW
         RedrawWindow(h, std::ptr::null(), 0, 0x1 | 0x100 | 0x400);          // paint the new page now
         DwmFlush();
-        if let Some(v) = v { cloak(h, false); DestroyWindow(v); DwmFlush(); }
+        if let Some(v) = v { cloak(h, false); DestroyWindow(v); DwmFlush();
+            // fresh mouse move at the same spot: the panel's hover state is right at once
+            let mut p = Pt { x: 0, y: 0 }; if GetCursorPos(&mut p) != 0 { SetCursorPos(p.x, p.y); } }
     }
 }

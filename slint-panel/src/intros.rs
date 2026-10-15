@@ -18,7 +18,8 @@ struct Ed {
     song: Option<String>, busy: bool, glow_t0: Instant,
     pdel: Option<(String, Instant)>, imp: Option<Value>, ctx_idx: usize,
     toast_t: Option<Instant>, hint_t: Option<Instant>,
-    strips: [Vec<Image>; 4],   // decoded at start: a song click must light up instantly
+    strips: [Vec<Image>; 4],
+    pk_t: Option<f32>, pk_last: Instant,   // Octopath / YOURS fold: 0 = YOURS shown .. 1 = Octopath shown (1.0.9 pack_tick, 0.45 s)   // decoded at start: a song click must light up instantly
 }
 thread_local! { static ED: RefCell<Option<Ed>> = const { RefCell::new(None) }; static TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) }; }
 
@@ -43,7 +44,9 @@ pub fn init(ui: &Panel, eng: Arc<Engine>, shell: Arc<dyn Shell>) {
     assets::set_scale(ui.window().scale_factor());
     let strips = [assets::strip("glow19"), assets::strip("glow14"), assets::strip("eq19"), assets::strip("eq14")];
     ED.with(|e| *e.borrow_mut() = Some(Ed { eng, shell, ui: ui.as_weak(), h: History::default(), k: None, sc: 0.0, press: None, drag: false, drop: None,
-        song: None, busy: false, glow_t0: Instant::now(), pdel: None, imp: None, ctx_idx: 0, toast_t: None, hint_t: None, strips }));
+        song: None, busy: false, glow_t0: Instant::now(), pdel: None, imp: None, ctx_idx: 0, toast_t: None, hint_t: None, strips, pk_t: None, pk_last: Instant::now() }));
+    // an auto-created preset that equals the defaults (older sessions) goes back to Default on start
+    with(|e| { let s = state(&e.eng); let cx = ctx(&s); let mut u = ed_of(&s); if cx.back_to_default(&mut u) { presets::save_ed(&e.eng, u); } });
     let g = ui.global::<IntroUi>();
     g.on_back(|| { let p = page(); if p == "age" { with(|e| e.k = None); set_page("intros"); } else { set_page("main"); } });
     g.on_open_age(|k| { with(|e| { e.k = Some(k.to_string()); e.sc = 0.0; }); set_page("age"); });
@@ -60,7 +63,10 @@ pub fn init(ui: &Panel, eng: Arc<Engine>, shell: Arc<dyn Shell>) {
     g.on_undo(|back| undo(back));
     g.on_tray_ctx(|i, x, y| { with(|e| e.ctx_idx = i as usize); if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); g.set_ctx_x(x - 1.0); g.set_ctx_y(y - 31.0); g.set_ctx_open(true); } });
     g.on_ctx_remove(|| edit(|cx, u, e| { let Some(sg) = cx.songs_of(u).get(e.ctx_idx).cloned() else { return false }; cx.remove_custom(u, &sg.uri); true }));
-    g.on_pack(|open| { with(|e| { let mut u = ed_of(&state(&e.eng)); u["intro_pack_open"] = json!(open); presets::save_ed(&e.eng, u); }); refresh(); });
+    g.on_pack(|open| { with(|e| { let mut u = ed_of(&state(&e.eng));
+        if e.pk_t.is_none() { e.pk_t = Some(if u["intro_pack_open"].as_bool().unwrap_or(false) { 1.0 } else { 0.0 }); }
+        u["intro_pack_open"] = json!(open); presets::save_ed(&e.eng, u); e.pk_last = Instant::now(); });
+        if let Some(ui) = ui_of() { crate::tips_hide(&ui); } pack_anim(open); });
     g.on_open_add(|| { with(|e| e.shell.show(Win::Add)); });
     g.on_switch_preset(|name| { if let Some(ui) = ui_of() { ui.global::<IntroUi>().set_pmenu(false); }
         edit(move |cx, u, _| { let Some(p) = cx.presets(u).into_iter().find(|p| p["name"] == json!(name.as_str())) else { return false }; cx.apply_preset(u, &p); true }) });
@@ -224,6 +230,21 @@ fn glow_frame(e: &Ed, g: &IntroUi) {
     g.set_glow_op((el / 0.33).min(1.0));
 }
 
+// 1.0.9 pack_set / pack_tick: move the fold towards open at 1 / 0.45 s per unit (~60 fps only while moving; reverses smoothly).
+thread_local! { static PKT: RefCell<Option<Timer>> = const { RefCell::new(None) }; }
+fn pack_anim(open: bool) {
+    let goal = if open { 1.0 } else { 0.0 };
+    let tick = move || {
+        let done = with(|e| { let now = Instant::now(); let dt = now.duration_since(e.pk_last).as_secs_f32().min(0.05); e.pk_last = now;
+            let t = e.pk_t.unwrap_or(goal); let s = dt / 0.45;
+            let t = if goal > t { (t + s).min(goal) } else { (t - s).max(goal) }; e.pk_t = Some(t); t == goal }).unwrap_or(true);
+        refresh();
+        if done { PKT.with(|x| { x.borrow_mut().take(); }); }
+    };
+    PKT.with(|x| { if x.borrow().is_none() { let tm = Timer::default(); tm.start(TimerMode::Repeated, Duration::from_millis(16), tick); *x.borrow_mut() = Some(tm); } });
+    tick();
+}
+fn ease(u: f32) -> f32 { let u = u.clamp(0.0, 1.0); u * u * (3.0 - 2.0 * u) }
 /// Push the whole intros state to the UI (overview, preset menu, the open age page).
 pub fn refresh() {
     with(|e| {
@@ -263,19 +284,30 @@ pub fn refresh() {
         // tray (trayLayout)
         let nb = cx.builtin.len(); let un = all.len() - nb; let w = IW;
         let ysp = (100.0 / un.max(1) as f32).min(50.0); let yr = (ysp * 0.45).clamp(9.0, 19.0);
-        let view = if un == 0 { "octo0" } else if u["intro_pack_open"].as_bool().unwrap_or(false) { "octo" } else { "yours" };
+        let open = u["intro_pack_open"].as_bool().unwrap_or(false);
+        let pt = if un == 0 { 1.0 } else { e.pk_t.unwrap_or(if open { 1.0 } else { 0.0 }) };
+        let view = if un == 0 { "octo0" } else if pt >= 1.0 { "octo" } else if pt <= 0.0 { "yours" } else { "fold" };
+        let (mut emblem_k, mut count_k) = (1.0f32, 1.0f32);
         let mut chips: Vec<(usize, f32, f32)> = vec![]; let (div, plus, plus_r, count, emblem);
         match view {
             "octo0" => { let bsp = (((w - 24.0) - (16.0 + 38.0 + 4.0) - 63.0 - 53.0) / (nb.max(2) - 1) as f32).clamp(22.0, 48.0);
                 for i in 0..nb { chips.push((i, 53.0 + i as f32 * bsp, 19.0)); } div = 53.0 + (nb.max(1) - 1) as f32 * bsp + 19.0 + 16.0; plus = div + 16.0 + 19.0; plus_r = 19.0; count = None; emblem = false; }
             "yours" => { div = 57.0 + 23.0 + 16.0; for j in 0..un { chips.push((nb + j, div + 16.0 + yr + j as f32 * ysp, yr)); } plus = div + 16.0 + yr + un as f32 * ysp; plus_r = yr; count = None; emblem = true; }
+            "fold" => {   // 1.0.9 fold: songs leave / return to their emblem one after another, emblem shrinks first, grows back last
+                let (dy, dout) = (57.0 + 23.0 + 16.0, w - 213.0); let bsp = ((dout - 12.0 - 19.0 - 53.0) / (nb.max(2) - 1) as f32).min(48.0); let co = dout + 16.0 + 19.0; let ee = ease(pt);
+                for i in 0..nb { let k = ease((pt - 0.10 - i as f32 * 0.05) / (0.90 - (nb.max(1) - 1) as f32 * 0.05).max(0.2)); if k > 0.0 { chips.push((i, 57.0 + (53.0 + i as f32 * bsp - 57.0) * k, 19.0)); } }
+                for j in 0..un { let k = ease((1.0 - pt - 0.10 - j as f32 * 0.05) / (0.90 - (un.max(1) - 1) as f32 * 0.05).max(0.2)); if k > 0.0 { let yx = dy + 16.0 + yr + j as f32 * ysp; chips.push((nb + j, co + (yx - co) * k, 19.0 + (yr - 19.0) * k)); } }
+                chips.sort_by(|a, b| a.1.total_cmp(&b.1));
+                div = dy + (dout - dy) * ee; let (py, po) = (dy + 16.0 + yr + un as f32 * ysp, co + 44.0); plus = py + (po - py) * ee; plus_r = yr + (19.0 - yr) * ee;
+                emblem_k = 1.0 - ease(pt / 0.45); count_k = 1.0 - ease((1.0 - pt) / 0.45);
+                emblem = emblem_k > 0.12; count = (count_k > 0.12).then_some(co); }
             _ => { div = w - 213.0; let bsp = ((div - 12.0 - 19.0 - 53.0) / (nb.max(2) - 1) as f32).min(48.0);
                 for i in 0..nb { chips.push((i, 53.0 + i as f32 * bsp, 19.0)); } count = Some(div + 16.0 + 19.0); plus = div + 16.0 + 19.0 + 44.0; plus_r = 19.0; emblem = false; }
         }
         let tray: Vec<TrayChip> = chips.iter().enumerate().map(|(n, &(i, cxx, r))| { let sg = &all[i];
             let right = chips.get(n + 1).map(|nx| nx.1 - nx.2).filter(|l| *l < cxx + r).unwrap_or(cxx + r);
             TrayChip { idx: i as i32, cx: cxx, r, hit_w: right - (cxx - r), img: chip_img(&e.eng, sg, 2.0 * r), col: col(&sg.col), tip: tip(sg), custom: sg.key.starts_with("c_"), key: sg.key.clone().into() } }).collect();
-        g.set_tray(model(tray)); g.set_div(div); g.set_plus_cx(plus); g.set_plus_r(plus_r); g.set_emblem(emblem);
+        g.set_tray(model(tray)); g.set_div(div); g.set_plus_cx(plus); g.set_plus_r(plus_r); g.set_emblem(emblem); g.set_emblem_k(emblem_k); g.set_count_k(count_k);
         g.set_count_n(if count.is_some() { un as i32 } else { -1 }); g.set_count_cx(count.unwrap_or(0.0));
         g.set_playing(e.song.clone().unwrap_or_default().into());
     });
@@ -321,7 +353,7 @@ pub fn selftest() {
     let Some(ui) = ui_of() else { return }; let g = ui.global::<IntroUi>();
     let ed = || with(|e| ed_of(&state(&e.eng))).unwrap_or_default();
     let (cx, s) = with(|e| { let s = state(&e.eng); (ctx(&s), s) }).unwrap();
-    let ok = |n: &str, c: bool| println!("{} {n}", if c { "PASS" } else { "FAIL" });
+    let ok = |n: &str, c: bool| { let l = format!("{} {n}", if c { "PASS" } else { "FAIL" }); println!("{l}"); aoe4engine::sys::log(&format!("selftest: {l}")); };
     let a = "castle"; let civ1 = cx.civs[1].0.clone(); let song = cx.builtin[2].uri.clone();
     g.invoke_open_age(a.into()); ok("age page open", g.get_page() == "age" && g.get_rows().row_count() == cx.civs.len());
     // drag tray chip 2 onto row 1
@@ -331,6 +363,8 @@ pub fn selftest() {
     g.invoke_release(262.0 + 1.0, LT + STEP + 26.0 + 31.0);
     let u = ed(); ok("drop adds the song to the civ", cx.pools_of(&u, a)[&civ1] == vec![song.clone()]);
     ok("edit forks preset Custom", u["intro_preset"] == json!("Custom"));
+    g.invoke_remove_at(1, 0); let u = ed(); ok("back to the defaults: Default again, the auto Custom removed", u["intro_preset"] == json!(DEFAULT_PRESET) && !cx.presets(&u).iter().any(|p| p["name"] == json!("Custom")));
+    g.invoke_undo(true); ok("undo brings Custom back", ed()["intro_preset"] == json!("Custom"));
     g.invoke_set_age_on("".into(), false); ok("age switched off", !cx.ages_on(&ed())[a] && !g.get_on());
     g.invoke_set_age_on("".into(), true); ok("age switched on", cx.ages_on(&ed())[a] && g.get_on());
     g.invoke_undo(true); ok("undo: age off again", !cx.ages_on(&ed())[a]);
@@ -348,7 +382,7 @@ pub fn selftest() {
     g.invoke_import_open(); g.invoke_import_input(code.into()); ok("import preview", g.get_imp_ok() && g.get_imp_name() == "Shared one");
     g.invoke_import_go(); ok("import adds + applies", ed()["intro_preset"] == json!("Shared one") && g.get_toast() == "Imported");
     g.invoke_import_open(); g.invoke_import_input("AOE4S1:garbage".into()); ok("bad code rejected", !g.get_imp_ok() && g.get_imp_err().contains("damaged")); g.invoke_dlg_close();
-    g.invoke_del_preset("Test preset".into()); ok("delete arms first", g.get_pdel() == "Test preset" && cx.presets(&ed()).len() == 4);
+    g.invoke_del_preset("Test preset".into()); ok("delete arms first", g.get_pdel() == "Test preset" && cx.presets(&ed()).iter().any(|p| p["name"] == json!("Test preset")));
     g.invoke_del_preset("Test preset".into()); ok("second click deletes", !cx.presets(&ed()).iter().any(|p| p["name"] == json!("Test preset")));
     g.invoke_pack(false); ok("pack state saved", ed()["intro_pack_open"] == json!(false));
     g.invoke_back(); g.invoke_back(); ok("back twice -> main", g.get_page() == "main");
