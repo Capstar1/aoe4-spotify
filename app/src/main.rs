@@ -24,9 +24,25 @@ const ED_KEYS: [&str; 6] = ["intro_pools", "intro_ages", "custom_songs", "intro_
 /// installed 1.0.9 config is never written.
 fn load_ed(dir: &std::path::Path) -> serde_json::Value {
     if let Some(v) = std::fs::read_to_string(dir.join("intros.json")).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) { return v; }
-    let ad = std::env::var("APPDATA").unwrap_or_default();
-    let u: serde_json::Value = std::fs::read_to_string(PathBuf::from(ad).join(r"AoE4Spotify\config.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let u: serde_json::Value = std::fs::read_to_string(dir.join("config.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     let mut m = serde_json::Map::new(); for k in ED_KEYS { if !u[k].is_null() { m.insert(k.into(), u[k].clone()); } } serde_json::Value::Object(m)
+}
+/// One-time import of the 1.0.9 data (install config, settings, playlist names, intros/presets, cover cache) into
+/// 1.1's own folder; afterwards 1.1 reads only its own files. Writes import.json with the copied counts.
+fn import_109(dir: &std::path::Path) {
+    if dir.join("import.json").exists() { return; }
+    let ad = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify");
+    let inst = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join(r"Programs\AoE4 Spotify\_internal\config.json");
+    if !ad.join("config.json").exists() && !inst.exists() { return; }
+    let _ = std::fs::create_dir_all(dir.join("covers"));
+    let cp = |a: &std::path::Path, b: &str| if a.exists() && !dir.join(b).exists() { std::fs::copy(a, dir.join(b)).is_ok() } else { dir.join(b).exists() };
+    let (b1, b2, b3) = (cp(&inst, "base.json"), cp(&ad.join("config.json"), "config.json"), cp(&ad.join("playlist_names.json"), "playlist_names.json"));
+    let mut n = 0; let mut src = 0;
+    for e in std::fs::read_dir(ad.join("covers")).into_iter().flatten().flatten() { if e.path().is_file() { src += 1; let t = dir.join("covers").join(e.file_name()); if t.exists() || std::fs::copy(e.path(), &t).is_ok() { n += 1; } } }
+    if !dir.join("intros.json").exists() { let v = load_ed(dir); let _ = std::fs::write(dir.join("intros.json"), serde_json::to_string_pretty(&v).unwrap_or_default()); }
+    let mut pr: serde_json::Value = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::json!({}));
+    pr["real_playback"] = serde_json::json!(true); let _ = std::fs::write(dir.join("settings.json"), pr.to_string());   // 1.1 replaces 1.0.9: real playback on
+    let _ = std::fs::write(dir.join("import.json"), serde_json::json!({ "from": "1.0.9", "base": b1, "config": b2, "playlist_names": b3, "covers": n, "covers_src": src, "at": now() }).to_string());
 }
 fn with_ed(s: &Settings, ed: &serde_json::Value) -> Settings {
     let mut s = s.clone(); s.user_pools = ed["intro_pools"].clone(); s.custom_songs = ed["custom_songs"].clone();
@@ -316,10 +332,9 @@ fn login(app: tauri::State<Arc<AppState>>) {
 #[tauri::command]
 fn cover(uri: String) -> Option<String> {
     use base64::Engine;
-    let dir = PathBuf::from(std::env::var("APPDATA").ok()?).join(r"AoE4Spotify\covers");
+    let dir = PathBuf::from(std::env::var("APPDATA").ok()?).join(r"AoE4Spotify-1.1\covers");
     let id = uri.rsplit(':').next()?.to_string();
     if uri.contains(":list:") { let b = std::fs::read(dir.join(format!("list_{id}.png"))).ok()?; return Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))); }
-    if uri.starts_with("spotify:track:") { if let Ok(b) = std::fs::read(dir.parent()?.join(format!(r"AoE4Spotify-1.1\covers\track_{id}.jpg"))) { return Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))); } }
     let path = if uri.starts_with("spotify:track:") { dir.join(format!("track_{id}.jpg")) } else {
         std::fs::read_dir(&dir).ok()?.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{id}_")))
             .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())?.path() };
@@ -398,20 +413,21 @@ fn logout(app: tauri::State<Arc<AppState>>) { app.real.store(false, Ordering::Se
 #[tauri::command]
 fn set_real(app: tauri::State<Arc<AppState>>, on: bool) {
     app.real.store(on, Ordering::SeqCst); save_prefs(&app);
-    push(&app.status, if on { "Real playback ON - 1.1 now controls Spotify. Turn off auto-switching in 1.0.9 (or close it) so they do not fight.".into() } else { "Real playback OFF (dry run)".into() });
+    push(&app.status, if on { "Real playback ON".into() } else { "Real playback OFF (dry run)".into() });
 }
 
 fn main() {
-    let settings = settings::load_installed();
+    let dir = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify-1.1");
+    import_109(&dir);
+    let settings = settings::load_own(&dir);
     let probe = Aoe4::new(Box::new(|_, _| None));
     let path = settings.log_path.clone().map(PathBuf::from).or_else(|| probe.default_log_path()).unwrap_or_default();
     let ages = probe.ages().iter().map(|(k, l)| (k.to_string(), l.to_string())).collect();
     let status = Status { game: probe.label().into(), log_path: path.display().to_string(), ..Default::default() };
-    let dir = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify-1.1");
     let prefs: serde_json::Value = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     let spotify = Spotify::new(settings.client_id.clone(), dir.join("token.json"));
     let (tx, rx) = channel(); let replays0 = prefs["music_in_replays"].as_bool().unwrap_or(settings.music_in_replays);
-    let app = Arc::new(AppState { settings, ages, status: Mutex::new(status), real: AtomicBool::new(prefs["real_playback"].as_bool() == Some(true)),
+    let app = Arc::new(AppState { settings, ages, status: Mutex::new(status), real: AtomicBool::new(prefs["real_playback"].as_bool() != Some(false)),
         replays: AtomicBool::new(replays0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx), ed: Mutex::new(load_ed(&dir)), dir });
     let a2 = app.clone(); std::thread::spawn(move || watch(a2, path));
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));

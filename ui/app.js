@@ -170,7 +170,7 @@ function drawMenu(H, sp, set) {
   item(my0 + 70, 32, () => { closeMenu(); invoke("menu", { kind: "github" }); }); sprite("m_gh", mx0 + 20 + (gw - 8) / 2 - 9, my0 + 77, mx0 + 20 + (gw - 8) / 2 + 9, my0 + 95).style.pointerEvents = "none";
   text(mx0 + 20 + gw, my0 + 86, "GitHub", 12, C.tx);
   item(my0 + 102, 32, () => { const on = !S.spotify.real; S.spotify.real = on; redraw(); invoke("set_real", { on }); });   // flip at once, like replays (no stale state between polls)
-  text(mx0 + 20, my0 + 118, "\u25b6  Real playback (1.1)", 12, C.tx); toggle(R_ - 14 - 30, my0 + 118 - 8, sp.real, 30, 16).style.pointerEvents = "none";
+  text(mx0 + 20, my0 + 118, "\u25b6  Real playback", 12, C.tx); toggle(R_ - 14 - 30, my0 + 118 - 8, sp.real, 30, 16).style.pointerEvents = "none";
   const dy = -32 + XTRA;
   hline(mx0 + 10, my0 + 140 + dy, R_ - 10, "#3a3a3a");
   item(my0 + 144 + dy, 30, () => { closeMenu(); invoke("menu", { kind: "uninstall" }); }); text(mx0 + 20, my0 + 159 + dy, "\u2715  Uninstall", 12, C.red, true);
