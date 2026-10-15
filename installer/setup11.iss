@@ -14,9 +14,16 @@
 ; test build (ISCC /DTEST): the 1.0.9 TEST build's AppId/name/folder, so upgrade tests never touch a real install
 #define AppName "AoE4 Spotify TEST"
 #define AppGuid "{{0C1D7A52-93E4-4B6F-A1D2-7E55C0FFEE01}"
+; sandbox: per-user paths from the (test-set) environment, shortcuts into AOE4S_DESKTOP (else the install folder)
+#define LAD "{%LOCALAPPDATA}"
+#define Desk "{%AOE4S_DESKTOP|{app}}"
+#define Progs "{%AOE4S_DESKTOP|{app}}\Start"
 #else
 #define AppName "AoE4 Spotify"
 #define AppGuid "{{6F2B8C1E-4A7D-4E0B-9C33-A0E4F5B71D42}"
+#define LAD "{localappdata}"
+#define Desk "{userdesktop}"
+#define Progs "{userprograms}"
 #endif
 #define Root ".."
 [Setup]
@@ -48,8 +55,8 @@ Source: "{#Root}\app\icons\icon.ico"; DestDir: "{app}"; DestName: "app.ico"; Fla
 Source: "{#Root}\installer\LICENSE"; DestDir: "{app}"
 
 [Icons]
-Name: "{userdesktop}\{#AppName}"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"
-Name: "{userprograms}\{#AppName}"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"
+Name: "{#Desk}\{#AppName}"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"
+Name: "{#Progs}\{#AppName}"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"
 
 [InstallDelete]
 ; 1.0.x was a PyInstaller folder build: its libraries and bundled source go (settings/token are imported by the exe)
@@ -57,7 +64,7 @@ Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{app}\source"
 Type: files; Name: "{userstartup}\{#AppName}.lnk"
 ; Tauri 1.1 -> Slint: the WebView2 profile of the Tauri build (Tauri identifier folder; settings live in AoE4Spotify-1.1)
-Type: filesandordirs; Name: "{localappdata}\com.capstar1.aoe4spotify"
+Type: filesandordirs; Name: "{#LAD}\com.capstar1.aoe4spotify"
 
 [Run]
 Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; Description: "Open AoE4 Spotify"; Flags: postinstall nowait skipifsilent
@@ -71,9 +78,9 @@ Type: filesandordirs; Name: "{userappdata}\AoE4Spotify-1.1"
 Type: filesandordirs; Name: "{userappdata}\AoE4Spotify"
 #endif
 Type: files; Name: "{app}\launch_option_backup.json"
-Type: filesandordirs; Name: "{localappdata}\com.capstar1.aoe4spotify"
-Type: files; Name: "{localappdata}\Temp\AoE4.Spotify.Setup-*.exe"
-Type: files; Name: "{localappdata}\Temp\AoE4 Spotify Setup *.exe"
+Type: filesandordirs; Name: "{#LAD}\com.capstar1.aoe4spotify"
+Type: files; Name: "{#LAD}\Temp\AoE4.Spotify.Setup-*.exe"
+Type: files; Name: "{#LAD}\Temp\AoE4 Spotify Setup *.exe"
 Type: dirifempty; Name: "{app}"
 
 [Code]
