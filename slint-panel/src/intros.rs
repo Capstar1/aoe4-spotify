@@ -86,10 +86,7 @@ pub fn init(ui: &Panel, eng: Arc<Engine>, shell: Arc<dyn Shell>) {
         if e.hint_t.is_some_and(|t| t.elapsed() >= Duration::from_millis(2600)) { e.hint_t = None; g.set_hint("".into()); }
         if e.pdel.as_ref().is_some_and(|(_, t)| t.elapsed() >= Duration::from_secs(3)) { e.pdel = None; g.set_pdel("".into()); }
         if e.song.is_none() || g.get_page() != "age" { return; }
-        let el = e.glow_t0.elapsed().as_secs_f32(); let f = ((el / 0.033) as usize) % 54;
-        let pick = |v: &Vec<Image>| v.get(f).cloned().unwrap_or_default();
-        let s = &e.strips; g.set_glow19(pick(&s[0])); g.set_glow14(pick(&s[1])); g.set_eq19(pick(&s[2])); g.set_eq14(pick(&s[3]));
-        g.set_glow_op((el / 0.33).min(1.0));
+        glow_frame(e, &g);
     }); });
     TIMER.with(|x| *x.borrow_mut() = Some(t));
 }
@@ -216,7 +213,16 @@ fn preview(sg: Song, x: f32, y: f32) {
     });
 }
 /// A song click only changes which chip glows: no full state rebuild on the click path.
-fn show_playing() { with(|e| if let Some(ui) = e.ui.upgrade() { ui.global::<IntroUi>().set_playing(e.song.clone().unwrap_or_default().into()); }); }
+/// The glow frame + fade for the (new) song's start time go in BEFORE the chip is marked playing, so its first frame
+/// never shows the previous song's full-opacity glow (one-frame flicker).
+fn show_playing() { with(|e| if let Some(ui) = e.ui.upgrade() { let g = ui.global::<IntroUi>(); if e.song.is_some() { glow_frame(e, &g); } g.set_playing(e.song.clone().unwrap_or_default().into()); }); }
+/// Glow / equalizer frame (54 x 33 ms) and fade-in (330 ms) for the time since the song started.
+fn glow_frame(e: &Ed, g: &IntroUi) {
+    let el = e.glow_t0.elapsed().as_secs_f32(); let f = ((el / 0.033) as usize) % 54;
+    let pick = |v: &Vec<Image>| v.get(f).cloned().unwrap_or_default();
+    let s = &e.strips; g.set_glow19(pick(&s[0])); g.set_glow14(pick(&s[1])); g.set_eq19(pick(&s[2])); g.set_eq14(pick(&s[3]));
+    g.set_glow_op((el / 0.33).min(1.0));
+}
 
 /// Push the whole intros state to the UI (overview, preset menu, the open age page).
 pub fn refresh() {
@@ -283,6 +289,16 @@ pub fn test_state(spec: &str) {
     // AOE4S_PLAY=<tray index>: that chip previews (glow + equalizer), for test renders
     if let Some(i) = std::env::var("AOE4S_PLAY").ok().and_then(|v| v.parse::<usize>().ok()) { if let Some(ui) = ui_of() { if let Some(c) = slint::Model::row_data(&ui.global::<IntroUi>().get_tray(), i) {
         with(|e| { e.song = Some(c.key.to_string()); e.glow_t0 = Instant::now() - std::time::Duration::from_millis(700); }); show_playing(); } } }
+}
+/// AOE4S_TIMING (test renders only): time the UI-thread cost of a chip click and of page switches into the log.
+pub fn bench() {
+    let log = |m: String| aoe4engine::sys::log(&m);
+    let Some(sg) = with(|e| { let s = state(&e.eng); ctx(&s).songs_of(&ed_of(&s)).into_iter().next() }).flatten() else { return };
+    let key = sg.key.clone(); let t = Instant::now(); preview(sg, 0.0, 0.0);
+    let ui_set = ui_of().map(|u| u.global::<IntroUi>().get_playing().to_string() == key).unwrap_or(false);
+    log(format!("timing: chip click on UI thread {} us, playing-state set: {ui_set}", t.elapsed().as_micros()));
+    let r = || crate::geom::rect_now();
+    for p in ["intros", "main", "intros"] { let a = r(); let t = Instant::now(); set_page(p); log(format!("timing: set_page({p}) {} us incl. synchronous paint, rect {a:?} -> {:?}", t.elapsed().as_micros(), r())); }
 }
 fn test_state_page(spec: &str) {
     let mut it = spec.split(':'); let p = it.next().unwrap_or("");

@@ -29,6 +29,8 @@ mod win {
         fn SetWindowPos(h: isize, after: isize, x: i32, y: i32, w: i32, h2: i32, f: u32) -> i32;
         fn RedrawWindow(h: isize, r: *const Rect, rgn: isize, f: u32) -> i32;
     }
+    #[link(name = "dwmapi")] extern "system" { fn DwmFlush() -> i32;
+    }
     #[link(name = "shcore")] extern "system" { fn GetDpiForMonitor(m: isize, t: u32, x: *mut u32, y: *mut u32) -> i32; }
     fn info(m: isize) -> Option<(Rect, f32)> {
         let mut i = Mi { size: std::mem::size_of::<Mi>() as u32, mon: Rect { l: 0, t: 0, r: 0, b: 0 }, work: Rect { l: 0, t: 0, r: 0, b: 0 }, flags: 0 };
@@ -51,10 +53,15 @@ mod win {
     /// NOCOPYBITS: Windows would otherwise blit the old page into the moved window top-left aligned (a visible jump);
     /// then paint the new page at the new size right away (WM_PAINT now), before DWM shows a frame of the old one.
     pub fn place(h: isize, x: i32, y: i32, w: i32, hh: i32) {
-        unsafe { SetWindowPos(h, 0, x, y, w, hh, 0x4 | 0x10 | 0x100); RedrawWindow(h, std::ptr::null(), 0, 0x1 | 0x100); }   // NOZORDER|NOACTIVATE|NOCOPYBITS; RDW_INVALIDATE|RDW_UPDATENOW
+        // NOREDRAW: Windows/DWM must not show the old surface stretched to the new size; the new-size frame is
+        // rendered and presented synchronously right after, then DwmFlush so the next composition has it.
+        unsafe { SetWindowPos(h, 0, x, y, w, hh, 0x4 | 0x10 | 0x100 | 0x8); RedrawWindow(h, std::ptr::null(), 0, 0x1 | 0x100 | 0x400); DwmFlush(); }   // NOZORDER|NOACTIVATE|NOCOPYBITS|NOREDRAW; RDW_INVALIDATE|UPDATENOW|FRAME
     }
 }
 
+/// Current panel window rect (timing logs).
+#[cfg(windows)] pub fn rect_now() -> Option<Rect> { win::window_rect(crate::panel_hwnd()).map(|x| x.0) }
+#[cfg(not(windows))] pub fn rect_now() -> Option<Rect> { None }
 /// Before the panel's first show: centre it on the cursor's (or the primary) monitor at that monitor's DPI.
 #[cfg(windows)]
 pub fn centre_panel(ui: &crate::Panel) {

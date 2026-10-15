@@ -17,19 +17,19 @@ component MenuRow inherits Rectangle {
 
 // 1.1 cog menu (drawMenu): dimmed backdrop, green gear, 6 rows.
 component CogMenu inherits Rectangle {
-    in property <bool> replays; in property <length> R;
+    in property <bool> replays; in property <length> R; in property <color> acc: Pal.green;   // 1.0.9 C[acc]: grey while Disabled
     callback close(); callback action(string);
     property <length> mx0: R - 190px;
     property <length> gw: 20px;   // measure("\u2630  ", 12)
     Rectangle { background: #0000005a; TouchArea { clicked => { root.close(); } } }
     Rectangle { x: R - 32px; y: 14px; width: 32px; height: 32px; border-radius: 10px; background: #2a2a2a;
-        Icon { x: 6px; y: 6px; width: 20px; height: 20px; source: @image-url("../../ui/img/mk_gear@1.png"); tint: Pal.green; }
+        Icon { x: 6px; y: 6px; width: 20px; height: 20px; source: @image-url("../../ui/img/mk_gear@1.png"); tint: acc; }
         TouchArea { mouse-cursor: pointer; clicked => { root.close(); } } }
     Rectangle { x: mx0; y: 52px; width: 190px; height: 218px; border-radius: 10px; background: #262626; border-width: 1px; border-color: #3a3a3a; }
     MenuRow { x: mx0 + 6px; y: 58px; width: 178px; clicked => { root.action("replays"); } }
     Icon { x: mx0 + 20px + (gw - 8px) / 2 - 9px; y: 65px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_m_rep@1.png"); tint: #f2f2f2; }
     Label { ax: mx0 + 20px + gw; cy: 74px; text: "Music in replays"; font-size: 12px; color: Pal.tx; }
-    Toggle { x: R - 14px - 30px; y: 66px; width: 30px; height: 16px; on: replays; enabled: false; }
+    Toggle { x: R - 14px - 30px; y: 66px; width: 30px; height: 16px; on: replays; acc: acc; enabled: false; }
     Hline { x: mx0 + 10px; y: 93px; width: 170px; background: #3a3a3a; }
     MenuRow { x: mx0 + 6px; y: 96px; width: 178px; clicked => { root.close(); root.action("check"); } }
     Label { ax: mx0 + 20px; cy: 112px; text: "\u{21bb}  Check for updates"; font-size: 12px; color: Pal.tx; }
@@ -65,6 +65,9 @@ component TitleBar inherits Rectangle {
 export component Panel inherits Window {
     // ---- data (from the backend) ----
     in property <bool> enabled: true;
+    in property <image> pwr-img; in property <color> pwr-tx: Pal.tx;   // power icon frame + label colour (backend power.rs: 1.0.9 spin)
+    callback power-spin(bool);
+    changed enabled => { root.power-spin(enabled); }
     in property <bool> logged-in;
     in property <bool> in-match;              // Game chip: Running while a match is on (1.1 st.in_match)
     in property <bool> busy;                  // Spotify login in progress
@@ -163,24 +166,22 @@ export component Panel inherits Window {
             if badge: Rectangle { x: R - 8px - 2px; y: 10px - 2px; width: 14px; height: 14px; border-radius: 7px; background: Pal.green; border-width: 2px; border-color: Pal.bg; }
             Hline { x: M; y: 62px; width: W - 2 * M; }
 
-            // ---- Enabled card
+            // ---- Enabled card (1.0.9: the power icon spins forward a half turn per toggle, never back)
             Rectangle { x: M; y: 72px; width: W - 2 * M; height: 48px; border-radius: 12px;
                 background: enabled ? Pal.card : #2a1c1c; border-width: enabled ? 0 : 1px; border-color: #5a3330;
                 drop-shadow-blur: enabled ? 0 : 9px; drop-shadow-color: #e5675f45;
                 TipArea { tip: enabled ? "Runs automatically when you launch Age of Empires IV from Steam and mutes the game's own music. You don't need this window open." : "Off: music won't switch when you play, and the game's music is back on."; }
-                Icon { x: 10px; y: 10px; width: 28px; height: 28px; source: @image-url("../../ui/img/mk_power@1.png"); tint: enabled ? Pal.green : #e5675f;   // 1.0.9 anim_enabled: half turn
-                    transform-rotation: enabled ? 0deg : 180deg; transform-origin: { x: self.width / 2, y: self.height * 0.54 };
-                    animate transform-rotation, tint { duration: 450ms; easing: cubic-bezier(0.65, 0, 0.35, 1); } }
-                Label { ax: 50px; cy: 24px; text: enabled ? "Enabled" : "Disabled"; font-size: 16px; bold: true; color: enabled ? Pal.tx : #f0d6d4; animate color { duration: 450ms; } }
+                Image { x: 9px; y: 9px; width: 30px; height: 30px; source: pwr-img; image-rendering: smooth; }   // 1.0.9 anim_enabled frames (power.rs)
+                Label { ax: 50px; cy: 24px; text: enabled ? "Enabled" : "Disabled"; font-size: 16px; bold: true; color: pwr-tx; }
                 Toggle { x: parent.width - 12px - 52px; y: 10px; width: 52px; height: 28px; on: enabled; toggled => { root.toggle-enabled(); } } }
 
             // ---- Spotify / Game chips
             property <length> cw: (W - 2 * M - 10px) / 2;
             Rectangle { x: M; y: 130px; width: cw; height: 32px; border-radius: 16px; border-width: 1px;
                 background: sca.has-hover ? #323232 : #242424; border-color: sca.has-hover ? #5a5a5a : #3a3a3a;
-                Rectangle { x: 14px; y: 11px; width: 10px; height: 10px; border-radius: 5px; background: logged-in ? acc : busy ? Pal.idle : Pal.org; }
+                Rectangle { x: 14px; y: 11px; width: 10px; height: 10px; border-radius: 5px; background: logged-in ? Pal.green : busy ? Pal.idle : Pal.org; }   // 1.0.9: the status chips keep green when Disabled
                 Label { ax: 32px; cy: 15px; text: "Spotify"; font-size: 12px; color: Pal.mu; }
-                if logged-in: Label { ax: cw - 26px; cy: 16px; right: true; text: "Connected"; font-size: 12px; bold: true; color: acc; }
+                if logged-in: Label { ax: cw - 26px; cy: 16px; right: true; text: "Connected"; font-size: 12px; bold: true; color: Pal.green; }
                 if logged-in: Icon { x: cw - 22px; y: 10px; width: 12px; height: 12px; source: @image-url("../../ui/img/mk_chevr12@1.png"); tint: #9a9a9a; }
                 if !logged-in && busy: Label { ax: cw - 14px; cy: 16px; right: true; text: "..."; font-size: 12px; bold: true; color: Pal.mu; }
                 if !logged-in && !busy: Rectangle { x: cw - 86px; y: 6px; width: 78px; height: 20px; border-radius: 10px; border-width: 1px; border-color: Pal.org;
@@ -189,9 +190,9 @@ export component Panel inherits Window {
                     Icon { x: 59px; y: 4px; width: 12px; height: 12px; source: @image-url("../../ui/img/mk_chevr12@1.png"); tint: Pal.org; } }
                 sca := TipArea { tip: logged-in ? "Log in again" : "Log in to Spotify"; mouse-cursor: pointer; clicked => { root.login(); } } }
             Rectangle { x: M + cw + 10px; y: 130px; width: cw; height: 32px; border-radius: 16px; background: Pal.card;
-                Rectangle { x: 14px; y: 11px; width: 10px; height: 10px; border-radius: 5px; background: in-match ? acc : Pal.idle; }
+                Rectangle { x: 14px; y: 11px; width: 10px; height: 10px; border-radius: 5px; background: in-match ? Pal.green : Pal.idle; }
                 Label { ax: 32px; cy: 16px; text: "Game"; font-size: 12px; color: Pal.mu; }
-                Label { ax: cw - 14px; cy: 16px; right: true; text: in-match ? "Running" : "Not running"; font-size: 12px; bold: true; color: in-match ? acc : Pal.idle; } }
+                Label { ax: cw - 14px; cy: 16px; right: true; text: in-match ? "Running" : "Not running"; font-size: 12px; bold: true; color: in-match ? Pal.green : Pal.idle; } }
 
             // ---- Fade
             property <color> fcol: fade > 0 ? acc : Pal.grey-acc;
@@ -256,7 +257,7 @@ export component Panel inherits Window {
                     x: it.x + it.width + 14px + 11px + j * 25px - 10px; y: 13px; width: 20px; height: 20px; border-radius: 10px;
                     background: a.lit && boss-on ? acc : #2a2a2a; border-width: a.lit && boss-on ? 0 : 1px; border-color: #3a3a3a;
                     Text { text: a.roman; font-size: 9px; font-weight: 700; color: a.lit && boss-on ? #121212 : Pal.mu; horizontal-alignment: center; vertical-alignment: center; } }
-                Toggle { x: parent.width - 30px - 44px; y: 11px; on: boss-on; toggled => { root.toggle-boss(); } }
+                Toggle { x: parent.width - 30px - 44px; y: 11px; on: boss-on; acc: acc; toggled => { root.toggle-boss(); } }
                 Icon { x: parent.width - 23px; y: 15px; width: 16px; height: 16px; source: @image-url("../../ui/img/mk_chevr16@1.png"); tint: #9a9a9a; } }
 
             // ---- After match
@@ -292,7 +293,7 @@ export component Panel inherits Window {
                 if am-wl: Slot { x: CC - 50px - 13px; y: wy - 13px; tip: "Victory: click to pick a song / playlist"; img: win-cover; has-cover: win-has; picked => { root.pick("win"); } }
                 if am-wl: Icon { x: CC - 35px; y: wy - 11px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_am_skull@1.png"); tint: Pal.red; }
                 if am-wl: Slot { x: CC - 13px; y: wy - 13px; tip: "Defeat: click to pick a song / playlist"; img: loss-cover; has-cover: loss-has; picked => { root.pick("loss"); } }
-                Toggle { x: XR2 - 44px; y: wy - 12px; on: am-wl; toggled => { root.toggle-wl(); } }
+                Toggle { x: XR2 - 44px; y: wy - 12px; on: am-wl; acc: acc; toggled => { root.toggle-wl(); } }
                 then := Label { ax: XL + 48px; cy: ty; text: "Then"; font-size: 10.5px; bold: true; color: Pal.mu; }
                 Hline { x: then.x + then.width + 10px; y: ty; width: XR2 - self.x; }
                 for m[i] in [{ k: "resume", t: "Resume" }, { k: "playlist", t: "Playlist" }, { k: "stop", t: "Stop" }]: Rectangle {
@@ -321,7 +322,7 @@ export component Panel inherits Window {
                         Icon { x: XR2 - 2px - 7px; y: ry - 6px; width: 12px; height: 12px; source: @image-url("../../ui/img/mk_chevr12@1.png"); tint: Pal.mu; } }
                 }
             }
-            if menu-open: CogMenu { width: W; height: client-h; replays: replays; R: R;
+            if menu-open: CogMenu { width: W; height: client-h; replays: replays; R: R; acc: acc;
                 close => { root.menu-open = false; } action(k) => { root.menu-action(k); } }
         }
     }

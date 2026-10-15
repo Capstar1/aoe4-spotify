@@ -19,6 +19,8 @@ mod dnd;
 mod netimg;
 mod paths;
 mod geom;
+mod power;
+#[cfg(windows)] mod cloak;
 use aoe4engine::{guides::{Shell, Win}, menu, updater, Engine};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
 use std::cell::RefCell;
@@ -50,7 +52,7 @@ mod windows {
             match w { Win::Gtg => return crate::gtg::open(&e, &s), Win::Add => return crate::add::open(&e), Win::Pick => return crate::pick::open(&e),
                 Win::Access => return crate::access::open_access(&e, &s), Win::Own => return crate::access::open_own(&e, &s), Win::Panel => {} }
         }
-        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { if !PANEL_SHOWN.with(|v| v.get()) && !crate::FIRST.with(|d| d.get()) { crate::geom::centre_panel(&u); } let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); crate::first_show(&u); })
+        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { if !PANEL_SHOWN.with(|v| v.get()) && !crate::FIRST.with(|d| d.get()) { crate::geom::centre_panel(&u); } let first = !crate::FIRST.with(|d| d.get()); if first { crate::power::init(&u); } #[cfg(windows)] if first { crate::cloak::arm(); } let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); crate::first_show(&u); })
     }
     pub fn close(w: Win) { match w { Win::Gtg => crate::gtg::close(), Win::Add => crate::add::close(), Win::Pick => crate::pick::close(), Win::Access => crate::access::close_access(), Win::Own => crate::access::close_own(), Win::Panel => {} } }
 }
@@ -79,6 +81,7 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Ok(k) = std::env::var("AOE4S_GUIDE") { if k.starts_with("own") { access::open_own(&eng, &shell); } else { access::open_access(&eng, &shell); } access::test(&k); return sub_shot(); }
     if std::env::var_os("AOE4S_PICK").is_some() { aoe4engine::picker::open_pick(&eng, "age:castle", "Castle Age playlist", false, "spotify:playlist:p1"); pick::open(&eng); pick::test(); return sub_shot(); }
     let ui = Panel::new()?;
+    ui.on_power_spin({ let w = ui.as_weak(); move |on| { if let Some(u) = w.upgrade() { power::spin(&u, !on, windows::panel_visible()); } } });
     PANEL.with(|p| *p.borrow_mut() = Some(ui.as_weak()));
     let pillm = Rc::new(RefCell::new(PillMsg::default()));
     let forced_fire: Option<i32> = { let a: Vec<String> = std::env::args().collect(); a.iter().position(|x| x == "--fire").map(|i| a.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(1)) };
@@ -201,6 +204,7 @@ fn shot(ui: &Panel, path: String) {
     if std::env::var_os("AOE4S_SHOT_MENU").is_some() { ui.set_menu_open(true); }
     if std::env::var_os("AOE4S_AM").is_some() { ui.set_am_open(true); }
     if let Ok(p) = std::env::var("AOE4S_PAGE") { intros::test_state(&p); }
+    if std::env::var_os("AOE4S_TIMING").is_some() { slint::Timer::single_shot(Duration::from_millis(400), intros::bench); }
     let w = ui.as_weak();
     slint::Timer::single_shot(Duration::from_millis(900), move || {
         if let Some(u) = w.upgrade() { if let Ok(b) = u.window().take_snapshot() { let _ = save_png(&path, b.as_bytes(), b.width(), b.height()); } }
