@@ -9,6 +9,8 @@ mod fire;
 mod gtg;
 mod startup;
 mod view;
+mod assets;
+mod intros;
 use aoe4engine::{guides::{Shell, Win}, menu, updater, Engine};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
 use std::cell::RefCell;
@@ -89,7 +91,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let mut pm = pm.borrow_mut();
         if let Some((_, _, Some(t))) = &pm.msg { if t.elapsed() > Duration::from_secs(2) { pm.msg = None; } }
         let s = e.state(None);
-        if force || fp != *last { *last = fp; view::fill(&u, &s, &d); sf(forced_fire.unwrap_or_else(|| view::playing_row(&s))); }
+        if force || fp != *last { *last = fp; view::fill(&u, &s, &d); intros::tick(true); sf(forced_fire.unwrap_or_else(|| view::playing_row(&s))); }
         if s["upd"]["phase"] == "done" && pm.done_t0.is_none() { pm.done_t0 = Some(Instant::now()); }
         let gone = pm.done_t0.is_some_and(|t| t.elapsed() > Duration::from_secs(6));
         let (t, err, click, badge) = view::pill(&s["upd"], pm.msg.as_ref().map(|(m, e, _)| (m.as_str(), *e)), gone);
@@ -137,7 +139,8 @@ fn main() -> Result<(), slint::PlatformError> {
         "own" => sh.show(Win::Own),
         other => { menu::menu(&e, other); n(); }
     } });
-    ui.on_open_intros(|| windows::show(Win::Panel));
+    intros::init(&ui, eng.clone(), shell.clone());
+    ui.on_open_intros(|| intros::set_page("intros"));
     // close: a game-launched switcher keeps running hidden (its window just hides); a panel quits
     ui.on_close_app({ let w = w.clone(); let hidden = st.hidden; move || { if let Some(u) = w.upgrade() { let _ = u.hide(); } PANEL_SHOWN.with(|v| v.set(false)); if !hidden { let _ = slint::quit_event_loop(); } } });
     ui.on_minimize({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { use slint::winit_030::WinitWindowAccessor; u.window().with_winit_window(|ww| ww.set_minimized(true)); } } });
@@ -183,12 +186,16 @@ fn round_corners(ui: &Panel) {
 /// AOE4S_SHOT=<file.png>: render once (software renderer snapshot), save, quit. AOE4S_SHOT_MENU=1 opens the cog menu first.
 fn shot(ui: &Panel, path: String) {
     if std::env::var_os("AOE4S_SHOT_MENU").is_some() { ui.set_menu_open(true); }
+    if std::env::var_os("AOE4S_AM").is_some() { ui.set_am_open(true); }
+    if let Ok(p) = std::env::var("AOE4S_PAGE") { intros::test_state(&p); }
     let w = ui.as_weak();
     slint::Timer::single_shot(Duration::from_millis(900), move || {
         if let Some(u) = w.upgrade() { if let Ok(b) = u.window().take_snapshot() { let _ = save_png(&path, b.as_bytes(), b.width(), b.height()); } }
         let _ = slint::quit_event_loop();
     });
 }
+/// Hide the tooltip (page switches, drags).
+pub fn tips_hide(ui: &Panel) { ui.global::<Tips>().invoke_hide(); }
 pub fn save_png(path: &str, rgba: &[u8], w: u32, h: u32) -> Result<(), Box<dyn std::error::Error>> {
     let f = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut e = png::Encoder::new(f, w, h); e.set_color(png::ColorType::Rgba); e.set_depth(png::BitDepth::Eight);

@@ -105,6 +105,20 @@ pub fn access_check(sh: &Arc<dyn Shell>, a: &Arc<Engine>) -> Option<String> {
     if r == Some("ok") { set_user_(a, "access_pending", serde_json::Value::Null); show_gtg(sh, a); sh.close(Win::Access); }
     r.map(String::from)
 }
+/// Put text on the clipboard (Windows; share codes). Elsewhere a no-op.
+pub fn set_clip_text(t: &str) {
+    #[cfg(windows)] unsafe {
+        #[link(name = "user32")] extern "system" { fn OpenClipboard(h: isize) -> i32; fn CloseClipboard() -> i32; fn EmptyClipboard() -> i32; fn SetClipboardData(f: u32, h: isize) -> isize; }
+        #[link(name = "kernel32")] extern "system" { fn GlobalAlloc(f: u32, n: usize) -> isize; fn GlobalLock(h: isize) -> *const u16; fn GlobalUnlock(h: isize) -> i32; fn GlobalFree(h: isize) -> isize; }
+        let w: Vec<u16> = t.encode_utf16().chain(std::iter::once(0)).collect();
+        if OpenClipboard(0) == 0 { return; }
+        EmptyClipboard();
+        let h = GlobalAlloc(0x0002, w.len() * 2);
+        if h != 0 { let p = GlobalLock(h); if !p.is_null() { std::ptr::copy_nonoverlapping(w.as_ptr(), p as *mut u16, w.len()); GlobalUnlock(h); if SetClipboardData(13, h) == 0 { GlobalFree(h); } } else { GlobalFree(h); } }
+        CloseClipboard();
+    }
+    #[cfg(not(windows))] { let _ = t; }
+}
 /// Clipboard text (Windows; the guide fills the email box as soon as you copy one).
 pub fn clip_text() -> String {
     #[cfg(windows)] unsafe {

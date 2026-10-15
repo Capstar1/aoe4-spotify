@@ -1,6 +1,7 @@
 // AoE4 Spotify 1.1 main panel (Slint prototype). Same coordinates as ui/app.js drawMain (1.0.9 panel.py):
 // client 430 px wide, M = 16, drawn title bar 30 px, 1 px #3a3a3a frame. Pure view: data in, callbacks out.
 import { Pal, Label, Icon, Toggle, Revert, Slot, Tips, TipArea, TipLayer } from "kit.slint";
+import { IntroUi, IntrosPage, AgePage } from "intros.slint";
 
 export struct AgeRow { label: string, name: string, set: bool, cover: image, has-cover: bool, is-default: bool, openable: bool }
 export struct IntroAge { roman: string, lit: bool }
@@ -81,8 +82,8 @@ export component Panel inherits Window {
     in property <image> glow;                 // static glow / halo around the playing row
     in property <[IntroAge]> intros;
     in property <bool> boss-on: true;
-    in property <bool> pl-open: true;
-    in property <bool> am-open: true;
+    in-out property <bool> pl-open: true;     // 1.1 ui.open / ui.am: an accordion, playlists open at start
+    in-out property <bool> am-open: false;
     in property <string> am-mode: "resume";   // resume | playlist | stop
     in property <bool> am-wl;
     in property <string> am-playlist-name;   // 1.1 trunc 10 (row)
@@ -97,6 +98,8 @@ export component Panel inherits Window {
     callback open-intros(); callback toggle-boss(); callback toggle-am(); callback toggle-wl(); callback pick(string); callback set-mode(string);
     callback gear(); callback minimize(); callback close-app(); callback drag();
     callback pill-clicked(); callback menu-action(string);
+    toggle-playlists => { root.pl-open = !root.pl-open; root.am-open = false; }
+    toggle-am => { root.am-open = !root.am-open; root.pl-open = false; }
 
     out property <color> acc: enabled ? Pal.green : Pal.grey-acc;
     property <length> M: 16px;
@@ -109,23 +112,37 @@ export component Panel inherits Window {
     property <length> base: pl-top + (pl-open ? pl-h : 36px) + 10px;
     property <length> am-h: 46px + 6px + 40px + 26px + 3 * 42px + 8px;
     property <length> client-h: base + 56px + (am-open ? am-h : 46px) + M;
+    property <bool> main: IntroUi.page == "main";
+    property <length> PW: main ? W : 520px;                                     // 1.0.9: intros pages are 520 wide
+    property <length> intros-h: max(124px + IntroUi.ages.length * 106px - 10px + 48px, client-h);
+    property <length> ch: main ? client-h : intros-h;
+    out property <length> intros-page-h: intros-h;   // the intros pages' client height (backend: scroll range, drop rows)
 
     title: "AoE4 Spotify";
     no-frame: true;
     default-font-family: "Segoe UI";
-    width: W + 2px;
-    height: client-h + 30px + 2px;
+    width: PW + 2px;
+    height: ch + 30px + 2px;
     background: Pal.bg;
 
     forward-focus: keys;
+    public function refocus() { keys.focus(); }
     keys := FocusScope {
-        key-pressed(e) => { if (e.text == Key.Escape) { if (root.menu-open) { root.menu-open = false; } else { root.close-app(); } return accept; } return reject; }
+        key-pressed(e) => {
+            if (!main && IntroUi.dialog == "" && (e.text == Key.Escape || e.text == Key.Backspace)) { if (IntroUi.pmenu) { IntroUi.pmenu = false; } else { IntroUi.back(); } return accept; }
+            if (!main && e.modifiers.control && (e.text == "z" || e.text == "Z")) { IntroUi.undo(true); return accept; }
+            if (!main && e.modifiers.control && (e.text == "y" || e.text == "Y")) { IntroUi.undo(false); return accept; }
+            if (!main) { return reject; }
+            if (e.text == Key.Escape) { if (root.menu-open) { root.menu-open = false; } else { root.close-app(); } return accept; } return reject; }
     }
     Rectangle {   // drawn frame: 1 px #3a3a3a edge (corners: DWM round, 8 px)
         border-width: 1px; border-color: #3a3a3a; border-radius: 8px; clip: true; background: Pal.bg;
-        TitleBar { x: 1px; y: 1px; width: W; minimize => { root.minimize(); } close => { root.close-app(); } drag => { root.drag(); } }
+        TitleBar { x: 1px; y: 1px; width: PW; minimize => { root.minimize(); } close => { root.close-app(); } drag => { root.drag(); } }
 
+        if IntroUi.page == "intros": IntrosPage { x: 1px; y: 31px; H: intros-h; }
+        if IntroUi.page == "age": AgePage { x: 1px; y: 31px; H: intros-h; }
         client := Rectangle {
+            visible: main;
             x: 1px; y: 31px; width: W; height: client-h;
             // ---- header
             Image { x: M; y: 14px; width: 32px; height: 32px; source: @image-url("../../ui/img/logo@1.png"); }

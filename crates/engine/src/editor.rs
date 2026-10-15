@@ -133,6 +133,20 @@ impl Ctx {
                     if l.is_empty() && *a != self.default_age { d.remove(&c); } else { d.insert(c, json!(l)); } } } }
         }
     }
+    /// List of one civ in a preset (missing = default pools on the default age).
+    fn preset_list(&self, p: &Value, a: &str, c: &str) -> Vec<String> {
+        let dd = &p["pools"][a];
+        if dd.get(c).is_some() { strs(&dd[c]) } else if a == self.default_age { self.def(c) } else { vec![] }
+    }
+    /// Songs a preset uses (canonical order; the menu shows the first three).
+    pub fn preset_songs(&self, u: &Value, p: &Value) -> Vec<String> {
+        let mut out = vec![]; for a in &self.ages { for (c, _) in &self.civs { out.extend(self.preset_list(p, a, c)); } }
+        self.sorted(u, &out)
+    }
+    /// Civs with a list, per age.
+    pub fn preset_counts(&self, p: &Value) -> BTreeMap<String, usize> {
+        self.ages.iter().map(|a| (a.clone(), self.civs.iter().filter(|(c, _)| !self.preset_list(p, a, c).is_empty()).count())).collect()
+    }
     /// Add songs to YOURS (no duplicates); returns how many were new.
     pub fn add_songs(&self, u: &mut Value, items: &[Value]) -> Vec<Value> {
         let mut have: Vec<String> = self.songs_of(u).into_iter().map(|s| s.uri).collect();

@@ -1,0 +1,362 @@
+// Age Intros overview + age editor (Tauri 1.1 ui/app.js drawIntros, ui/age.js drawAge; 1.0.9 intros.py). IW = 520.
+// Pure view: all state lives in the IntroUi global (filled by src/intros.rs); events go back through its callbacks.
+import { Pal, Label, Icon, Tips, TipArea } from "kit.slint";
+
+export struct Chip { img: image, col: color }
+export struct OvAge { key: string, label: string, roman: string, on: bool, n: int, civs: int, chips: [Chip], more: int }
+export struct PresetRow { name: string, cur: bool, builtin: bool, chips: [Chip], romans: string }
+export struct ImpAge { roman: string, on: bool, cnt: string }
+export struct TrayChip { idx: int, cx: length, r: length, hit-w: length, img: image, col: color, tip: string, custom: bool, key: string }
+export struct RowChip { img: image, col: color, tip: string, key: string }
+export struct CivRow { name: string, flag: image, chips: [RowChip], undo: bool, first-empty: bool }
+
+export global IntroUi {
+    in-out property <string> page: "main";        // main | intros | age
+    // overview
+    in property <[OvAge]> ages;
+    in property <bool> crown-lit: true;
+    in property <string> preset-name: "Default";
+    in property <string> toast;
+    in-out property <bool> pmenu;
+    in property <[PresetRow]> presets;
+    in property <string> pdel;                    // preset armed for delete ('' = none)
+    in-out property <string> dialog;              // '' | name | import
+    in-out property <string> dlg-value;
+    in property <bool> imp-ok; in property <string> imp-name; in property <string> imp-err;
+    in property <[Chip]> imp-chips; in property <[ImpAge]> imp-ages;
+    // age page
+    in property <string> label; in property <image> badge; in property <bool> on; in property <bool> empty; in property <bool> custom;
+    in property <bool> emblem; in property <length> div; in property <int> count-n: -1; in property <length> count-cx; in property <length> plus-cx; in property <length> plus-r: 19px;
+    in property <[TrayChip]> tray;
+    in property <[CivRow]> rows;
+    in property <bool> default-age;
+    in property <length> sc; in property <length> max-sc;
+    in property <int> drop: -1; in property <bool> drop-over;
+    in property <bool> drag-on; in property <length> ghost-x; in property <length> ghost-y; in property <image> ghost-img; in property <color> ghost-col;
+    in property <int> mv-row: -1; in property <int> mv-j: -1; in property <int> drag-tray: -1;
+    in property <string> playing;                 // song key being previewed
+    in property <image> glow19; in property <image> glow14; in property <image> eq19; in property <image> eq14;
+    in property <float> glow-op: 1;
+    in property <string> hint; in property <length> hint-x; in property <length> hint-y;
+    in-out property <bool> ctx-open; in property <length> ctx-x; in property <length> ctx-y;
+    callback back(); callback open-age(string); callback set-age-on(string, bool);
+    callback switch-preset(string); callback del-preset(string); callback new-preset(); callback dlg-save(); callback share(); callback import-open(); callback import-input(string); callback import-go(); callback dlg-close();
+    callback reset-age(); callback civ-default(int); callback remove-at(int, int);
+    callback press(string, int, int, length, length); callback drag-move(length, length); callback release(length, length);
+    callback tray-ctx(int, length, length); callback ctx-remove(); callback pack(bool); callback open-add(); callback scroll(float); callback undo(bool);
+}
+
+component Ov inherits Rectangle { border-radius: self.width / 2; }
+component CText inherits Text { horizontal-alignment: center; vertical-alignment: center; }
+component Sprite inherits Image { image-rendering: smooth; }
+
+// 1.0.9 Art.chip: ring-colour disc (2r+4) with the round portrait 2 px inside.
+export component SongChip inherits Rectangle {
+    in property <image> img; in property <color> ring; in property <length> r;
+    in property <length> cx; in property <length> cy;
+    x: cx - r - 2px; y: cy - r - 2px; width: 2 * r + 4px; height: self.width; border-radius: self.width / 2; background: ring;
+    Rectangle { x: 2px; y: 2px; width: 2 * r; height: 2 * r; border-radius: r; background: #262626;
+        Image { width: parent.width; height: parent.height; source: img; image-fit: cover; } }
+}
+component Ring inherits Rectangle {   // ringAt: 1.5 px accent ring of radius R
+    in property <length> cx; in property <length> cy; in property <length> R;
+    x: cx - R - 0.75px; y: cy - R - 0.75px; width: 2 * R + 1.5px; height: self.width; border-radius: self.width / 2; border-width: 1.5px; border-color: Pal.green;
+}
+component Toggle2 inherits Rectangle {   // app.js toggle(): disabled = grey plate + grey knob
+    in property <bool> on; in property <bool> dim;
+    width: 44px; height: 24px; border-radius: 12px; background: dim ? #2e2e2e : on ? Pal.green : Pal.off;
+    Rectangle { x: on ? parent.width - parent.height + 3px : 3px; y: 3px; width: 18px; height: 18px; border-radius: 9px; background: dim ? #6a6a6a : white; }
+}
+component Btn inherits Rectangle {   // modal button()
+    in property <string> text; in property <bool> primary; in property <bool> off;
+    callback clicked();
+    border-radius: self.height / 2; background: primary ? Pal.green : #2a2a2a; opacity: off ? 0.4 : 1;
+    CText { width: parent.width; height: parent.height; text: root.text; font-size: 12px; font-weight: 700; color: primary ? #121212 : Pal.tx; }
+    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+component Field inherits Rectangle {   // input(): #141414, 1 px border (green when focused)
+    in-out property <string> text; in property <string> placeholder;
+    callback edited(string); callback accepted(); callback escape();
+    border-radius: 6px; background: #141414; border-width: 1px; border-color: ti.has-focus ? Pal.green : #3e3e3e;
+    public function focus-it() { ti.focus(); }
+    if root.text == "": Text { x: 10px; text: placeholder; font-size: 13px; color: #6c6c6c; vertical-alignment: center; height: parent.height; }
+    ti := TextInput { x: 10px; width: parent.width - 20px; height: parent.height; text <=> root.text; font-size: 13px; color: #c8c8c8; vertical-alignment: center; single-line: true;
+        edited => { root.edited(self.text); } accepted => { root.accepted(); }
+        key-pressed(e) => { if (e.text == Key.Escape) { root.escape(); return accept; } return reject; } }
+}
+
+component PresetMenu inherits Rectangle {
+    property <length> yb: 118px + IntroUi.presets.length * 46px;
+    TouchArea { clicked => { IntroUi.pmenu = false; } }
+    Rectangle { x: 18px; y: 106px; width: 314px; height: yb + 44px - 106px; border-radius: 15px; background: #0c0c0c; }
+    Rectangle { x: 20px; y: 108px; width: 310px; height: yb + 40px - 108px; border-radius: 14px; background: #242424; border-width: 1px; border-color: #3e3e3e; TouchArea {} }
+    for p[i] in IntroUi.presets: Rectangle {
+        property <length> yy: 118px + i * 46px;
+        property <bool> armed: IntroUi.pdel == p.name;
+        x: 0; y: 0; width: 520px; height: yb + 44px;
+        Rectangle { x: 26px; y: yy; width: 298px; height: 42px; border-radius: 10px; background: p.cur ? #1e3426 : rwa.has-hover || dxa.has-hover ? #2e2e2e : transparent;
+            rwa := TouchArea { mouse-cursor: pointer; clicked => { IntroUi.switch-preset(p.name); } } }
+        for c[j] in p.chips: SongChip { cx: 48px + j * 16px; cy: yy + 21px; r: 10px; img: c.img; ring: c.col; }
+        Label { ax: 100px; cy: yy + 21px; text: p.name; font-size: 13px; bold: true; color: p.cur ? Pal.green : Pal.tx; }
+        Label { ax: 250px; cy: yy + 21px; text: p.romans; font-size: 10px; bold: true; color: Pal.mu; }
+        if p.cur: Label { ax: 307px; centre: true; cy: yy + 20.5px; text: "✓"; font-size: 14px; bold: true; color: Pal.green; }
+        Rectangle { visible: !p.cur && !p.builtin;
+            x: armed ? 262px : 294px; y: yy + 9px; width: armed ? 56px : 24px; height: 24px; border-radius: 12px;
+            opacity: armed || rwa.has-hover || dxa.has-hover ? 1 : 0;
+            background: armed ? #3d1a1a : dxa.has-hover ? #3a2222 : transparent; border-width: armed ? 1px : 0; border-color: Pal.red;
+            CText { width: parent.width; height: parent.height; text: armed ? "Delete" : "✕"; font-size: armed ? 10px : 11px; font-weight: armed ? 700 : 400; color: armed || dxa.has-hover ? Pal.red : Pal.mu; }
+            dxa := TipArea { tip: armed ? "Click again to delete" : "Delete preset"; mouse-cursor: pointer; clicked => { IntroUi.del-preset(p.name); } } }
+    }
+    Rectangle { x: 32px; y: yb + 1px; width: 286px; height: 1px; background: #3e3e3e; }
+    Rectangle { x: 26px; y: yb + 4px; width: 298px; height: 28px; border-radius: 8px; background: nwa.has-hover ? #2e2e2e : transparent;
+        nwa := TouchArea { mouse-cursor: pointer; clicked => { IntroUi.pmenu = false; IntroUi.new-preset(); } } }
+    Label { ax: 48px; centre: true; cy: yb + 18px; text: "+"; font-size: 16px; color: Pal.green; }
+    Label { ax: 62px; cy: yb + 18px; text: "New preset"; font-size: 12px; bold: true; color: Pal.green; }
+}
+
+component Modal inherits Rectangle {
+    in property <length> w; in property <length> h;
+    out property <length> x0: (self.width - w) / 2; out property <length> y0: max(60px, (self.height - h) / 2);
+    Rectangle { background: #0000008c; TouchArea {} }
+    Rectangle { x: x0; y: y0; width: w; height: h; border-radius: 14px; background: #1e1e1e; border-width: 1px; border-color: #3e3e3e; }
+}
+component NameDialog inherits Modal {
+    w: 330px; h: 132px;
+    Label { ax: root.x0 + 16px; cy: root.y0 + 26px; text: "New preset"; font-size: 15px; bold: true; color: Pal.tx; }
+    f := Field { x: root.x0 + 16px; y: root.y0 + 46px; width: 298px; height: 32px; text <=> IntroUi.dlg-value;
+        accepted => { IntroUi.dlg-save(); } escape => { IntroUi.dlg-close(); } }
+    Btn { x: root.x0 + 160px; y: root.y0 + 92px; width: 70px; height: 28px; text: "Cancel"; clicked => { IntroUi.dlg-close(); } }
+    Btn { x: root.x0 + 240px; y: root.y0 + 92px; width: 74px; height: 28px; text: "Save"; primary: true; clicked => { IntroUi.dlg-save(); } }
+    init => { f.focus-it(); }
+}
+component ImportDialog inherits Modal {
+    w: 480px; h: 300px;
+    Ov { x: root.x0 + 23px; y: root.y0 + 21px; width: 30px; height: 30px; background: #1e3c28; border-width: 1px; border-color: Pal.green;
+        Sprite { width: parent.width; height: parent.height; source: @image-url("../../ui/img/import@1.png"); } }
+    Label { ax: root.x0 + 62px; cy: root.y0 + 36px; text: "Import"; font-size: 17px; bold: true; color: Pal.tx; }
+    Ov { x: root.x0 + 440px; y: root.y0 + 20px; width: 24px; height: 26px; background: xa.has-hover ? #ffffff12 : transparent;
+        CText { width: parent.width; height: parent.height; text: "✕"; font-size: 14px; color: Pal.mu; }
+        xa := TouchArea { mouse-cursor: pointer; clicked => { IntroUi.dlg-close(); } } }
+    f := Field { x: root.x0 + 24px; y: root.y0 + 66px; width: 432px; height: 40px; text <=> IntroUi.dlg-value; placeholder: "Paste a code (AOE4S1:…)";
+        edited(t) => { IntroUi.import-input(t); } accepted => { if (IntroUi.imp-ok) { IntroUi.import-go(); } } escape => { IntroUi.dlg-close(); } }
+    Rectangle { x: root.x0 + 24px; y: root.y0 + 126px; width: 432px; height: 110px; border-radius: 14px; background: #262626; }
+    if IntroUi.imp-ok: Rectangle { x: 0; y: 0; width: parent.width; height: parent.height;
+        for c[j] in IntroUi.imp-chips: SongChip { cx: root.x0 + 56px + j * 20px; cy: root.y0 + 158px; r: 15px; img: c.img; ring: c.col; }
+        Label { ax: root.x0 + 130px; cy: root.y0 + 150px; text: IntroUi.imp-name; font-size: 16px; bold: true; color: Pal.tx; }
+        Label { ax: root.x0 + 130px; cy: root.y0 + 171px; text: "from code"; font-size: 10px; color: Pal.mu; }
+        for g[k] in IntroUi.imp-ages: Rectangle { x: root.x0 + 40px + k * 102px; y: root.y0 + 204px; width: 100px; height: 30px;
+            Ov { x: 0; y: 0; width: 30px; height: 30px; background: g.on ? #1e3c28 : #2c2c2c;
+                CText { width: parent.width; height: parent.height; text: g.roman; font-size: 11px; font-weight: 700; color: g.on ? Pal.green : Pal.mu; } }
+            Label { ax: 38px; cy: 15px; text: g.cnt; font-size: 10px; bold: true; color: Pal.mu; } } }
+    if !IntroUi.imp-ok: Label { ax: root.x0 + 240px; centre: true; cy: root.y0 + 181px; text: IntroUi.imp-err != "" ? IntroUi.imp-err : "Paste a code to see the preset"; font-size: 11px; bold: IntroUi.imp-err != ""; color: IntroUi.imp-err != "" ? #e5534b : Pal.mu; }
+    Btn { x: root.x0 + 300px; y: root.y0 + 252px; width: 70px; height: 30px; text: "Cancel"; clicked => { IntroUi.dlg-close(); } }
+    Btn { x: root.x0 + 380px; y: root.y0 + 252px; width: 76px; height: 30px; text: "Import"; primary: true; off: !IntroUi.imp-ok; clicked => { if (IntroUi.imp-ok) { IntroUi.import-go(); } } }
+    init => { f.focus-it(); }
+}
+
+// ---------- overview
+export component IntrosPage inherits Rectangle {
+    in property <length> H;
+    property <length> IW: 520px;
+    width: IW; height: H;
+    // header: back, crown, title
+    Ov { x: 18px; y: 24px; width: 32px; height: 32px; background: bka.has-hover ? #2a2a2a : Pal.card;
+        Sprite { width: parent.width; height: parent.height; source: bka.has-hover ? @image-url("../../ui/img/back_h@1.png") : @image-url("../../ui/img/back@1.png"); }
+        bka := TouchArea { mouse-cursor: pointer; clicked => { IntroUi.back(); } } }
+    Icon { x: 64px; y: 28px; width: 28px; height: 24px; source: @image-url("../../ui/img/mk_icrown@1.png"); tint: IntroUi.crown-lit ? Pal.green : Pal.grey-acc; }
+    Label { ax: 102px; cy: 40px; text: "Age Intros"; font-size: 18px; bold: true; color: Pal.tx; }
+    // preset bar
+    Rectangle { x: 20px; y: 66px; width: IW - 160px; height: 36px; border-radius: 18px;
+        background: IntroUi.pmenu || pba.has-hover ? #2a2a2a : Pal.card; border-width: 1px; border-color: IntroUi.pmenu ? Pal.green : #3e3e3e;
+        pba := TouchArea { mouse-cursor: pointer; clicked => { IntroUi.pmenu = !IntroUi.pmenu; } } }
+    Ov { x: 34px; y: 78px; width: 12px; height: 12px; background: Pal.green; }
+    Label { ax: 56px; cy: 84px; text: IntroUi.preset-name; font-size: 13px; bold: true; color: Pal.tx; }
+    Label { ax: IW - 176px; cy: 84px; right: true; text: "Auto-saved"; font-size: 10px; bold: true; color: Pal.mu; }
+    Sprite { x: IW - 166px; y: 78px; width: 12px; height: 12px; source: @image-url("../../ui/img/pchev@1.png"); }
+    Ov { x: IW - 121px; y: 69px; width: 30px; height: 30px; background: sha.has-hover ? #ffffff12 : transparent;
+        Sprite { width: parent.width; height: parent.height; source: @image-url("../../ui/img/share@1.png"); }
+        sha := TipArea { tip: "Share preset (copies a code)"; mouse-cursor: pointer; clicked => { IntroUi.share(); } } }
+    Ov { x: IW - 73px; y: 69px; width: 30px; height: 30px; background: ima.has-hover ? #ffffff12 : transparent;
+        Sprite { width: parent.width; height: parent.height; source: @image-url("../../ui/img/import@1.png"); }
+        ima := TipArea { tip: "Import preset from code"; mouse-cursor: pointer; clicked => { IntroUi.import-open(); } } }
+    // one card per age
+    for a[i] in IntroUi.ages: Rectangle {
+        property <length> cy: 124px + i * 106px;
+        x: 0; y: 0; width: IW; height: H;
+        Rectangle { x: 20px; y: cy; width: IW - 40px; height: 96px; border-radius: 18px;
+            background: ca.has-hover ? #262626 : Pal.card; border-width: ca.has-hover ? 1px : 0; border-color: #464646;
+            ca := TouchArea { mouse-cursor: pointer; clicked => { IntroUi.open-age(a.key); } } }
+        Ov { x: 44px; y: cy + 14px; width: 36px; height: 36px; background: a.on ? #1e3c28 : #2c2c2c;
+            CText { width: parent.width; height: parent.height; text: a.roman; font-size: 11.16px; font-weight: 700; color: a.on ? Pal.green : Pal.mu; } }
+        Label { ax: 100px; cy: cy + 22px; text: a.label; font-size: 17px; bold: true; color: Pal.tx; }
+        Label { ax: 100px; cy: cy + 40px; text: a.n > 0 ? a.n + "/" + a.civs + " civs" : "Empty"; font-size: 11px; bold: true; color: a.n > 0 && a.on ? Pal.green : Pal.mu; }
+        Toggle2 { x: IW - 110px; y: cy + 20px; on: a.on; dim: a.n == 0; }
+        TipArea { x: IW - 112px; y: cy + 18px; width: 48px; height: 28px; tip: a.n == 0 ? "Add a song first" : ""; mouse-cursor: a.n == 0 ? not-allowed : pointer;
+            clicked => { if (a.n > 0) { IntroUi.set-age-on(a.key, !a.on); } } }
+        Icon { x: IW - 51px; y: cy + 21px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_ichev@1.png"); tint: Pal.mu; }
+        Rectangle { x: 100px; y: cy + 62px; width: IW - 370px; height: 4px; border-radius: 2px; background: #323232; }
+        if a.n > 0: Rectangle { x: 100px; y: cy + 62px; width: max(6px, floor((IW - 370px) * a.n / a.civs / 1px) * 1px); height: 4px; border-radius: 2px; background: a.on ? Pal.green : #5a5a5a; }
+        for c[j] in a.chips: SongChip { cx: IW - 225px + j * 24px; cy: cy + 64px; r: 13px; img: c.img; ring: c.col; }
+        if a.more > 0: Rectangle {
+            property <length> ox: IW - 225px + a.chips.length * 24px;
+            x: ox - 16.5px; y: cy + 64px - 16.5px; width: 33px; height: 33px; border-radius: 16.5px; background: ca.has-hover ? #262626 : Pal.card;
+            Ov { x: 1.5px; y: 1.5px; width: 30px; height: 30px; background: #2c2c2c; border-width: 2.5px; border-color: #6e6e6e;
+                CText { width: parent.width; height: parent.height; text: "+" + a.more; font-size: 11px; font-weight: 700; color: #dcdcdc; } } }
+        if a.chips.length == 0: Rectangle { x: 0; y: 0; width: IW; height: H;
+            for j in 3: Ov { x: IW - 240px + j * 24px; y: cy + 48px; width: 30px; height: 30px; background: Pal.card; border-width: 1px; border-color: #464646; } }
+    }
+    // toast / hint
+    if IntroUi.toast != "": Rectangle {
+        property <length> tw: tm.preferred-width + 70px;
+        x: IW / 2 - tw / 2; y: H - 46px; width: tw; height: 38px; border-radius: 19px; background: #282828; border-width: 1px; border-color: Pal.green;
+        Ov { x: 14px; y: 8px; width: 22px; height: 22px; background: Pal.green;
+            CText { width: parent.width; height: parent.height; text: "✓"; font-size: 13px; font-weight: 700; color: #0a0a0a; } }
+        tm := Label { ax: 45px; cy: 19px; text: IntroUi.toast; font-size: 13px; bold: true; color: Pal.tx; } }
+    if IntroUi.toast == "": Label { ax: IW / 2; centre: true; cy: H - 20px; text: "Click an age to edit"; font-size: 10px; color: #5a5a5a; }
+    if IntroUi.pmenu: PresetMenu { width: IW; height: H; }
+    if IntroUi.dialog == "name": NameDialog { width: IW; height: H; }
+    if IntroUi.dialog == "import": ImportDialog { width: IW; height: H; }
+}
+
+// ---------- age page
+component Glow inherits Image {   // 1.0.9 render_glow frame (backend-animated), centred on the chip
+    in property <length> cx; in property <length> cy; in property <length> r;
+    property <length> D: (r >= 16px ? 74px : 64px) * r / (r >= 16px ? 19px : 14px);
+    x: cx - D / 2; y: cy - D / 2; width: D; height: D; source: r >= 16px ? IntroUi.glow19 : IntroUi.glow14; opacity: IntroUi.glow-op;
+}
+component Eq inherits Image {
+    in property <length> cx; in property <length> cy; in property <length> r;
+    property <length> D: (r >= 16px ? 74px : 64px) * r / (r >= 16px ? 19px : 14px);
+    x: cx - D / 2; y: cy - D / 2; width: D; height: D; source: r >= 16px ? IntroUi.eq19 : IntroUi.eq14;
+}
+component Dashed inherits Path {   // 1 px dashed circle (CSS 'border: 1px dashed')
+    width: 30px; height: 30px; viewbox-width: 30; viewbox-height: 30; stroke: #4b4b4b; stroke-width: 1px; fill: transparent;
+    commands: "M 29.50 15.00 A 14.5 14.5 0 0 1 29.22 17.83 M 28.40 20.55 A 14.5 14.5 0 0 1 27.06 23.06 M 25.25 25.25 A 14.5 14.5 0 0 1 23.06 27.06 M 20.55 28.40 A 14.5 14.5 0 0 1 17.83 29.22 M 15.00 29.50 A 14.5 14.5 0 0 1 12.17 29.22 M 9.45 28.40 A 14.5 14.5 0 0 1 6.94 27.06 M 4.75 25.25 A 14.5 14.5 0 0 1 2.94 23.06 M 1.60 20.55 A 14.5 14.5 0 0 1 0.78 17.83 M 0.50 15.00 A 14.5 14.5 0 0 1 0.78 12.17 M 1.60 9.45 A 14.5 14.5 0 0 1 2.94 6.94 M 4.75 4.75 A 14.5 14.5 0 0 1 6.94 2.94 M 9.45 1.60 A 14.5 14.5 0 0 1 12.17 0.78 M 15.00 0.50 A 14.5 14.5 0 0 1 17.83 0.78 M 20.55 1.60 A 14.5 14.5 0 0 1 23.06 2.94 M 25.25 4.75 A 14.5 14.5 0 0 1 27.06 6.94 M 28.40 9.45 A 14.5 14.5 0 0 1 29.22 12.17";
+}
+// Press / drag / release on a chip (window coordinates go to the backend, which owns the drag).
+component DragArea inherits TipArea {
+    in property <string> kind; in property <int> i; in property <int> j;
+    callback right(length, length);
+    mouse-cursor: pointer;
+    pointer-event(e) => {
+        if (e.kind == PointerEventKind.down) { Tips.hide();
+            if (e.button == PointerEventButton.left) { IntroUi.press(kind, i, j, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); }
+            if (e.button == PointerEventButton.right) { root.right(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); } }
+        if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) { IntroUi.release(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); }
+    }
+    moved => { if (self.pressed) { IntroUi.drag-move(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); } }
+}
+
+export component AgePage inherits Rectangle {
+    in property <length> H;
+    property <length> W: 520px;
+    property <length> LT: 178px; property <length> RH: 40px; property <length> STEP: 44px; property <length> CR: 14px;
+    property <length> BOT: H - 12px; property <length> TY: 119px; property <length> EX: 57px;
+    width: W; height: H;
+    // ---- list (clipped: LT - 4 .. BOT)
+    Rectangle { x: 0; y: LT - 4px; width: W; height: BOT - LT + 4px; clip: true;
+        TouchArea { scroll-event(e) => { IntroUi.scroll(e.delta-y > 0 ? -1 : 1); return accept; } }
+        for c[i] in IntroUi.rows: Rectangle {
+            property <length> ry: 4px + i * STEP - IntroUi.sc;
+            property <length> cy: ry + RH / 2;
+            property <bool> drop: IntroUi.drop == i;
+            x: 0; y: 0; width: W; height: parent.height;
+            Rectangle { x: 20px; y: ry; width: W - 52px; height: RH; border-radius: 10px; background: drop ? #1c2a20 : Pal.card; border-width: drop ? 1px : 0; border-color: Pal.green; }
+            Image { x: 32px; y: cy - 8px; width: 30px; height: 16px; source: c.flag; }
+            Label { ax: 72px; cy: cy; text: c.name; font-size: 12px; bold: true; color: Pal.tx; }
+            for s[j] in c.chips: Rectangle {
+                property <length> cx: 205px + j * 34px;
+                property <bool> hov: ha.has-hover || xa.has-hover;
+                x: 0; y: 0; width: W; height: parent.height;
+                SongChip { cx: cx; cy: cy; r: CR; img: s.img; ring: s.col; opacity: IntroUi.drag-on && IntroUi.mv-row == i && IntroUi.mv-j == j ? 0.4 : 1; }
+                if IntroUi.playing == s.key && !IntroUi.drag-on: Glow { cx: cx; cy: cy; r: CR; }
+                ha := DragArea { x: cx - 16px; y: cy - 16px; width: 32px; height: 32px; kind: "row"; i: i; j: j; tip: s.tip;
+                    right(x, y) => { IntroUi.remove-at(i, j); } }
+                if hov && !IntroUi.drag-on: Sprite { x: cx + 11px - 7px; y: cy - 11px - 7px; width: 14px; height: 14px;
+                    source: xa.has-hover ? @image-url("../../ui/img/age/xbadge_h@1.png") : @image-url("../../ui/img/age/xbadge@1.png"); }
+                xa := TouchArea { x: cx + 4px; y: cy - 18px; width: 14px; height: 14px; enabled: (ha.has-hover || self.has-hover) && !IntroUi.drag-on; mouse-cursor: pointer;
+                    clicked => { IntroUi.remove-at(i, j); } }
+            }
+            if drop: Sprite { x: 205px + c.chips.length * 34px - 18px; y: cy - 18px; width: 36px; height: 36px; source: @image-url("../../ui/img/age/ring15@1.png"); }
+            if drop: Label { ax: 205px + c.chips.length * 34px; centre: true; cy: cy; text: "+"; font-size: 13px; bold: true; color: Pal.green; }
+            if !drop && c.chips.length == 0: Dashed { x: 190px; y: cy - 15px; }
+            if !drop && c.first-empty: Label { ax: 205px; centre: true; cy: cy; text: "+"; font-size: 13px; color: #6e6e6e; }
+            if !drop && c.first-empty: Label { ax: 232px; cy: cy; text: "Drag songs here"; font-size: 10px; color: #646464; }
+            if c.undo: Rectangle { x: W - 68px; y: cy - 15px; width: 30px; height: 30px; border-radius: 4px;
+                Sprite { x: 6px; y: 6px; width: 18px; height: 18px; source: ua.has-hover ? @image-url("../../ui/img/age/undo_tx@1.png") : @image-url("../../ui/img/age/undo_mu@1.png"); }
+                ua := TipArea { tip: "Back to default"; mouse-cursor: pointer; clicked => { IntroUi.civ-default(i); } } }
+        }
+        // audio badge: top of the list layer
+        for c[i] in IntroUi.rows: Rectangle { x: 0; y: 0; width: W; height: parent.height;
+            for s[j] in c.chips: Rectangle { x: 0; y: 0; width: W; height: parent.height;
+                if IntroUi.playing == s.key && !IntroUi.drag-on: Eq { cx: 205px + j * 34px; cy: 4px + i * STEP - IntroUi.sc + RH / 2; r: CR; } } }
+    }
+    if IntroUi.max-sc > 0: Rectangle {
+        property <length> vh: BOT - LT;
+        property <length> th: max(28px, vh * vh / (vh + IntroUi.max-sc));
+        x: 0; y: 0; width: W; height: H;
+        Rectangle { x: W - 28px; y: LT; width: 4px; height: vh; border-radius: 2px; background: #2a2a2a; }
+        Rectangle { x: W - 28px; y: LT + (vh - th) * IntroUi.sc / IntroUi.max-sc; width: 4px; height: th; border-radius: 2px; background: #5a5a5a; }
+    }
+    // ---- header
+    Rectangle { x: 18px; y: 24px; width: 32px; height: 32px;
+        Sprite { width: parent.width; height: parent.height; source: bka.has-hover ? @image-url("../../ui/img/age/back_h@1.png") : @image-url("../../ui/img/age/back@1.png"); }
+        bka := TouchArea { mouse-cursor: pointer; clicked => { IntroUi.back(); } } }
+    Image { x: 63px; y: 25px; width: 30px; height: 30px; source: IntroUi.badge; }
+    Label { ax: 102px; cy: 40px; text: IntroUi.label; font-size: 18px; bold: true; color: Pal.tx; }
+    Toggle2 { x: W - 82px; y: 28px; on: IntroUi.on; dim: IntroUi.empty; }
+    TipArea { x: W - 86px; y: 24px; width: 52px; height: 32px; tip: IntroUi.empty ? "Add a song first" : ""; mouse-cursor: IntroUi.empty ? not-allowed : pointer;
+        clicked => { if (!IntroUi.empty) { IntroUi.set-age-on("", !IntroUi.on); } } }
+    if IntroUi.custom: Rectangle { x: W - 32px; y: 28px; width: 22px; height: 24px; border-radius: 4px;
+        Sprite { x: 2px; y: 3px; width: 18px; height: 18px; source: rsa.has-hover ? @image-url("../../ui/img/age/undo_tx@1.png") : @image-url("../../ui/img/age/undo_mu@1.png"); }
+        rsa := TipArea { tip: "Reset this age"; mouse-cursor: pointer; clicked => { IntroUi.reset-age(); } } }
+    // ---- tray
+    Rectangle { x: 20px; y: 70px; width: W - 40px; height: 92px; border-radius: 18px; background: #1a1a1a; border-width: 1px; border-color: #2e2e2e; }
+    Label { ax: 36px; cy: 81px; text: "OCTOPATH"; font-size: 8.5px; bold: true; color: Pal.mu; }
+    if IntroUi.drop-over: Rectangle { x: IntroUi.div + 2px; y: 72px; width: W - 22px - IntroUi.div - 2px; height: 88px; border-radius: 14px; background: #1db9541a; border-width: 2px; border-color: Pal.green;
+        drop-shadow-blur: 10px; drop-shadow-color: #1ed76059; }
+    Label { ax: IntroUi.div + 14px; cy: 81px; text: IntroUi.drop-over ? "DROP TO ADD" : "YOURS"; font-size: 8.5px; bold: true; color: Pal.green; }
+    if !IntroUi.drop-over: Label { ax: IntroUi.plus-cx; centre: true; cy: 150px; text: "or drop songs here"; font-size: 8.5px; color: #7a7a7a; }
+    Rectangle { x: IntroUi.div; y: 84px; width: 1px; height: 66px; background: #2e2e2e; }
+    if IntroUi.emblem: Rectangle { x: EX - 25px; y: TY - 25px; width: 50px; height: 50px;
+        Sprite { width: parent.width; height: parent.height; source: ema.has-hover ? @image-url("../../ui/img/age/emblem_h@1.png") : @image-url("../../ui/img/age/emblem@1.png"); }
+        ema := TipArea { tip: "Octopath Traveler — 8 songs (click to show)"; mouse-cursor: pointer; clicked => { IntroUi.pack(true); } } }
+    for t[n] in IntroUi.tray: Rectangle { x: 0; y: 0; width: W; height: H;   // left to right: the right neighbour is drawn later = on top
+        SongChip { cx: t.cx; cy: TY; r: t.r; img: t.img; ring: t.col; }
+        if (ta.has-hover && !IntroUi.drag-on) || (IntroUi.drag-on && IntroUi.drag-tray == t.idx): Ring { cx: t.cx; cy: TY; R: t.r + 3px; }
+        if IntroUi.playing == t.key && !IntroUi.drag-on: Glow { cx: t.cx; cy: TY; r: t.r; }
+        ta := DragArea { x: t.cx - t.r; y: TY - t.r; width: t.hit-w; height: 2 * t.r; kind: "tray"; i: t.idx; j: 0; tip: t.tip;
+            right(x, y) => { if (t.custom) { IntroUi.tray-ctx(t.idx, x, y); } } }
+    }
+    if IntroUi.count-n >= 0: Rectangle { x: IntroUi.count-cx - 19.5px; y: TY - 19.5px; width: 39px; height: 39px; border-radius: 19.5px;
+        border-width: 1.6px; border-color: Pal.green; background: cna.has-hover ? #1db95426 : transparent;
+        CText { width: parent.width; height: parent.height; text: IntroUi.count-n; font-size: 14px; font-weight: 700; color: Pal.green; }
+        cna := TipArea { tip: "Your songs (" + IntroUi.count-n + ") — click to show"; mouse-cursor: pointer; clicked => { IntroUi.pack(false); } } }
+    Rectangle { x: IntroUi.plus-cx - IntroUi.plus-r; y: TY - IntroUi.plus-r; width: 2 * IntroUi.plus-r; height: self.width;
+        Sprite { x: (parent.width - self.width) / 2; y: self.x; width: 42px * IntroUi.plus-r / 19px; height: self.width;
+            source: pla.has-hover ? @image-url("../../ui/img/age/plus_h@1.png") : @image-url("../../ui/img/age/plus@1.png"); }
+        pla := TouchArea { mouse-cursor: pointer; clicked => { Tips.hide(); IntroUi.open-add(); } } }
+    for t[n] in IntroUi.tray: Rectangle { x: 0; y: 0; width: W; height: H;   // audio badge: always on top
+        if IntroUi.playing == t.key && !IntroUi.drag-on: Eq { cx: t.cx; cy: TY; r: t.r; } }
+    if IntroUi.drag-on: SongChip { cx: IntroUi.ghost-x; cy: IntroUi.ghost-y; r: 19px; img: IntroUi.ghost-img; ring: IntroUi.ghost-col; }
+    if IntroUi.hint != "": Rectangle {
+        property <length> tw: hm.preferred-width + 20px;
+        x: min(max(8px, IntroUi.hint-x - tw / 2), W - 8px - tw); y: min(max(8px, IntroUi.hint-y + 26px), H - 32px); width: tw; height: 24px; border-radius: 12px; background: #1c3a26; border-width: 1px; border-color: Pal.green;
+        hm := CText { width: parent.width; height: parent.height; text: IntroUi.hint; font-size: 10px; color: Pal.tx; } }
+    if IntroUi.drop-over: Rectangle {
+        property <length> tw: dm.preferred-width + 28px;
+        x: W / 2 - tw / 2; y: H - 30px; width: tw; height: 22px; border-radius: 11px; background: #143c23; border-width: 1px; border-color: Pal.green;
+        dm := CText { width: parent.width; height: parent.height; text: "Drop to add to YOURS"; font-size: 10px; font-weight: 700; color: Pal.green; } }
+    if IntroUi.toast != "": Rectangle {   // record() toasts ("Saved as ...") also show on the age page
+        property <length> tw: tm.preferred-width + 70px;
+        x: W / 2 - tw / 2; y: H - 46px; width: tw; height: 38px; border-radius: 19px; background: #282828; border-width: 1px; border-color: Pal.green;
+        Ov { x: 14px; y: 8px; width: 22px; height: 22px; background: Pal.green;
+            CText { width: parent.width; height: parent.height; text: "✓"; font-size: 13px; font-weight: 700; color: #0a0a0a; } }
+        tm := Label { ax: 45px; cy: 19px; text: IntroUi.toast; font-size: 13px; bold: true; color: Pal.tx; } }
+    if IntroUi.ctx-open: Rectangle { x: 0; y: 0; width: W; height: H;
+        TouchArea { clicked => { IntroUi.ctx-open = false; } }
+        Rectangle { x: IntroUi.ctx-x; y: IntroUi.ctx-y; width: 120px; height: 28px; background: #1f1f1f; border-width: 1px; border-color: #3a3a3a; drop-shadow-blur: 8px; drop-shadow-color: #00000080;
+            Rectangle { x: 1px; y: 2px; width: parent.width - 2px; height: 24px; background: cxa.has-hover ? #2a2a2a : transparent;
+                Label { ax: 22px; cy: 12px; text: "Remove song"; font-size: 12px; color: Pal.tx; }
+                cxa := TouchArea { mouse-cursor: pointer; clicked => { IntroUi.ctx-open = false; IntroUi.ctx-remove(); } } } } }
+}
