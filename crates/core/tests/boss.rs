@@ -1,5 +1,6 @@
-use aoe4core::boss::{Cue, Seq, Step};
-use aoe4core::finish::Heard;
+use aoe4core::boss::{intro_nap, intro_poll, Cue, IntroPoll, Seq, Step, INTRO_LEAD_MS};
+use aoe4core::finish::{Heard, Latch};
+use std::time::Duration;
 
 fn cue(age: &str, playlist: &str, intro: Option<&str>) -> Cue {
     Cue { age: age.into(), playlist: playlist.into(), intro: intro.map(str::to_string), fade_s: 0.0 }
@@ -91,4 +92,40 @@ fn newer_age_during_the_intro() {
     s.age(false, None, cue("dark", "spotify:playlist:d", Some("spotify:track:dark")));
     assert!(s.age(false, None, cue("feudal", "spotify:playlist:f", None)).is_empty());
     assert_eq!(s.released(), vec![playlist("feudal", "spotify:playlist:f")]);
+}
+
+fn at(uri: &str, pos: i64, dur: i64, playing: bool) -> Heard {
+    Heard { uri: uri.into(), pos_ms: pos, dur_ms: dur, playing }
+}
+
+#[test]
+fn pause_during_an_intro_does_not_release() {
+    let mut lat = Latch::expect("spotify:track:intro");
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:old", 5_000, 20_000, true))), IntroPoll::Stay { paused: false });
+    assert!(!lat.seen);
+    assert_eq!(intro_poll(&mut lat, None), IntroPoll::Stay { paused: false });
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 1_000, 20_000, true))), IntroPoll::Stay { paused: false });
+    assert!(lat.seen);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 1_000, 20_000, false))), IntroPoll::Stay { paused: true });
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000 - INTRO_LEAD_MS - 1, 10_000, false))), IntroPoll::Stay { paused: true });
+
+    let mut lat = Latch::playing("spotify:track:intro");
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:other", 0, 20_000, true))), IntroPoll::Release);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:other", 0, 20_000, false))), IntroPoll::Release);
+
+    let mut lat = Latch::playing("spotify:track:intro");
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000 - INTRO_LEAD_MS, 10_000, false))), IntroPoll::Hold);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000, 10_000, false))), IntroPoll::Hold);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 0, 0, false))), IntroPoll::Stay { paused: true });
+
+    let mut lat = Latch::playing("spotify:track:intro");
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000 - INTRO_LEAD_MS, 10_000, true))), IntroPoll::Release);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000 - INTRO_LEAD_MS - 1, 10_000, true))), IntroPoll::Stay { paused: false });
+
+    let long = at("spotify:track:intro", 0, 180_000, true);
+    assert_eq!(intro_nap(Some(&long)), Duration::from_millis(2_000));
+    let near = at("spotify:track:intro", 10_000 - INTRO_LEAD_MS - 400, 10_000, true);
+    assert_eq!(intro_nap(Some(&near)), Duration::from_millis(400));
+    assert_eq!(intro_nap(Some(&at("spotify:track:intro", 1_000, 20_000, false))), Duration::from_millis(500));
+    assert_eq!(intro_nap(None), Duration::from_millis(500));
 }

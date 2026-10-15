@@ -52,6 +52,38 @@ fn play_age_sequence() {
 }
 
 #[test]
+fn intro_repeat_off_is_restored_for_the_playlist() {
+    let repeat = Arc::new(Mutex::new("context".to_string()));
+    let rep = repeat.clone();
+    let m = mock(Box::new(move |_, p, _| {
+        if p.starts_with("/me/player/repeat") {
+            let state = p.split("state=").nth(1).unwrap_or("off").split('&').next().unwrap_or("off");
+            *rep.lock().unwrap() = state.to_string();
+            return (204, String::new(), String::new());
+        }
+        if p == "/me/player" {
+            let r = repeat.lock().unwrap().clone();
+            return ok(&format!(r#"{{"is_playing":true,"progress_ms":5000,"repeat_state":"{r}","device":{{"volume_percent":50}},"item":{{"uri":"spotify:track:old"}},"context":{{"uri":"spotify:playlist:pre"}}}}"#));
+        }
+        player(p, true).unwrap_or((404, String::new(), "{}".into()))
+    }));
+    let mut sp = Spotify::with_base("cid".into(), tmp("introrep", FAR), &m.base, &m.base);
+    sp.play_intro("spotify:track:intro", 0.0).unwrap();
+    sp.play_intro("spotify:track:next", 0.0).unwrap();
+    sp.play_age("spotify:playlist:x", 0.0).unwrap();
+    let c = calls(&m);
+    let offs: Vec<usize> = c.iter().enumerate().filter(|(_, x)| x.starts_with("PUT /me/player/repeat?state=off")).map(|(i, _)| i).collect();
+    let plays: Vec<usize> = c.iter().enumerate().filter(|(_, x)| x.starts_with("PUT /me/player/play")).map(|(i, _)| i).collect();
+    let ctx = c.iter().position(|x| x.starts_with("PUT /me/player/repeat?state=context")).unwrap();
+    assert_eq!(offs.len(), 2);
+    assert_eq!(plays.len(), 3);
+    assert!(offs[0] < plays[0] && plays[0] < offs[1] && offs[1] < plays[1] && plays[1] < ctx && ctx < plays[2]);
+    let n = c.len();
+    sp.play_age("spotify:playlist:y", 0.0).unwrap();
+    assert!(calls(&m)[n..].iter().all(|x| !x.contains("repeat")));
+}
+
+#[test]
 fn restore_puts_back_previous_music() {
     let m = mock(Box::new(|_, p, _| player(p, true).unwrap()));
     let mut sp = Spotify::with_base("cid".into(), tmp("restore", FAR), &m.base, &m.base);

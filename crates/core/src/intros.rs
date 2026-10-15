@@ -71,19 +71,34 @@ fn track_list(v: &Value) -> Vec<String> {
     v.as_array().map(|a| a.iter().filter_map(|x| x.as_str()).filter(|u| u.starts_with("spotify:track:")).map(String::from).collect()).unwrap_or_default()
 }
 
+enum Listed { Missing, Empty, Songs(Vec<String>) }
+
+/// A civ key that is present with no `spotify:track:` uris is empty. A missing key is not.
+fn listed(pools: &Value, civ: &str) -> Listed {
+    match pools.get(civ) {
+        None => Listed::Missing,
+        Some(v) => { let t = track_list(v); if t.is_empty() { Listed::Empty } else { Listed::Songs(t) } }
+    }
+}
+
 /// Intro track for this age and civ, or None when intros are off or that civ has no songs.
+/// A civ that exists in the pool with an empty list is no intro (1.0.9 `pick_boss_track`): it does not
+/// fall through to the install default. The default is only for Imperial when the civ is absent.
 /// `n` picks among the pool. The previous uri is skipped when another song is available.
 pub fn intro_track(s: &Settings, age: &str, civ: &str, last: Option<&str>, n: u64) -> Option<String> {
     if civ.is_empty() || !s.boss_on { return None; }
     if !s.intro_ages.get(age).copied().unwrap_or(age == DEFAULT_AGE) { return None; }
-    let mine = track_list(&s.user_pools[age][civ]);
-    let pool = if !mine.is_empty() {
-        mine
-    } else if age == DEFAULT_AGE {
-        let p = track_list(&s.base_boss["pools"][civ]);
-        if !p.is_empty() { p } else { track_list(&s.base_boss["default"]) }
-    } else {
-        Vec::new()
+    let pool = match listed(&s.user_pools[age], civ) {
+        Listed::Empty => return None,
+        Listed::Songs(t) => t,
+        Listed::Missing => {
+            if age != DEFAULT_AGE { return None; }
+            match listed(&s.base_boss["pools"], civ) {
+                Listed::Empty => return None,
+                Listed::Songs(t) => t,
+                Listed::Missing => track_list(&s.base_boss["default"]),
+            }
+        }
     };
     if pool.is_empty() { return None; }
     let alt: Vec<&String> = pool.iter().filter(|u| last != Some(u.as_str())).collect();

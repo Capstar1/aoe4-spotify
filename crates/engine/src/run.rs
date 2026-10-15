@@ -1,7 +1,7 @@
 //! Game log watcher and the Spotify worker (age music, After match).
 use crate::{Engine, Status, data::{resolve, after_cfg}};
 use aoe4core::aoe4::Aoe4;
-use aoe4core::boss::{Cue, Seq, Step};
+use aoe4core::boss::{intro_nap, intro_poll, Cue, IntroPoll, Seq, Step};
 use aoe4core::finish::{release, within_minute, Heard, Latch};
 use aoe4core::game::{GameAdapter, GameEvent};
 use aoe4core::logtail::{Poll, Tail};
@@ -74,16 +74,24 @@ enum Drive { Done, Exit, Follow(Action) }
 
 /// Wait out `latch`. The first Spotify read happens after the nap, so a gate snapshot already in
 /// `heard_now` is not fetched again before the intro. Finish song first is ignored during an intro.
+/// An intro pauses its clock: a pause does not release, and if the track reaches the handoff while
+/// paused the playlist waits until playback resumes. A skip releases at once.
 fn wait(app: &Engine, rx: &std::sync::mpsc::Receiver<Action>, seq: &mut Seq, mode: WaitOn, mut latch: Latch, mut heard_now: Option<Heard>, mut preempt: Option<Action>) -> WaitOut {
     use std::sync::mpsc::RecvTimeoutError;
     let started = std::time::Instant::now();
     let mut blanks = 0u8;
+    let mut held = false;
+    let mut hold_said = false;
     loop {
         if matches!(mode, WaitOn::Track) && !app.finish.load(Ordering::SeqCst) {
             if let Some(a) = preempt.take() { seq.clear(); return WaitOut::Now(a); }
             return WaitOut::Steps(seq.finish_off());
         }
-        match rx.recv_timeout(nap(heard_now.as_ref())) {
+        let delay = match mode {
+            WaitOn::Intro => intro_nap(heard_now.as_ref()),
+            WaitOn::Track => nap(heard_now.as_ref()),
+        };
+        match rx.recv_timeout(delay) {
             Ok(Action::Play { age, uri, fade_s }) => {
                 let cue = make_cue(app, &age, &uri, fade_s);
                 preempt = None;
@@ -115,7 +123,25 @@ fn wait(app: &Engine, rx: &std::sync::mpsc::Receiver<Action>, seq: &mut Seq, mod
                     }
                 } else {
                     blanks = 0;
-                    if release(&mut latch, heard_now.as_ref()) { return finish_wait(seq, preempt); }
+                    match mode {
+                        WaitOn::Track => { if release(&mut latch, heard_now.as_ref()) { return finish_wait(seq, preempt); } }
+                        WaitOn::Intro if held => {
+                            let skip = heard_now.as_ref().is_some_and(|h| h.uri != latch.uri);
+                            let resumed = heard_now.as_ref().is_some_and(|h| h.playing);
+                            if skip || resumed { return finish_wait(seq, preempt); }
+                        }
+                        WaitOn::Intro => match intro_poll(&mut latch, heard_now.as_ref()) {
+                            IntroPoll::Release => return finish_wait(seq, preempt),
+                            IntroPoll::Hold => {
+                                held = true;
+                                if !hold_said {
+                                    hold_said = true;
+                                    push(&app.status, "Spotify paused by user - holding the playlist until resume".into());
+                                }
+                            }
+                            IntroPoll::Stay { .. } => {}
+                        },
+                    }
                 }
             }
         }
@@ -138,7 +164,7 @@ fn drive(app: &Engine, rx: &std::sync::mpsc::Receiver<Action>, seq: &mut Seq, mu
                 }
             }
             Step::Intro { age, track, fade_s } => {
-                let r = { let mut sp = app.spotify.lock().unwrap(); sp.reload_token(); sp.play_age(&track, fade_s) };
+                let r = { let mut sp = app.spotify.lock().unwrap(); sp.reload_token(); sp.play_intro(&track, fade_s) };
                 push(&app.status, match &r { Ok(()) => format!("Spotify: {age} intro {track}"), Err(e) => format!("Spotify error: {e}") });
                 if r.is_ok() {
                     remember_intro(app, &track);
@@ -220,8 +246,9 @@ fn dispatch(app: &Engine, rx: &std::sync::mpsc::Receiver<Action>, seq: &mut Seq,
 }
 
 /// Spotify worker. Ages run one at a time so fades never overlap and the log watcher never blocks.
-/// An age with an intro plays it, then the playlist when that intro ends, pauses, or is skipped.
-/// Finish song first waits out a track with a minute or less left before the intro.
+/// An age with an intro plays it, then the playlist when that intro ends or is skipped.
+/// A pause holds the playlist until playback resumes. Finish song first waits out a track
+/// with a minute or less left before the intro.
 pub fn player(app: Arc<Engine>, rx: std::sync::mpsc::Receiver<Action>) {
     let mut seq = Seq::new();
     let mut follow: Option<Action> = None;
@@ -274,7 +301,7 @@ pub struct WatchOpts { pub skip_older_than: Option<SystemTime> }
 
 pub fn watch(app: Arc<Engine>, path: PathBuf, opts: WatchOpts) {
     let la = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default();
-    let crc = la.join(r"Documents\My Games\Age of Empires IV\LogFiles");
+    let crc = crate::sys::test_env("AOE4S_LOGFILES").map(PathBuf::from).unwrap_or_else(|| la.join(r"Documents\My Games\Age of Empires IV\LogFiles"));
     let mut game = Aoe4::new(Aoe4::datacrc_resolver(crc));
     let mut sw = { let s = app.settings.lock().unwrap(); let mut w = Switcher::new(s.enabled, s.fade_seconds, resolve(&s)); w.after = after_cfg(&s); w.start_delay = 3.0; w };
     let mut seen = app.ver.load(Ordering::SeqCst);

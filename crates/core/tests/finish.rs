@@ -61,3 +61,19 @@ fn intro_track_follows_the_pool() {
     assert!(intro_track(&s, "imperial", "", None, 0).is_none());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn an_empty_civ_pool_is_no_intro() {
+    let d = std::env::temp_dir().join(format!("aoe4s_intro_empty_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d); std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("base.json"), r#"{"boss_intro":{"enabled":true,"pools":{"english":["spotify:track:aaa","spotify:track:bbb"],"mongols":[]},"default":["spotify:track:zzz"]},"default_playlists":{}}"#).unwrap();
+    std::fs::write(d.join("user.json"), r#"{"boss_intro_enabled":true,"intro_ages":{"imperial":true,"feudal":true},"intro_pools":{"imperial":{"japanese":[]},"feudal":{"english":["spotify:track:fff"],"french":["not-a-track"]}}}"#).unwrap();
+    std::fs::write(d.join("names.json"), "{}").unwrap();
+    let s = settings::load(&d.join("base.json"), &d.join("user.json"), &d.join("names.json"));
+    assert!(intro_track(&s, "imperial", "japanese", None, 0).is_none());
+    assert!(intro_track(&s, "feudal", "french", None, 0).is_none());
+    assert!(intro_track(&s, "imperial", "mongols", None, 0).is_none());
+    assert_eq!(intro_track(&s, "feudal", "english", None, 0).as_deref(), Some("spotify:track:fff"));
+    assert_eq!(intro_track(&s, "imperial", "english", Some("spotify:track:zzz"), 0).as_deref(), Some("spotify:track:aaa"));
+    let _ = std::fs::remove_dir_all(&d);
+}

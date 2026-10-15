@@ -1,9 +1,14 @@
 //! Age intros. Every age change with an intro plays that track, then the age playlist when the
-//! intro ends, pauses, or is skipped. Finish song first, when it is on, waits out a track that
-//! has a minute or less left before that intro. A newer age during the intro keeps the track
-//! that is already playing and follows it with the newest age.
+//! intro ends or is skipped. A pause does not release: the intro clock stops, and if the intro
+//! reaches the handoff while paused the playlist waits until playback resumes. Finish song first,
+//! when it is on, waits out a track that has a minute or less left before that intro. A newer age
+//! during the intro keeps the track that is already playing and follows it with the newest age.
 
-use crate::finish::{within_minute, Heard};
+use crate::finish::{within_minute, Heard, Latch};
+use std::time::Duration;
+
+/// Hand the age playlist over this long before the intro track ends (1.0.9 `INTRO_LEAD` is 1.2 s).
+pub const INTRO_LEAD_MS: i64 = 1_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cue {
@@ -109,4 +114,43 @@ fn start(seq: &mut Seq, mut cue: Cue) -> Vec<Step> {
     let step = Step::Playlist { age: cue.age.clone(), uri: cue.playlist.clone(), fade_s: cue.fade_s };
     seq.live = Live::Idle;
     vec![step]
+}
+
+/// What one look at the player means while an intro is the latched track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntroPoll {
+    /// Keep waiting. `paused` freezes the intro clock (poll again shortly; do not treat the nap as elapsed).
+    Stay { paused: bool },
+    /// The intro finished while playing, or the listener skipped it. Start the playlist now.
+    Release,
+    /// The intro reached the handoff while paused. Hold the playlist until playback resumes.
+    Hold,
+}
+
+/// Pause does not release. A skip does, once this intro has been seen. The end is `INTRO_LEAD_MS`
+/// before the track's duration, and only counts once Spotify has reported the intro (`latch.seen`).
+pub fn intro_poll(latch: &mut Latch, now: Option<&Heard>) -> IntroPoll {
+    let Some(now) = now else { return IntroPoll::Stay { paused: false }; };
+    if now.uri != latch.uri {
+        return if latch.seen { IntroPoll::Release } else { IntroPoll::Stay { paused: false } };
+    }
+    latch.seen = true;
+    let ending = now.dur_ms > 0 && now.dur_ms - now.pos_ms <= INTRO_LEAD_MS;
+    if !now.playing {
+        if ending { IntroPoll::Hold } else { IntroPoll::Stay { paused: true } }
+    } else if ending {
+        IntroPoll::Release
+    } else {
+        IntroPoll::Stay { paused: false }
+    }
+}
+
+/// How long to sleep before the next intro poll. While it is playing, sleep until the handoff,
+/// clamped to 100 ms .. 2 s. While it is paused or the player is unknown, look again in 500 ms.
+pub fn intro_nap(now: Option<&Heard>) -> Duration {
+    let ms = match now {
+        Some(h) if h.playing && h.dur_ms > h.pos_ms => (h.dur_ms - h.pos_ms - INTRO_LEAD_MS).clamp(100, 2_000) as u64,
+        _ => 500,
+    };
+    Duration::from_millis(ms)
 }

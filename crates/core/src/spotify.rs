@@ -33,6 +33,11 @@ pub struct Spotify {
     /// what was playing before the first switch of this match (null = nothing)
     saved: Option<Value>,
     saved_volume: Option<i64>,
+    /// Repeat mode from before the intro (`off` / `track` / `context`). Put back when the playlist starts.
+    /// None when this play is not following an intro, so an ordinary age switch does not touch repeat.
+    repeat_restore: Option<String>,
+    /// Player stand-in for `AOE4S_TEST=1` + `AOE4S_FAKESP`. Never used against the live API.
+    fake_player: Option<Value>,
 }
 
 /// One Web API request with the 1.1 retry rules: network errors and 5xx are retried with backoff (0.3 s, 0.9 s),
@@ -92,7 +97,7 @@ impl Spotify {
     pub fn with_base(cid: String, path: PathBuf, api: &str, accounts: &str) -> Self {
         let tok = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok());
         let agent = ureq::AgentBuilder::new().timeout(CALL_T).build();
-        Spotify { cid, api_base: api.to_string(), accounts_base: accounts.to_string(), path, tok, agent, device: None, saved: None, saved_volume: None }
+        Spotify { cid, api_base: api.to_string(), accounts_base: accounts.to_string(), path, tok, agent, device: None, saved: None, saved_volume: None, repeat_restore: None, fake_player: None }
     }
     /// Read handle for use outside the lock (see `Web`).
     pub fn web(&mut self) -> Result<Web, String> { let tok = self.access()?; Ok(Web { agent: self.agent.clone(), api_base: self.api_base.clone(), tok }) }
@@ -190,6 +195,7 @@ impl Spotify {
     pub fn logout(&mut self) { self.tok = None; let _ = std::fs::remove_file(&self.path); }
 
     fn api(&mut self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value), String> {
+        if fake_on() { return self.fake(method, path, body); }
         let tok = self.access()?;
         send(&self.agent, method, &format!("{}{path}", self.api_base), &tok, body.as_ref(), CALL_T, TRIES)
     }
@@ -208,8 +214,10 @@ impl Spotify {
     fn state(&mut self) -> Value { self.api("GET", "/me/player", None).map(|(_, v)| v).unwrap_or(Value::Null) }
     fn set_volume(&mut self, v: i64) {
         let q = self.device.as_ref().map(|d| format!("&device_id={d}")).unwrap_or_default();
+        let pct = v.clamp(0, 100);
+        if fake_on() { let _ = self.api("PUT", &format!("/me/player/volume?volume_percent={pct}{q}"), None); return; }
         let Ok(tok) = self.access() else { return };
-        let _ = send(&self.agent, "PUT", &format!("{}/me/player/volume?volume_percent={}{q}", self.api_base, v.clamp(0, 100)), &tok, None, VOL_T, 1);
+        let _ = send(&self.agent, "PUT", &format!("{}/me/player/volume?volume_percent={pct}{q}", self.api_base), &tok, None, VOL_T, 1);
     }
     /// Volume ramp in a few API steps (Spotify rate-limits fast volume changes).
     fn fade(&mut self, from: i64, to: i64, secs: f32) {
@@ -249,10 +257,32 @@ impl Spotify {
         if (200..300).contains(&c) { Ok(()) } else { Err(format!("pause failed ({c})")) }
     }
 
-    /// Age switch: fade down, start the age's music, fade back up to your volume.
-    pub fn play_age(&mut self, uri: &str, fade_s: f32) -> Result<(), String> {
+    /// Repeat off, then the intro. The user's repeat mode is remembered from the player snapshot this
+    /// play already reads (no extra GET) and put back when the age playlist starts. A second intro
+    /// before that playlist keeps the original mode. The repeat PUT is the one extra call.
+    pub fn play_intro(&mut self, uri: &str, fade_s: f32) -> Result<(), String> {
         let dev = self.ensure_device()?;
         let st = self.state();
+        let prev = if self.repeat_restore.is_none() {
+            Some(st["repeat_state"].as_str().filter(|s| matches!(*s, "off" | "track" | "context")).unwrap_or("off").to_string())
+        } else {
+            None
+        };
+        self.put_repeat("off")?;
+        if let Some(prev) = prev { self.repeat_restore = Some(prev); }
+        self.play_from(&dev, &st, uri, fade_s)
+    }
+
+    /// Age switch: fade down, start the age's music, fade back up to your volume.
+    /// After an intro, put the user's repeat mode back first. An ordinary switch leaves repeat alone.
+    pub fn play_age(&mut self, uri: &str, fade_s: f32) -> Result<(), String> {
+        self.restore_user_repeat();
+        let dev = self.ensure_device()?;
+        let st = self.state();
+        self.play_from(&dev, &st, uri, fade_s)
+    }
+
+    fn play_from(&mut self, dev: &str, st: &Value, uri: &str, fade_s: f32) -> Result<(), String> {
         if self.saved.is_none() { self.saved = Some(st.clone()); self.saved_volume = st["device"]["volume_percent"].as_i64(); }
         let base = self.saved_volume.unwrap_or(60);
         let cur = st["device"]["volume_percent"].as_i64().unwrap_or(base);
@@ -260,9 +290,22 @@ impl Spotify {
         let low = base / 5;
         if playing { self.fade(cur, low, fade_s / 2.0) } else { self.set_volume(low) }
         let body = self.payload(uri)?;
-        let r = self.put_play(&dev, body);
+        let r = self.put_play(dev, body);
         self.fade(low, base, fade_s / 2.0);
         r
+    }
+
+    fn put_repeat(&mut self, state: &str) -> Result<(), String> {
+        if !matches!(state, "off" | "track" | "context") { return Ok(()); }
+        let q = self.device.as_ref().map(|d| format!("&device_id={d}")).unwrap_or_default();
+        let (c, v) = self.api("PUT", &format!("/me/player/repeat?state={state}{q}"), None)?;
+        if (200..300).contains(&c) { Ok(()) } else { Err(format!("Spotify repeat failed ({c}): {}", v["error"]["message"].as_str().unwrap_or(""))) }
+    }
+
+    /// Put back the repeat mode saved for an intro. Skipped when it was already off, and when no intro set it.
+    fn restore_user_repeat(&mut self) {
+        let Some(prev) = self.repeat_restore.take() else { return };
+        if prev != "off" { let _ = self.put_repeat(&prev); }
     }
 
     /// Player state now (After match: waits for the Win / Loss song to end).
@@ -271,6 +314,7 @@ impl Spotify {
     pub fn forget_saved(&mut self) { self.saved = None; self.saved_volume = None; }
     /// After match Stop (1.0.9 fade_pause): fade out, pause, put your volume back while paused.
     pub fn fade_pause(&mut self, fade_s: f32) -> Result<(), String> {
+        self.restore_user_repeat();
         let dev = self.ensure_device()?;
         let st = self.state(); let cur = st["device"]["volume_percent"].as_i64().unwrap_or(60);
         let vol = self.saved_volume.take().unwrap_or(cur); self.saved = None;
@@ -280,6 +324,7 @@ impl Spotify {
     }
     /// Match over: fade out, put back what was playing before (or pause), and your volume.
     pub fn restore(&mut self, fade_s: f32) -> Result<String, String> {
+        self.restore_user_repeat();
         let Some(prev) = self.saved.take() else { return Ok("nothing to restore".into()) };
         let vol = self.saved_volume.take().unwrap_or(60);
         let dev = self.ensure_device()?;
@@ -302,4 +347,57 @@ impl Spotify {
         self.fade(vol / 5, vol, fade_s / 2.0);
         Ok(msg)
     }
+
+    /// Local player for the sandbox sim. No network, and the token is never read.
+    fn fake(&mut self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value), String> {
+        if self.fake_player.is_none() {
+            self.fake_player = Some(json!({
+                "is_playing": true,
+                "progress_ms": 1000,
+                "repeat_state": "context",
+                "device": { "id": "fake", "volume_percent": 50 },
+                "item": { "uri": "spotify:track:before", "duration_ms": 180000 },
+                "context": { "uri": "spotify:playlist:before" }
+            }));
+        }
+        let (route, q) = path.split_once('?').unwrap_or((path, ""));
+        match (method, route) {
+            ("GET", "/me/player/devices") => Ok((200, json!({ "devices": [{ "id": "fake", "is_active": true, "type": "Computer" }] }))),
+            ("GET", "/me/player") => Ok((200, self.fake_player.clone().unwrap_or(Value::Null))),
+            ("PUT", "/me/player/repeat") => {
+                let state = query(q, "state").unwrap_or_else(|| "off".into());
+                self.fake_note(&format!("repeat {state}"));
+                if let Some(p) = self.fake_player.as_mut() { p["repeat_state"] = json!(state); }
+                Ok((204, Value::Null))
+            }
+            ("PUT", "/me/player/play") => {
+                let uri = body.as_ref().and_then(|b| {
+                    b["uris"].as_array().and_then(|a| a.first()).and_then(|x| x.as_str()).or_else(|| b["context_uri"].as_str())
+                }).unwrap_or("").to_string();
+                self.fake_note(&format!("play {uri}"));
+                let track = uri.starts_with("spotify:track:");
+                let dur = if track { 10_000i64 } else { 180_000 };
+                let pos = if track { dur - crate::boss::INTRO_LEAD_MS } else { 0 };
+                if let Some(p) = self.fake_player.as_mut() {
+                    p["is_playing"] = json!(true);
+                    p["progress_ms"] = json!(pos);
+                    p["item"] = json!({ "uri": uri, "duration_ms": dur });
+                }
+                Ok((204, Value::Null))
+            }
+            _ => Ok((204, Value::Null)),
+        }
+    }
+
+    fn fake_note(&self, line: &str) {
+        let Some(dir) = self.path.parent() else { return };
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("fake_spotify.log")) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
+/// Sandbox playback. Both switches are required so a stray `AOE4S_FAKESP` cannot stand in for Spotify.
+fn fake_on() -> bool {
+    std::env::var("AOE4S_TEST").ok().as_deref() == Some("1") && std::env::var_os("AOE4S_FAKESP").is_some()
 }
