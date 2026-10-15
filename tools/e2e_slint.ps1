@@ -77,7 +77,8 @@ ok "launch option after uninstall: $(& $lo)" ((& $lo) -eq '"LaunchOptions"		"-no
 ok "game music restored 0.70: $(& $mv)" ((& $mv) -eq "0.70000")
 ok "install files + uninstall key gone" ((-not (Test-Path "$APP\AoE4 Spotify.exe")) -and -not (Test-Path $KEY))
 ok "sandbox shortcuts removed" (-not (Test-Path "$S\Desktop\AoE4 Spotify TEST.lnk"))
-ok "TEST uninstall kept data (TEST build)" (Test-Path $D11)
+ok "uninstall deleted the settings folder (settings, token, log)" (-not (Test-Path $D11))
+ok "real data folder untouched" (Test-Path ([Environment]::GetFolderPath('ApplicationData') + "\AoE4Spotify-1.1\config.json"))
 ok "real WebView2 folder still as before" ((Test-Path ([Environment]::GetFolderPath('LocalApplicationData') + "\com.capstar1.aoe4spotify")) -eq $realWV)
 Remove-Item $KEY -Force -EA 0
 "`n== RESULT ($From)"; $res; "{0}/{1} passed" -f @($res | ? { $_ -like "PASS*" }).Count, $res.Count

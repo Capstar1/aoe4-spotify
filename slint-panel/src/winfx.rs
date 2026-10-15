@@ -1,3 +1,36 @@
+//! Window effects for the panel: first-show cloak, page-switch veil + resize, cursor nudge / hover keeping.
+#[cfg(windows)] pub mod first_show {
+//! No white first frame: Windows drops what Slint pre-renders into the still-hidden window, so DWM would show an
+//! unpainted (white) surface for a frame. The panel is cloaked the moment it is shown (WM_SHOWWINDOW, caught by a
+//! thread hook), painted synchronously at its final place and size, and only then uncloaked.
+use std::cell::Cell;
+#[repr(C)] struct Cwp { lp: isize, wp: usize, msg: u32, h: isize }
+#[link(name = "user32")] extern "system" {
+    fn SetWindowsHookExW(id: i32, f: unsafe extern "system" fn(i32, usize, isize) -> isize, m: isize, t: u32) -> isize;
+    fn UnhookWindowsHookEx(h: isize) -> i32; fn CallNextHookEx(h: isize, c: i32, w: usize, l: isize) -> isize;
+    fn RedrawWindow(h: isize, r: *const crate::geom::Rect, rgn: isize, f: u32) -> i32; fn GetParent(h: isize) -> isize;
+}
+#[link(name = "kernel32")] extern "system" { fn GetCurrentThreadId() -> u32; }
+#[link(name = "dwmapi")] extern "system" { fn DwmSetWindowAttribute(h: isize, a: u32, v: *const u32, n: u32) -> i32; fn DwmFlush() -> i32; }
+thread_local! { static HOOK: Cell<isize> = const { Cell::new(0) }; static WIN: Cell<isize> = const { Cell::new(0) }; }
+fn cloak(h: isize, on: bool) { let v: u32 = on as u32; unsafe { DwmSetWindowAttribute(h, 13, &v, 4) }; }   // DWMWA_CLOAK
+unsafe extern "system" fn proc(c: i32, w: usize, l: isize) -> isize {
+    if c >= 0 { let m = &*(l as *const Cwp); if m.msg == 0x18 && m.wp != 0 && GetParent(m.h) == 0 && WIN.with(|x| x.get()) == 0 { cloak(m.h, true); WIN.with(|x| x.set(m.h)); slint::Timer::single_shot(std::time::Duration::ZERO, reveal); } }
+    CallNextHookEx(0, c, w, l)
+}
+/// Before the first show(): cloak whatever top-level window this thread shows next.
+pub fn arm() { let h = unsafe { SetWindowsHookExW(4, proc, 0, GetCurrentThreadId()) }; HOOK.with(|x| x.set(h)); }   // WH_CALLWNDPROC
+/// Right after the window became visible (cloaked; Slint creates it lazily once the event loop runs): paint now (synchronous WM_PAINT -> Slint renders), wait for DWM to take it, uncloak.
+fn reveal() {
+    let k = HOOK.with(|x| x.replace(0)); if k != 0 { unsafe { UnhookWindowsHookEx(k) }; }
+    let h = WIN.with(|x| x.get()); if h == 0 { return; }
+    unsafe { RedrawWindow(h, std::ptr::null(), 0, 0x1 | 0x100); DwmFlush(); }   // RDW_INVALIDATE | RDW_UPDATENOW
+    cloak(h, false);
+    if std::env::var_os("AOE4S_TIMING").is_some() { aoe4engine::sys::log("timing: first frame painted before uncloak"); }
+}
+
+}
+#[cfg(windows)] pub mod resize {
 //! Page-switch resize with zero stale frames. DWM composes a moved/resized window with its OLD surface until the
 //! new-size frame is presented, so any in-place resize shows one warped/shifted frame. Instead:
 //!  1. "veil": a topmost, click-through layered copy of the screen over the area that will change (old + new rect
@@ -65,6 +98,7 @@ pub fn place(h: isize, old: Rect, x: i32, y: i32, w: i32, hh: i32) {
     const M: i32 = 40;   // DWM shadow margin
     let u = Rect { l: old.l.min(x) - M, t: old.t.min(y) - M, r: old.r.max(x + w) + M, b: old.b.max(y + hh) + M };
     let v = veil(u);
+    if v.is_some() { leave::arm(h); }
     unsafe {
         if v.is_some() { DwmFlush(); cloak(h, true); }
         SetWindowPos(h, 0, x, y, w, hh, 0x4 | 0x10 | 0x100 | 0x8);           // NOZORDER|NOACTIVATE|NOCOPYBITS|NOREDRAW
@@ -72,6 +106,32 @@ pub fn place(h: isize, old: Rect, x: i32, y: i32, w: i32, hh: i32) {
         DwmFlush();
         if let Some(v) = v { cloak(h, false); DestroyWindow(v); DwmFlush();
             // fresh mouse move at the same spot: the panel's hover state is right at once
-            let mut p = Pt { x: 0, y: 0 }; if GetCursorPos(&mut p) != 0 { SetCursorPos(p.x, p.y); } }
+            let mut p = Pt { x: 0, y: 0 }; if GetCursorPos(&mut p) != 0 { SetCursorPos(p.x, p.y); } leave::switched(); }
     }
 }
+
+/// The veil sits over the panel for a few ms, so Windows posts the panel a WM_MOUSELEAVE that would be handled after
+/// the uncloak and clear the hover for one frame. A thread-local WH_GETMESSAGE hook turns that message into WM_NULL
+/// until the first mouse move after the switch (or 500 ms, whichever comes first).
+mod leave {
+    use std::cell::Cell;
+    #[repr(C)] struct Msg { h: isize, msg: u32, wp: usize, lp: isize, time: u32, x: i32, y: i32, pv: u32 }
+    #[link(name = "user32")] extern "system" {
+        fn SetWindowsHookExW(id: i32, f: unsafe extern "system" fn(i32, usize, isize) -> isize, m: isize, t: u32) -> isize;
+        fn UnhookWindowsHookEx(h: isize) -> i32; fn CallNextHookEx(h: isize, c: i32, w: usize, l: isize) -> isize;
+    }
+    #[link(name = "kernel32")] extern "system" { fn GetCurrentThreadId() -> u32; }
+    thread_local! { static HOOK: Cell<isize> = const { Cell::new(0) }; static WIN: Cell<isize> = const { Cell::new(0) }; static DONE: Cell<bool> = const { Cell::new(false) }; }
+    unsafe extern "system" fn proc(c: i32, w: usize, l: isize) -> isize {
+        if c >= 0 && l != 0 { let m = &mut *(l as *mut Msg); let me = WIN.with(|x| x.get());
+            if m.h == me && m.msg == 0x2A3 { m.msg = 0; }                                                        // WM_MOUSELEAVE -> WM_NULL
+            else if m.h == me && m.msg == 0x200 && DONE.with(|d| d.get()) { slint::Timer::single_shot(std::time::Duration::ZERO, disarm); } }
+        CallNextHookEx(0, c, w, l)
+    }
+    pub fn arm(h: isize) { if HOOK.with(|x| x.get()) != 0 { WIN.with(|x| x.set(h)); DONE.with(|d| d.set(false)); return; }
+        let k = unsafe { SetWindowsHookExW(3, proc, 0, GetCurrentThreadId()) }; HOOK.with(|x| x.set(k)); WIN.with(|x| x.set(h)); DONE.with(|d| d.set(false)); }   // WH_GETMESSAGE
+    pub fn switched() { DONE.with(|d| d.set(true)); slint::Timer::single_shot(std::time::Duration::from_millis(500), disarm); }
+    fn disarm() { let k = HOOK.with(|x| x.replace(0)); if k != 0 { unsafe { UnhookWindowsHookEx(k) }; } }
+}}
+#[cfg(windows)] pub use first_show::arm as arm_first_show;
+#[cfg(windows)] pub use resize::place;

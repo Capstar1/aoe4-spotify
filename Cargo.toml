@@ -8,3 +8,12 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+# Fast local iteration: cargo build -p aoe4spotify-slint --profile dev-fast  (target\dev-fast\)
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 0
+debug = "line-tables-only"
+incremental = true
+[profile.dev-fast.package."*"]
+opt-level = 2
+debug = false

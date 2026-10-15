@@ -20,8 +20,7 @@ mod netimg;
 mod paths;
 mod geom;
 mod power;
-#[cfg(windows)] mod cloak;
-#[cfg(windows)] mod veil;
+#[cfg(windows)] mod winfx;
 use aoe4engine::{guides::{Shell, Win}, menu, updater, Engine};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
 use std::cell::RefCell;
@@ -53,7 +52,7 @@ mod windows {
             match w { Win::Gtg => return crate::gtg::open(&e, &s), Win::Add => return crate::add::open(&e), Win::Pick => return crate::pick::open(&e),
                 Win::Access => return crate::access::open_access(&e, &s), Win::Own => return crate::access::open_own(&e, &s), Win::Panel => {} }
         }
-        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { if !PANEL_SHOWN.with(|v| v.get()) && !crate::FIRST.with(|d| d.get()) { crate::geom::centre_panel(&u); } let first = !crate::FIRST.with(|d| d.get()); if first { crate::power::init(&u); } #[cfg(windows)] if first { crate::cloak::arm(); } let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); crate::first_show(&u); })
+        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { if !PANEL_SHOWN.with(|v| v.get()) && !crate::FIRST.with(|d| d.get()) { crate::geom::centre_panel(&u); } let first = !crate::FIRST.with(|d| d.get()); if first { crate::power::init(&u); } #[cfg(windows)] if first { crate::winfx::arm_first_show(); } let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); crate::first_show(&u); })
     }
     pub fn close(w: Win) { match w { Win::Gtg => crate::gtg::close(), Win::Add => crate::add::close(), Win::Pick => crate::pick::close(), Win::Access => crate::access::close_access(), Win::Own => crate::access::close_own(), Win::Panel => {} } }
 }
@@ -90,16 +89,17 @@ fn main() -> Result<(), slint::PlatformError> {
     // ---- fire: 366 x 42 row (1.1 X-6 .. XR+6); glow drawn once, frames every 34 ms while a row plays
     let scale = ui.window().scale_factor();
     let (rw, rh) = ((366.0 * scale).round() as usize, (42.0 * scale).round() as usize);
-    let (g, gw, gh) = fire::glow(rw, rh, 9.0 * scale, scale); ui.set_glow(img(&g, gw, gh));
-    let fire = Rc::new(RefCell::new(fire::Fire::new(rw, rh, scale)));
+    // deferred (not needed for the first screen): glow + fire buffers are built the first time a row plays
+    let fire: Rc<RefCell<Option<fire::Fire>>> = Rc::new(RefCell::new(None));
     let fire_timer = Rc::new(slint::Timer::default());
     let set_fire = { let (w, f, t) = (ui.as_weak(), fire.clone(), fire_timer.clone()); move |row: i32| {
         let Some(u) = w.upgrade() else { return }; if u.get_playing() == row && (row < 0 || t.running()) { return; }
+        if row >= 0 && f.borrow().is_none() { let (g, gw, gh) = fire::glow(rw, rh, 9.0 * scale, scale); u.set_glow(img(&g, gw, gh)); *f.borrow_mut() = Some(fire::Fire::new(rw, rh, scale)); }
         u.set_playing(row);
         if row < 0 { t.stop(); return; }
         let (w2, f2) = (w.clone(), f.clone());
         t.start(slint::TimerMode::Repeated, Duration::from_millis(34), move || {
-            let Some(u) = w2.upgrade() else { return }; let mut f = f2.borrow_mut(); let px = f.tick(); u.set_fire(img(&px, f.gw, f.gh)); });
+            let Some(u) = w2.upgrade() else { return }; let mut f = f2.borrow_mut(); let Some(f) = f.as_mut() else { return }; let px = f.tick(); u.set_fire(img(&px, f.gw, f.gh)); });
     } };
 
     // ---- state -> view (250 ms change check, like the Tauri notifier; transient pill expiry)
@@ -160,7 +160,7 @@ fn main() -> Result<(), slint::PlatformError> {
     intros::init(&ui, eng.clone(), shell.clone());
     ui.on_open_intros(|| intros::set_page("intros"));
     // close: a game-launched switcher keeps running hidden (its window just hides); a panel quits
-    ui.on_close_app({ let w = w.clone(); let hidden = st.hidden; move || { if let Some(u) = w.upgrade() { let _ = u.hide(); } PANEL_SHOWN.with(|v| v.set(false)); if !hidden { let _ = slint::quit_event_loop(); } } });
+    ui.on_close_app({ let w = w.clone(); let hidden = st.hidden; move || { if let Some(u) = w.upgrade() { let _ = u.hide(); } PANEL_SHOWN.with(|v| v.set(false)); if !hidden { let _ = slint::quit_event_loop(); } else { trim_when_hidden(); } } });
     ui.on_minimize({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { use slint::winit_030::WinitWindowAccessor; u.window().with_winit_window(|ww| ww.set_minimized(true)); } } });
     ui.on_drag({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { use slint::winit_030::WinitWindowAccessor; u.window().with_winit_window(|ww| { let _ = ww.drag_window(); }); } } });
     ui.on_gear(|| {});
@@ -180,7 +180,8 @@ fn main() -> Result<(), slint::PlatformError> {
             let e = eng.clone(); std::thread::spawn(move || aoe4winsys::launcher::follow_game(move || {
                 updater::install_pending(&e); let _ = slint::invoke_from_event_loop(|| { if !windows::panel_visible() { let _ = slint::quit_event_loop(); } }); }));
         }
-    } else if !test { updater::check_at_start(eng.clone()); }
+        trim_when_hidden();
+    } else if !test { let e = eng.clone(); slint::Timer::single_shot(Duration::from_millis(1500), move || updater::check_at_start(e)); }   // deferred past the first screen
     if st.login_first && !test {
         let (e, sh) = (eng.clone(), shell.clone());
         if e.spotify.lock().unwrap().logged_in() { std::thread::spawn(move || aoe4engine::guides::after_login(&sh, &e)); } else { aoe4engine::guides::do_login(sh, e); }
@@ -268,4 +269,12 @@ pub fn panel_hwnd() -> isize {
     use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use slint::winit_030::WinitWindowAccessor;
     panel().and_then(|u| u.window().with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) { Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(), _ => 0 })).unwrap_or(0)
+}
+
+/// Hidden switcher only (never on a click path): after 3 s with the panel still hidden, hand the working set back to
+/// Windows. Pages fault back in on the next show; clicks inside a shown panel are never affected.
+fn trim_when_hidden() {
+    slint::Timer::single_shot(Duration::from_secs(3), || { if PANEL_SHOWN.with(|v| v.get()) { return; }
+        #[cfg(windows)] { #[link(name = "kernel32")] extern "system" { fn K32EmptyWorkingSet(p: isize) -> i32; fn GetCurrentProcess() -> isize; }
+            unsafe { K32EmptyWorkingSet(GetCurrentProcess()); } } });
 }

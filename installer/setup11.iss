@@ -76,6 +76,9 @@ Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; 
 #ifndef TEST
 Type: filesandordirs; Name: "{userappdata}\AoE4Spotify-1.1"
 Type: filesandordirs; Name: "{userappdata}\AoE4Spotify"
+#else
+; TEST: delete only a sandbox data folder (APPDATA must point into a sbx_ test dir), never the real one
+Type: filesandordirs; Name: "{code:SbxData}\AoE4Spotify-1.1"
 #endif
 Type: files; Name: "{app}\launch_option_backup.json"
 Type: filesandordirs; Name: "{#LAD}\com.capstar1.aoe4spotify"
@@ -96,6 +99,12 @@ begin
 #ifdef TEST
   Result := GetEnv(Name);
 #endif
+end;
+
+function SbxData(Param: String): String;
+begin
+  Result := TestEnv('APPDATA');
+  if Pos('sbx_', Lowercase(Result)) = 0 then Result := ExpandConstant('{tmp}') + '\no-sandbox';
 end;
 
 function LaunchOptionOK(): Boolean;

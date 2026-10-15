@@ -6,7 +6,7 @@ export struct Chip { img: image, col: color }
 export struct OvAge { key: string, label: string, roman: string, on: bool, n: int, civs: int, chips: [Chip], more: int }
 export struct PresetRow { name: string, cur: bool, builtin: bool, chips: [Chip], romans: string }
 export struct ImpAge { roman: string, on: bool, cnt: string }
-export struct TrayChip { idx: int, cx: length, r: length, hit-w: length, img: image, col: color, tip: string, custom: bool, key: string }
+export struct TrayChip { idx: int, cx: length, r: length, hit-w: length, img: image, col: color, tip: string, custom: bool, key: string, dim: bool }
 export struct RowChip { img: image, col: color, tip: string, key: string }
 export struct CivRow { name: string, flag: image, chips: [RowChip], undo: bool, first-empty: bool }
 
@@ -53,10 +53,11 @@ component Sprite inherits Image { image-rendering: smooth; }
 // 1.0.9 Art.chip: ring-colour disc (2r+4) with the round portrait 2 px inside.
 export component SongChip inherits Rectangle {
     in property <image> img; in property <color> ring; in property <length> r;
-    in property <length> cx; in property <length> cy;
+    in property <length> cx; in property <length> cy; in property <bool> dim;
     x: cx - r - 2px; y: cy - r - 2px; width: 2 * r + 4px; height: self.width; border-radius: self.width / 2; background: ring;
     Rectangle { x: 2px; y: 2px; width: 2 * r; height: 2 * r; border-radius: r; background: #262626;
-        Image { width: parent.width; height: parent.height; source: img; image-fit: cover; } }
+        Image { width: parent.width; height: parent.height; source: img; image-fit: cover; }
+        if dim: Rectangle { border-radius: r; background: #121212; opacity: 0.6; } }   // 1.0.9 art.chip(dim): blend 60 % to #121212
 }
 component Ring inherits Rectangle {   // ringAt: 1.5 px accent ring of radius R
     in property <length> cx; in property <length> cy; in property <length> R;
@@ -322,7 +323,7 @@ export component AgePage inherits Rectangle {
         Sprite { width: parent.width; height: parent.height; source: ema.has-hover ? @image-url("../../ui/img/age/emblem_h@1.png") : @image-url("../../ui/img/age/emblem@1.png"); }
         ema := TipArea { tip: "Octopath Traveler — 8 songs"; mouse-cursor: pointer; clicked => { IntroUi.pack(true); } } }
     for t[n] in IntroUi.tray: Rectangle { x: 0; y: 0; width: W; height: H;   // left to right: the right neighbour is drawn later = on top
-        SongChip { cx: t.cx; cy: TY; r: t.r; img: t.img; ring: t.col; }
+        SongChip { cx: t.cx; cy: TY; r: t.r; img: t.img; ring: t.col; dim: t.dim; }
         if (ta.has-hover && !IntroUi.drag-on) || (IntroUi.drag-on && IntroUi.drag-tray == t.idx): Ring { cx: t.cx; cy: TY; R: t.r + 3px; }
         if IntroUi.playing == t.key && !IntroUi.drag-on: Glow { cx: t.cx; cy: TY; r: t.r; }
         ta := DragArea { x: t.cx - t.r; y: TY - t.r; width: t.hit-w; height: 2 * t.r; kind: "tray"; i: t.idx; j: 0; tip: t.tip;

@@ -71,7 +71,7 @@ pub fn regrow_panel(ui: &crate::Panel) {
     let (w, h) = ((ui.get_win_w() * s).round() as i32, (ui.get_win_h() * s).round() as i32);
     if w == old.r - old.l && h == old.b - old.t { return; }
     let (x, y) = regrow(old, w, h, wa);
-    crate::veil::place(crate::panel_hwnd(), old, x, y, w, h);
+    crate::winfx::place(crate::panel_hwnd(), old, x, y, w, h);
 }
 #[cfg(not(windows))]
 pub fn regrow_panel(_: &crate::Panel) {}

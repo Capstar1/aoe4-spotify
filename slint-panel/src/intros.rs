@@ -230,13 +230,13 @@ fn glow_frame(e: &Ed, g: &IntroUi) {
     g.set_glow_op((el / 0.33).min(1.0));
 }
 
-// 1.0.9 pack_set / pack_tick: move the fold towards open at 1 / 0.45 s per unit (~60 fps only while moving; reverses smoothly).
+// 1.0.9 pack_set / pack_tick: move the fold towards open at 1 / 0.32 s per unit (faster than 1.0.9's 0.45 s) (~60 fps only while moving; reverses smoothly).
 thread_local! { static PKT: RefCell<Option<Timer>> = const { RefCell::new(None) }; }
 fn pack_anim(open: bool) {
     let goal = if open { 1.0 } else { 0.0 };
     let tick = move || {
         let done = with(|e| { let now = Instant::now(); let dt = now.duration_since(e.pk_last).as_secs_f32().min(0.05); e.pk_last = now;
-            let t = e.pk_t.unwrap_or(goal); let s = dt / 0.45;
+            let t = e.pk_t.unwrap_or(goal); let s = dt / 0.32;
             let t = if goal > t { (t + s).min(goal) } else { (t - s).max(goal) }; e.pk_t = Some(t); t == goal }).unwrap_or(true);
         refresh();
         if done { PKT.with(|x| { x.borrow_mut().take(); }); }
@@ -288,25 +288,25 @@ pub fn refresh() {
         let pt = if un == 0 { 1.0 } else { e.pk_t.unwrap_or(if open { 1.0 } else { 0.0 }) };
         let view = if un == 0 { "octo0" } else if pt >= 1.0 { "octo" } else if pt <= 0.0 { "yours" } else { "fold" };
         let (mut emblem_k, mut count_k) = (1.0f32, 1.0f32);
-        let mut chips: Vec<(usize, f32, f32)> = vec![]; let (div, plus, plus_r, count, emblem);
+        let mut chips: Vec<(usize, f32, f32, bool)> = vec![]; let (div, plus, plus_r, count, emblem);
         match view {
             "octo0" => { let bsp = (((w - 24.0) - (16.0 + 38.0 + 4.0) - 63.0 - 53.0) / (nb.max(2) - 1) as f32).clamp(22.0, 48.0);
-                for i in 0..nb { chips.push((i, 53.0 + i as f32 * bsp, 19.0)); } div = 53.0 + (nb.max(1) - 1) as f32 * bsp + 19.0 + 16.0; plus = div + 16.0 + 19.0; plus_r = 19.0; count = None; emblem = false; }
-            "yours" => { div = 57.0 + 23.0 + 16.0; for j in 0..un { chips.push((nb + j, div + 16.0 + yr + j as f32 * ysp, yr)); } plus = div + 16.0 + yr + un as f32 * ysp; plus_r = yr; count = None; emblem = true; }
+                for i in 0..nb { chips.push((i, 53.0 + i as f32 * bsp, 19.0, false)); } div = 53.0 + (nb.max(1) - 1) as f32 * bsp + 19.0 + 16.0; plus = div + 16.0 + 19.0; plus_r = 19.0; count = None; emblem = false; }
+            "yours" => { div = 57.0 + 23.0 + 16.0; for j in 0..un { chips.push((nb + j, div + 16.0 + yr + j as f32 * ysp, yr, false)); } plus = div + 16.0 + yr + un as f32 * ysp; plus_r = yr; count = None; emblem = true; }
             "fold" => {   // 1.0.9 fold: songs leave / return to their emblem one after another, emblem shrinks first, grows back last
                 let (dy, dout) = (57.0 + 23.0 + 16.0, w - 213.0); let bsp = ((dout - 12.0 - 19.0 - 53.0) / (nb.max(2) - 1) as f32).min(48.0); let co = dout + 16.0 + 19.0; let ee = ease(pt);
-                for i in 0..nb { let k = ease((pt - 0.10 - i as f32 * 0.05) / (0.90 - (nb.max(1) - 1) as f32 * 0.05).max(0.2)); if k > 0.0 { chips.push((i, 57.0 + (53.0 + i as f32 * bsp - 57.0) * k, 19.0)); } }
-                for j in 0..un { let k = ease((1.0 - pt - 0.10 - j as f32 * 0.05) / (0.90 - (un.max(1) - 1) as f32 * 0.05).max(0.2)); if k > 0.0 { let yx = dy + 16.0 + yr + j as f32 * ysp; chips.push((nb + j, co + (yx - co) * k, 19.0 + (yr - 19.0) * k)); } }
+                for i in 0..nb { let k = ease((pt - 0.10 - i as f32 * 0.05) / (0.90 - (nb.max(1) - 1) as f32 * 0.05).max(0.2)); if k > 0.0 { chips.push((i, 57.0 + (53.0 + i as f32 * bsp - 57.0) * k, 19.0, k < 0.5)); } }
+                for j in 0..un { let k = ease((1.0 - pt - 0.10 - j as f32 * 0.05) / (0.90 - (un.max(1) - 1) as f32 * 0.05).max(0.2)); if k > 0.0 { let yx = dy + 16.0 + yr + j as f32 * ysp; chips.push((nb + j, co + (yx - co) * k, 19.0 + (yr - 19.0) * k, k < 0.5)); } }
                 chips.sort_by(|a, b| a.1.total_cmp(&b.1));
                 div = dy + (dout - dy) * ee; let (py, po) = (dy + 16.0 + yr + un as f32 * ysp, co + 44.0); plus = py + (po - py) * ee; plus_r = yr + (19.0 - yr) * ee;
                 emblem_k = 1.0 - ease(pt / 0.45); count_k = 1.0 - ease((1.0 - pt) / 0.45);
                 emblem = emblem_k > 0.12; count = (count_k > 0.12).then_some(co); }
             _ => { div = w - 213.0; let bsp = ((div - 12.0 - 19.0 - 53.0) / (nb.max(2) - 1) as f32).min(48.0);
-                for i in 0..nb { chips.push((i, 53.0 + i as f32 * bsp, 19.0)); } count = Some(div + 16.0 + 19.0); plus = div + 16.0 + 19.0 + 44.0; plus_r = 19.0; emblem = false; }
+                for i in 0..nb { chips.push((i, 53.0 + i as f32 * bsp, 19.0, false)); } count = Some(div + 16.0 + 19.0); plus = div + 16.0 + 19.0 + 44.0; plus_r = 19.0; emblem = false; }
         }
-        let tray: Vec<TrayChip> = chips.iter().enumerate().map(|(n, &(i, cxx, r))| { let sg = &all[i];
+        let tray: Vec<TrayChip> = chips.iter().enumerate().map(|(n, &(i, cxx, r, dim))| { let sg = &all[i];
             let right = chips.get(n + 1).map(|nx| nx.1 - nx.2).filter(|l| *l < cxx + r).unwrap_or(cxx + r);
-            TrayChip { idx: i as i32, cx: cxx, r, hit_w: right - (cxx - r), img: chip_img(&e.eng, sg, 2.0 * r), col: col(&sg.col), tip: tip(sg), custom: sg.key.starts_with("c_"), key: sg.key.clone().into() } }).collect();
+            TrayChip { idx: i as i32, cx: cxx, r, hit_w: right - (cxx - r), img: chip_img(&e.eng, sg, 2.0 * r), col: col(&sg.col), tip: tip(sg), custom: sg.key.starts_with("c_"), key: sg.key.clone().into(), dim } }).collect();
         g.set_tray(model(tray)); g.set_div(div); g.set_plus_cx(plus); g.set_plus_r(plus_r); g.set_emblem(emblem); g.set_emblem_k(emblem_k); g.set_count_k(count_k);
         g.set_count_n(if count.is_some() { un as i32 } else { -1 }); g.set_count_cx(count.unwrap_or(0.0));
         g.set_playing(e.song.clone().unwrap_or_default().into());
