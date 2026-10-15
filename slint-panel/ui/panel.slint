@@ -1,0 +1,248 @@
+// AoE4 Spotify 1.1 main panel (Slint prototype). Same coordinates as ui/app.js drawMain (1.0.9 panel.py):
+// client 430 px wide, M = 16, drawn title bar 30 px, 1 px #3a3a3a frame. Pure view: data in, callbacks out.
+import { Pal, Label, Icon, Toggle, Revert, Slot } from "kit.slint";
+
+export struct AgeRow { label: string, name: string, set: bool, cover: image, has-cover: bool, is-default: bool }
+export struct IntroAge { roman: string, lit: bool }
+
+component Hline inherits Rectangle { height: 1px; background: Pal.line; }
+component Chev inherits Icon { width: 20px; height: 20px; tint: #9a9a9a; }
+
+component TitleBar inherits Rectangle {
+    in property <bool> active: true;
+    callback minimize(); callback close(); callback drag();
+    height: 30px;
+    background: #202020;
+    TouchArea { pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.drag(); } } }
+    Image { x: 7px; y: 6px; width: 16px; height: 16px; source: @image-url("../../ui/img/tb_icon@1.png"); }
+    Icon { x: 25px; y: 0; width: 94px; height: 30px; source: @image-url("../../ui/img/tb_title@1.png"); tint: active ? white : #797979; }
+    Rectangle { x: parent.width - 46px * 3; width: 46px; background: tmin.has-hover ? #2d2d2d : transparent;
+        Icon { width: 46px; height: 30px; source: @image-url("../../ui/img/tb_min@1.png"); tint: active ? white : #797979; }
+        tmin := TouchArea { mouse-cursor: pointer; clicked => { root.minimize(); } } }
+    Rectangle { x: parent.width - 46px * 2; width: 46px;
+        Icon { width: 46px; height: 30px; source: @image-url("../../ui/img/tb_max@1.png"); tint: #5d5d5d; } }
+    Rectangle { x: parent.width - 46px; width: 46px; background: tcl.has-hover ? #c42b1c : transparent;
+        Icon { width: 44px; height: 30px; source: @image-url("../../ui/img/tb_close@1.png"); tint: active || tcl.has-hover ? white : #797979; }
+        tcl := TouchArea { mouse-cursor: pointer; clicked => { root.close(); } } }
+}
+
+export component Panel inherits Window {
+    // ---- data (from the backend) ----
+    in property <bool> enabled: true;
+    in property <bool> logged-in;
+    in property <bool> game-running;
+    in-out property <float> fade: 2.0;
+    in property <float> default-fade: 2.0;
+    in property <[AgeRow]> ages;
+    in property <int> playing: -1;           // row with the fire, -1 = none
+    in property <image> fire;                 // fire frame (backend-animated, pixelated upscale)
+    in property <image> glow;                 // static glow / halo around the playing row
+    in property <[IntroAge]> intros;
+    in property <bool> boss-on: true;
+    in property <bool> pl-open: true;
+    in property <bool> am-open: true;
+    in property <string> am-mode: "resume";   // resume | playlist | stop
+    in property <bool> am-wl;
+    in property <string> am-playlist-name;
+    in property <image> am-playlist-cover; in property <bool> am-playlist-has;
+    in property <image> win-cover; in property <bool> win-has;
+    in property <image> loss-cover; in property <bool> loss-has;
+    in property <string> version: "v1.1";
+    // ---- actions (to the backend) ----
+    callback toggle-enabled(); callback login(); callback set-fade(float); callback revert-fade();
+    callback toggle-playlists(); callback open-in-spotify(int); callback change-playlist(int); callback revert-playlist(int);
+    callback open-intros(); callback toggle-boss(); callback toggle-am(); callback toggle-wl(); callback pick(string); callback set-mode(string);
+    callback gear(); callback minimize(); callback close-app(); callback drag();
+
+    out property <color> acc: enabled ? Pal.green : Pal.grey-acc;
+    property <length> M: 16px;
+    property <length> W: 430px;
+    property <length> R: W - M;
+    property <length> fx0: M + 94px;
+    property <length> fx1: W - M - 12px - 30px - 62px;
+    property <length> pl-top: 228px;
+    property <length> pl-h: 36px + 6px + ages.length * 46px + 4px;
+    property <length> base: pl-top + (pl-open ? pl-h : 36px) + 10px;
+    property <length> am-h: 46px + 6px + 40px + 26px + 3 * 42px + 8px;
+    property <length> client-h: base + 56px + (am-open ? am-h : 46px) + M;
+
+    title: "AoE4 Spotify";
+    no-frame: true;
+    default-font-family: "Segoe UI";
+    width: W + 2px;
+    height: client-h + 30px + 2px;
+    background: Pal.bg;
+
+    Rectangle {   // drawn frame: 1 px #3a3a3a edge (corners: DWM round, 8 px)
+        border-width: 1px; border-color: #3a3a3a; border-radius: 8px; clip: true; background: Pal.bg;
+        TitleBar { x: 1px; y: 1px; width: W; minimize => { root.minimize(); } close => { root.close-app(); } drag => { root.drag(); } }
+
+        client := Rectangle {
+            x: 1px; y: 31px; width: W; height: client-h;
+            // ---- header
+            Image { x: M; y: 14px; width: 32px; height: 32px; source: @image-url("../../ui/img/logo@1.png"); }
+            title := Label { ax: M + 44px; cy: 30px; text: "AoE4 Spotify"; font-size: 19px; bold: true; color: Pal.tx; }
+            Rectangle { x: title.x + title.width + 8px; y: 21px; width: 44px; height: 18px; border-radius: 9px; background: Pal.card;
+                Text { text: version; font-size: 10px; color: Pal.mu; horizontal-alignment: center; vertical-alignment: center; } }
+            Rectangle { x: R - 32px; y: 14px; width: 32px; height: 32px; border-radius: 10px; background: gta.has-hover ? #333333 : #2a2a2a;
+                Icon { x: 6px; y: 6px; width: 20px; height: 20px; source: @image-url("../../ui/img/mk_gear@1.png"); tint: #f2f2f2; }
+                gta := TouchArea { mouse-cursor: pointer; clicked => { root.gear(); } } }
+            Hline { x: M; y: 62px; width: W - 2 * M; }
+
+            // ---- Enabled card
+            Rectangle { x: M; y: 72px; width: W - 2 * M; height: 48px; border-radius: 12px;
+                background: enabled ? Pal.card : #2a1c1c; border-width: enabled ? 0 : 1px; border-color: #5a3330;
+                drop-shadow-blur: enabled ? 0 : 9px; drop-shadow-color: #e5675f45;
+                Icon { x: 10px; y: 10px; width: 28px; height: 28px; source: @image-url("../../ui/img/mk_power@1.png"); tint: enabled ? Pal.green : #e5675f; }
+                Label { ax: 50px; cy: 24px; text: enabled ? "Enabled" : "Disabled"; font-size: 16px; bold: true; color: Pal.tx; }
+                Toggle { x: parent.width - 12px - 52px; y: 10px; width: 52px; height: 28px; on: enabled; toggled => { root.toggle-enabled(); } } }
+
+            // ---- Spotify / Game chips
+            property <length> cw: (W - 2 * M - 10px) / 2;
+            Rectangle { x: M; y: 130px; width: cw; height: 32px; border-radius: 16px; border-width: 1px;
+                background: sca.has-hover ? #323232 : #242424; border-color: sca.has-hover ? #5a5a5a : #3a3a3a;
+                Rectangle { x: 14px; y: 11px; width: 10px; height: 10px; border-radius: 5px; background: logged-in ? acc : Pal.org; }
+                Label { ax: 32px; cy: 15px; text: "Spotify"; font-size: 12px; color: Pal.mu; }
+                if logged-in: Label { ax: cw - 26px; cy: 16px; right: true; text: "Connected"; font-size: 12px; bold: true; color: acc; }
+                if logged-in: Icon { x: cw - 22px; y: 10px; width: 12px; height: 12px; source: @image-url("../../ui/img/mk_chevr12@1.png"); tint: #9a9a9a; }
+                if !logged-in: Rectangle { x: cw - 86px; y: 6px; width: 78px; height: 20px; border-radius: 10px; border-width: 1px; border-color: Pal.org;
+                    background: sca.has-hover ? #6e4a1c : #4a3216;
+                    Label { ax: 34px; cy: 9px; centre: true; text: "Log in"; font-size: 11px; bold: true; color: Pal.org; }
+                    Icon { x: 59px; y: 4px; width: 12px; height: 12px; source: @image-url("../../ui/img/mk_chevr12@1.png"); tint: Pal.org; } }
+                sca := TouchArea { mouse-cursor: pointer; clicked => { root.login(); } } }
+            Rectangle { x: M + cw + 10px; y: 130px; width: cw; height: 32px; border-radius: 16px; background: Pal.card;
+                Rectangle { x: 14px; y: 11px; width: 10px; height: 10px; border-radius: 5px; background: game-running ? acc : Pal.idle; }
+                Label { ax: 32px; cy: 16px; text: "Game"; font-size: 12px; color: Pal.mu; }
+                Label { ax: cw - 14px; cy: 16px; right: true; text: game-running ? "Running" : "Not running"; font-size: 12px; bold: true; color: game-running ? acc : Pal.idle; } }
+
+            // ---- Fade
+            property <color> fcol: fade > 0 ? acc : Pal.grey-acc;
+            property <length> xv: fx0 + (fx1 - fx0) * fade / 5;
+            Rectangle { x: M; y: 172px; width: W - 2 * M; height: 46px; border-radius: 10px; background: Pal.card; }
+            Icon { x: M + 12px; y: 183px; width: 24px; height: 24px; source: @image-url("../../ui/img/mk_fade@1.png"); tint: fcol; }
+            Label { ax: M + 46px; cy: 195px; text: "Fade"; font-size: 13px; bold: true; color: Pal.tx; }
+            Rectangle { x: fx0; y: 192px; width: fx1 - fx0; height: 6px; border-radius: 3px; background: Pal.off; }
+            Rectangle { x: fx0; y: 192px; width: max(xv, fx0 + 6px) - fx0; height: 6px; border-radius: 3px; background: fcol; }
+            Rectangle { x: xv - 9px - (fta.has-hover ? 4px : 0); y: 186px - (fta.has-hover ? 4px : 0); width: fta.has-hover ? 26px : 18px; height: self.width;
+                border-radius: self.width / 2; background: fta.has-hover ? #ffffff1a : transparent;
+                Rectangle { width: 18px; height: 18px; border-radius: 9px; background: white; border-width: 2px; border-color: fcol; } }
+            fta := TouchArea { x: fx0 - 9px; y: 184px; width: fx1 - fx0 + 18px; height: 22px; mouse-cursor: pointer;
+                function val() -> float { return round(max(0, min(5, (self.mouse-x - 9px) / (fx1 - fx0) * 5)) * 2) / 2; }
+                pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.fade = val(); } }
+                moved => { if (self.pressed) { root.fade = val(); } }
+                clicked => { root.set-fade(root.fade); } }
+            Label { ax: R - 12px - 30px - 10px; cy: 195px; right: true; text: fade > 0 ? round(fade * 10) / 10 + (fade == round(fade) ? ".0s" : "s") : "Off"; font-size: 12px; bold: true; color: fcol; }
+            Revert { x: R - 12px - 30px; y: 183px; is-default: abs(fade - default-fade) < 0.001; reverted => { root.revert-fade(); } }
+
+            // ---- Playlists
+            if pl-open: Rectangle { x: M; y: pl-top; width: W - 2 * M; height: pl-h; border-radius: 10px; background: Pal.card; }
+            Rectangle { x: M; y: pl-top; width: W - 2 * M; height: 36px; border-radius: 10px; background: plh.has-hover ? #262626 : Pal.card;
+                Icon { x: 12px; y: 6px; width: 24px; height: 24px; source: @image-url("../../ui/img/mk_plicon@1.png"); tint: acc; }
+                Label { ax: 46px; cy: 18px; text: "Playlists"; font-size: 13px; bold: true; color: Pal.tx; }
+                Chev { x: parent.width - 28px; y: 8px; source: pl-open ? @image-url("../../ui/img/mk_chevup@1.png") : @image-url("../../ui/img/mk_chevdown@1.png"); }
+                plh := TouchArea { mouse-cursor: pointer; clicked => { root.toggle-playlists(); } } }
+            if pl-open: Hline { x: M + 12px; y: pl-top + 36px; width: W - 2 * M - 24px; }
+            if pl-open: Rectangle { x: 0; y: 0; width: W; height: client-h;
+             for row[i] in ages: Rectangle {
+                property <length> X: M + 22px;
+                property <length> XR: R - 22px;
+                property <length> rx: XR - 6px - 30px;
+                property <bool> hot: rta.has-hover || zta.has-hover || cta.has-hover;
+                x: 0; y: pl-top + 42px + i * 46px; width: W; height: 46px;
+                if i < ages.length - 1: Hline { x: X + 48px; y: 44px; width: XR - X - 48px; }
+                Rectangle { x: X - 6px; width: XR - X + 12px; height: 42px; border-radius: 9px; background: hot ? #262626 : transparent; }
+                rta := TouchArea { x: X - 6px; width: XR - X + 12px; height: 42px; }
+                if playing == i: Image { x: X - 6px - 10px; y: -10px; width: XR - X + 12px + 20px; height: 62px; source: glow; image-fit: fill; }
+                if playing == i: Rectangle { x: X - 6px; width: XR - X + 12px; height: 42px; border-radius: 9px; clip: true;
+                    Image { width: parent.width; height: parent.height; source: fire; image-fit: fill; image-rendering: pixelated; } }
+                Rectangle { x: X + 9px; y: 6px; width: 30px; height: 30px; border-radius: 6px; clip: true; background: Pal.ib;
+                    if row.has-cover: Image { width: 30px; height: 30px; source: row.cover; image-fit: cover; } }
+                Label { ax: X + 48px; cy: 21px; text: row.label; font-size: 13px; bold: true; color: Pal.tx; }
+                Rectangle { x: X + 118px; y: 17px; width: 8px; height: 8px; border-radius: 4px; background: row.set ? acc : Pal.idle; }
+                Text { x: X + 132px; y: 9px; height: 24px; width: rx - 78px - (X + 132px); vertical-alignment: center; overflow: elide;
+                    text: row.name; font-size: 12px; color: zta.has-hover ? #c8c8c8 : Pal.mu; }
+                zta := TouchArea { x: X + 38px; y: 7px; width: rx - 76px - X - 38px; height: 28px; mouse-cursor: pointer; clicked => { root.open-in-spotify(i); } }
+                Rectangle { x: rx - 70px; y: 9px; width: 62px; height: 24px; border-radius: 12px; border-width: 1px; visible: hot;
+                    background: cta.has-hover ? (enabled ? #1f3b29 : #2a2a2a) : Pal.card; border-color: cta.has-hover ? (enabled ? #1ed760 : #8a8a8a) : acc;
+                    Label { ax: 31px; cy: 12px; centre: true; text: "Change"; font-size: 10px; bold: true; color: cta.has-hover ? (enabled ? #1ed760 : #8a8a8a) : acc; }
+                    cta := TouchArea { mouse-cursor: pointer; clicked => { root.change-playlist(i); } } }
+                Revert { x: rx; y: 9px; is-default: row.is-default; reverted => { root.revert-playlist(i); } }
+            } }
+
+            // ---- Age Intros
+            Rectangle { x: M; y: base; width: W - 2 * M; height: 46px; border-radius: 10px; background: ita.has-hover ? #262626 : Pal.card;
+                ita := TouchArea { mouse-cursor: pointer; clicked => { root.open-intros(); } }
+                Icon { x: 12px; y: 11px; width: 24px; height: 24px; source: @image-url("../../ui/img/mk_crown@1.png"); tint: enabled && boss-on ? Pal.green : Pal.grey-acc; }
+                it := Label { ax: 46px; cy: 23px; text: "Age Intros"; font-size: 13px; bold: true; color: Pal.tx; }
+                for a[j] in intros: Rectangle {
+                    x: it.x + it.width + 14px + 11px + j * 25px - 10px; y: 13px; width: 20px; height: 20px; border-radius: 10px;
+                    background: a.lit && boss-on ? acc : #2a2a2a; border-width: a.lit && boss-on ? 0 : 1px; border-color: #3a3a3a;
+                    Text { text: a.roman; font-size: 9px; font-weight: 700; color: a.lit && boss-on ? #121212 : Pal.mu; horizontal-alignment: center; vertical-alignment: center; } }
+                Toggle { x: parent.width - 30px - 44px; y: 11px; on: boss-on; toggled => { root.toggle-boss(); } }
+                Icon { x: parent.width - 23px; y: 15px; width: 16px; height: 16px; source: @image-url("../../ui/img/mk_chevr16@1.png"); tint: #9a9a9a; } }
+
+            // ---- After match
+            property <length> ay: base + 56px;
+            property <string> mode-label: am-mode == "playlist" ? am-playlist-name : am-mode == "resume" ? "Resume" : am-mode == "playlist" ? "Playlist" : "Stop";
+            if am-open: Rectangle { x: M; y: ay; width: W - 2 * M; height: am-h; border-radius: 10px; background: Pal.card; }
+            Rectangle { x: M; y: ay; width: W - 2 * M; height: 46px; border-radius: 10px; background: amh.has-hover ? #262626 : Pal.card;
+                amh := TouchArea { mouse-cursor: pointer; clicked => { root.toggle-am(); } }
+                Icon { x: 13px; y: 12px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_am_flag@1.png"); tint: acc; }
+                Label { ax: 46px; cy: 23px; text: "After match"; font-size: 13px; bold: true; color: Pal.tx; }
+                Chev { x: parent.width - 28px; y: 13px; source: am-open ? @image-url("../../ui/img/mk_chevup@1.png") : @image-url("../../ui/img/mk_chevdown@1.png"); }
+                hl := Label { ax: parent.width - 36px + 16px - 16px; cy: 23px; right: true; text: mode-label; font-size: 12px; bold: true; color: acc; }
+                property <length> hx0: hl.x - 8px;
+                property <bool> pcov: am-mode == "playlist" && am-playlist-has;
+                if pcov: Rectangle { x: hx0 - 22px; y: 12px; width: 22px; height: 22px; border-radius: 5px; clip: true; Image { width: 22px; height: 22px; source: am-playlist-cover; image-fit: cover; } }
+                property <length> hx: pcov ? hx0 - 30px : hx0;
+                if am-wl: Icon { x: hx - 19px; y: 12px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_am_then@1.png"); tint: Pal.mu; }
+                if am-wl: Icon { x: hx - 41px; y: 12px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_am_trophy@1.png"); tint: Pal.gold; } }
+            if am-open: Rectangle {
+                property <length> XL: M + 22px;
+                property <length> XR2: R - 22px;
+                property <length> CC: XR2 - 72px;
+                property <length> wy: ay + 52px + 20px;
+                property <length> ty: wy + 20px + 13px;
+                x: 0; y: 0; width: W; height: client-h;
+                Hline { x: M + 12px; y: ay + 46px; width: W - 2 * M - 24px; }
+                Rectangle { x: XL - 6px; y: wy - 20px; width: XR2 - XL + 12px; height: 40px; border-radius: 9px;
+                    background: wra.has-hover ? (am-wl ? #28322b : #262626) : (am-wl ? #232a25 : Pal.card);
+                    wra := TouchArea { mouse-cursor: pointer; clicked => { root.toggle-wl(); } } }
+                Icon { x: XL - 3px; y: wy - 11px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_am_trophy@1.png"); tint: am-wl ? acc : Pal.mu; }
+                Label { ax: XL + 28px; cy: wy; text: "Win / Loss"; font-size: 12px; bold: true; color: am-wl ? Pal.tx : Pal.mu; }
+                if am-wl: Icon { x: CC - 87px; y: wy - 11px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_am_trophy@1.png"); tint: Pal.gold; }
+                if am-wl: Slot { x: CC - 50px - 13px; y: wy - 13px; img: win-cover; has-cover: win-has; picked => { root.pick("win"); } }
+                if am-wl: Icon { x: CC - 35px; y: wy - 11px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_am_skull@1.png"); tint: Pal.red; }
+                if am-wl: Slot { x: CC - 13px; y: wy - 13px; img: loss-cover; has-cover: loss-has; picked => { root.pick("loss"); } }
+                Toggle { x: XR2 - 44px; y: wy - 12px; on: am-wl; toggled => { root.toggle-wl(); } }
+                then := Label { ax: XL + 48px; cy: ty; text: "Then"; font-size: 10.5px; bold: true; color: Pal.mu; }
+                Hline { x: then.x + then.width + 10px; y: ty; width: XR2 - self.x; }
+                for m[i] in [{ k: "resume", t: "Resume" }, { k: "playlist", t: "Playlist" }, { k: "stop", t: "Stop" }]: Rectangle {
+                    property <length> ry: ty + 13px + i * 42px + 21px;
+                    property <bool> on: m.k == am-mode;
+                    x: 0; y: 0; width: W; height: client-h;
+                    if i < 2 && !on && !(i == 0 ? am-mode == "playlist" : am-mode == "stop"): Hline { x: XL + 54px; y: ry + 21px; width: XR2 - XL - 54px; }
+                    Rectangle { x: XL - 6px; y: ry - 19px; width: XR2 - XL + 12px; height: 38px; border-radius: 9px;
+                        background: mra.has-hover ? (on ? #2b302c : #262626) : (on ? #262a27 : Pal.card);
+                        mra := TouchArea { mouse-cursor: pointer; clicked => { root.set-mode(m.k); } } }
+                    Rectangle { x: XL + 1px; y: ry - 7px; width: 14px; height: 14px; border-radius: 7px; border-width: 1.6px; border-color: on ? acc : #5a5a5a; }
+                    if on: Rectangle { x: XL + 4.5px; y: ry - 3.5px; width: 7px; height: 7px; border-radius: 3.5px; background: acc; }
+                    Icon { x: XL + 23px; y: ry - 11px; width: 22px; height: 22px; tint: on ? acc : Pal.mu;
+                        source: m.k == "resume" ? @image-url("../../ui/img/mk_am_resume@1.png") : m.k == "playlist" ? @image-url("../../ui/img/mk_am_playlist@1.png") : @image-url("../../ui/img/mk_am_stop@1.png"); }
+                    Label { ax: XL + 54px; cy: ry; text: m.t; font-size: 12px; bold: on; color: on ? Pal.tx : Pal.mu; }
+                    if m.k == "resume": Label { ax: XR2; cy: ry; right: true; text: "Pre-match"; font-size: 11px; color: Pal.mu; }
+                    if m.k == "playlist": Rectangle {
+                        property <length> tx: min(CC + 16px, XR2 - 2px - 7px - 6px - pn.width);
+                        x: 0; y: 0; width: W; height: client-h;
+                        Rectangle { x: tx - 16px - 14px; y: ry - 15px; width: XR2 + 4px - (tx - 30px); height: 30px; border-radius: 8px; background: pza.has-hover ? #ffffff0f : transparent;
+                            pza := TouchArea { mouse-cursor: pointer; clicked => { root.pick("playlist"); } } }
+                        Rectangle { x: tx - 16px - 12px; y: ry - 12px; width: 24px; height: 24px; border-radius: 5px; clip: true; background: Pal.ib;
+                            if am-playlist-has: Image { width: 24px; height: 24px; source: am-playlist-cover; image-fit: cover; }
+                            if !am-playlist-has: Icon { x: 1px; y: 1px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_am_plus@1.png"); tint: Pal.mu; } }
+                        pn := Label { ax: tx; cy: ry; text: am-playlist-name != "" ? am-playlist-name : "Pick"; font-size: 11.5px; bold: on; color: on ? Pal.tx : Pal.mu; }
+                        Icon { x: XR2 - 2px - 7px; y: ry - 6px; width: 12px; height: 12px; source: @image-url("../../ui/img/mk_chevr12@1.png"); tint: Pal.mu; } }
+                }
+            }
+        }
+    }
+}

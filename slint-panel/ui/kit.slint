@@ -1,0 +1,96 @@
+// Small building blocks shared by the panel pages (1.0.9 / 1.1 drawing primitives as Slint components).
+export global Pal {
+    out property <color> bg: #121212;
+    out property <color> card: #1f1f1f;
+    out property <color> tx: #f2f2f2;
+    out property <color> mu: #9a9a9a;
+    out property <color> off: #3a3a3a;
+    out property <color> line: #2a2a2a;
+    out property <color> ib: #2a2a2a;
+    out property <color> idle: #8a8a8a;
+    out property <color> red: #e5484d;
+    out property <color> green: #1DB954;
+    out property <color> grey-acc: #6e6e6e;
+    out property <color> dis: #555555;
+    out property <color> org: #f0a030;
+    out property <color> gold: #e0b040;
+}
+
+// Text centred vertically on `cy` (the 1.0.9 canvas convention); anchor: left at x, or right edge at x when `right`.
+export component Label inherits Text {
+    in property <length> cy;
+    in property <length> ax;
+    in property <bool> right;
+    in property <bool> centre;
+    in property <bool> bold;
+    font-weight: bold ? 700 : 400;
+    vertical-alignment: center;
+    height: 24px;
+    y: cy - 12px;
+    x: right ? ax - self.width : centre ? ax - self.width / 2 : ax;
+    width: self.preferred-width;
+}
+
+// Single-colour icon (1.0.9 render used as a mask).
+export component Icon inherits Image {
+    in property <color> tint;
+    colorize: tint;
+    image-rendering: smooth;
+}
+
+// 1.0.9 toggle: pill + white knob; hover tints the plate.
+export component Toggle inherits Rectangle {
+    in property <bool> on;
+    in property <color> acc: Pal.green;
+    callback toggled();
+    width: 44px;
+    height: 24px;
+    border-radius: self.height / 2;
+    background: on ? acc : Pal.off;
+    Rectangle {
+        x: on ? parent.width - parent.height + 3px : 3px;
+        y: 3px;
+        width: parent.height - 6px;
+        height: parent.height - 6px;
+        border-radius: self.height / 2;
+        background: white;
+    }
+    Rectangle { border-radius: parent.border-radius; background: ta.has-hover ? #ffffff1a : transparent; }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.toggled(); } }
+}
+
+// 1.0.9 revert (undo) pill: greyed when already the default.
+export component Revert inherits Rectangle {
+    in property <bool> is-default;
+    callback reverted();
+    width: 30px;
+    height: 24px;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: is-default ? Pal.dis : ta.has-hover ? Pal.tx : Pal.mu;
+    background: !is-default && ta.has-hover ? #2e2e2e : Pal.card;
+    Icon {
+        x: 5px; y: 2px; width: 20px; height: 20px;
+        source: is-default ? @image-url("../../ui/img/mk_undo_dis@1.png") : @image-url("../../ui/img/mk_undo_mu@1.png");
+        tint: is-default ? Pal.dis : ta.has-hover ? Pal.tx : Pal.mu;
+    }
+    ta := TouchArea { mouse-cursor: is-default ? default : pointer; clicked => { if (!is-default) { root.reverted(); } } }
+}
+
+// 24 px cover slot (After match), or the empty '+' slot.
+export component Slot inherits Rectangle {
+    in property <image> img;
+    in property <bool> has-cover;
+    callback picked();
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    border-width: ta.has-hover ? 1.5px : 0px;
+    border-color: Pal.green;
+    Rectangle {
+        x: 1px; y: 1px; width: 24px; height: 24px; border-radius: 5px; clip: true; background: Pal.ib;
+        if has-cover: Image { width: 24px; height: 24px; source: img; image-fit: cover; }
+        if !has-cover: Icon { x: 1px; y: 1px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_am_plus@1.png"); tint: Pal.mu; }
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.picked(); } }
+}
