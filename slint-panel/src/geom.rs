@@ -26,10 +26,6 @@ mod win {
     #[link(name = "user32")] extern "system" {
         fn GetCursorPos(p: *mut Pt) -> i32; fn MonitorFromPoint(p: Pt, f: u32) -> isize; fn MonitorFromWindow(h: isize, f: u32) -> isize;
         fn GetMonitorInfoW(m: isize, i: *mut Mi) -> i32; fn GetWindowRect(h: isize, r: *mut Rect) -> i32;
-        fn SetWindowPos(h: isize, after: isize, x: i32, y: i32, w: i32, h2: i32, f: u32) -> i32;
-        fn RedrawWindow(h: isize, r: *const Rect, rgn: isize, f: u32) -> i32;
-    }
-    #[link(name = "dwmapi")] extern "system" { fn DwmFlush() -> i32;
     }
     #[link(name = "shcore")] extern "system" { fn GetDpiForMonitor(m: isize, t: u32, x: *mut u32, y: *mut u32) -> i32; }
     fn info(m: isize) -> Option<(Rect, f32)> {
@@ -48,14 +44,6 @@ mod win {
         let mut r = Rect { l: 0, t: 0, r: 0, b: 0 };
         if h == 0 || unsafe { GetWindowRect(h, &mut r) } == 0 { return None; }
         Some((r, info(unsafe { MonitorFromWindow(h, 2) })?.0))   // MONITOR_DEFAULTTONEAREST
-    }
-    /// Move and size in one step (no frame at the old place with the new size).
-    /// NOCOPYBITS: Windows would otherwise blit the old page into the moved window top-left aligned (a visible jump);
-    /// then paint the new page at the new size right away (WM_PAINT now), before DWM shows a frame of the old one.
-    pub fn place(h: isize, x: i32, y: i32, w: i32, hh: i32) {
-        // NOREDRAW: Windows/DWM must not show the old surface stretched to the new size; the new-size frame is
-        // rendered and presented synchronously right after, then DwmFlush so the next composition has it.
-        unsafe { SetWindowPos(h, 0, x, y, w, hh, 0x4 | 0x10 | 0x100 | 0x8); RedrawWindow(h, std::ptr::null(), 0, 0x1 | 0x100 | 0x400); DwmFlush(); }   // NOZORDER|NOACTIVATE|NOCOPYBITS|NOREDRAW; RDW_INVALIDATE|UPDATENOW|FRAME
     }
 }
 
@@ -83,7 +71,7 @@ pub fn regrow_panel(ui: &crate::Panel) {
     let (w, h) = ((ui.get_win_w() * s).round() as i32, (ui.get_win_h() * s).round() as i32);
     if w == old.r - old.l && h == old.b - old.t { return; }
     let (x, y) = regrow(old, w, h, wa);
-    win::place(crate::panel_hwnd(), x, y, w, h);
+    crate::veil::place(crate::panel_hwnd(), old, x, y, w, h);
 }
 #[cfg(not(windows))]
 pub fn regrow_panel(_: &crate::Panel) {}

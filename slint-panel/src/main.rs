@@ -21,6 +21,7 @@ mod paths;
 mod geom;
 mod power;
 #[cfg(windows)] mod cloak;
+#[cfg(windows)] mod veil;
 use aoe4engine::{guides::{Shell, Win}, menu, updater, Engine};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
 use std::cell::RefCell;
