@@ -27,14 +27,14 @@ export component PickWin inherits Window {
     in property <[SavedList]> saved;
     in property <string> use-text: "Pick a playlist";
     in property <bool> use-on;
-    callback select(int); callback use-it(); callback ok(); callback pasted(string); callback retry(); callback pick-saved(int); callback close(); callback filtered();
+    callback select(int); callback use-it(); callback ok(); callback pasted(string); callback retry(); callback pick-saved(int); callback dismiss(); callback filtered();
     property <length> GT: 79.5px; property <length> GR: GT + 42px; property <length> GH: 241px;
     property <length> ly: 497px + (saved.length > 0 ? 20px + saved.length * 46px : 0) + 6px;
     title: "AoE4 Spotify";
     default-font-family: "Segoe UI";
     width: 420px; height: ly + 48px + 16px; background: #121212;
     forward-focus: keys;
-    keys := FocusScope { key-pressed(e) => { if (e.text == Key.Escape) { root.close(); return accept; } return reject; } }
+    keys := FocusScope { key-pressed(e) => { if (e.text == Key.Escape) { root.dismiss(); return accept; } return reject; } }
     Text { x: 20px; y: 24px - 11px; height: 22px; text: root.head; font-size: 15px; font-weight: 700; color: Pal.tx; vertical-alignment: center; }
     Rectangle { x: 16px; y: 44px; width: 388px; height: 301px; border-radius: 12px; background: #1f1f1f; }
     Rectangle { x: 26px; y: 54px; width: 28px; height: 28px; border-radius: 14px; background: #2a2a2a; }
@@ -45,7 +45,7 @@ export component PickWin inherits Window {
     if root.filter == "": Text { x: 272px; y: 58px; height: 20px; text: "Search"; font-size: 10.5px; color: #6c6c6c; vertical-alignment: center; }
     sq := TextInput { x: 272px; y: 58px; width: 108px; height: 20px; text <=> root.filter; font-size: 10.5px; color: Pal.tx; vertical-alignment: center; single-line: true;
         edited => { root.sc = 0; root.filtered(); }
-        key-pressed(e) => { if (e.text == Key.Escape) { if (root.filter != "") { root.filter = ""; root.sc = 0; root.filtered(); return accept; } root.close(); return accept; } return reject; } }
+        key-pressed(e) => { if (e.text == Key.Escape) { if (root.filter != "") { root.filter = ""; root.sc = 0; root.filtered(); return accept; } root.dismiss(); return accept; } return reject; } }
     // grid
     Rectangle { x: 28px; y: 92px; width: 364px; height: GH; background: #1f1f1f; clip: true;
         TouchArea { scroll-event(e) => { root.sc = max(0px, min(root.max-sc, root.sc - e.delta-y / 100px * GR * 0.6)); return accept; } }

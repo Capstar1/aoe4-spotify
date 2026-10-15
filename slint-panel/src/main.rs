@@ -11,6 +11,7 @@ mod startup;
 mod view;
 mod assets;
 mod intros;
+mod access;
 mod add;
 mod pick;
 mod dnd;
@@ -44,12 +45,12 @@ mod windows {
     /// Show a window. Not yet ported windows fall back to the panel (never leave an invisible process).
     pub fn show(w: Win) {
         if let Some((e, s)) = CTX.with(|c| c.borrow().clone()) {
-            match w { Win::Gtg => return crate::gtg::open(&e, &s), Win::Add => return crate::add::open(&e), Win::Pick => return crate::pick::open(&e), _ => {} }
+            match w { Win::Gtg => return crate::gtg::open(&e, &s), Win::Add => return crate::add::open(&e), Win::Pick => return crate::pick::open(&e),
+                Win::Access => return crate::access::open_access(&e, &s), Win::Own => return crate::access::open_own(&e, &s), Win::Panel => {} }
         }
-        if w != Win::Panel { aoe4engine::sys::log(&format!("window {w:?} requested (not ported yet: showing the panel)")); }
         PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); crate::first_show(&u); })
     }
-    pub fn close(w: Win) { match w { Win::Gtg => crate::gtg::close(), Win::Add => crate::add::close(), Win::Pick => crate::pick::close(), _ => {} } }
+    pub fn close(w: Win) { match w { Win::Gtg => crate::gtg::close(), Win::Add => crate::add::close(), Win::Pick => crate::pick::close(), Win::Access => crate::access::close_access(), Win::Own => crate::access::close_own(), Win::Panel => {} } }
 }
 
 /// Transient pill message (Checking..., Up to date) and when the "Updated to" pill appeared.
@@ -73,6 +74,7 @@ fn main() -> Result<(), slint::PlatformError> {
     CTX.with(|c| *c.borrow_mut() = Some((eng.clone(), shell.clone())));
     if let Ok(k) = std::env::var("AOE4S_GTG") { return gtg_shot(&k); }
     if let Ok(k) = std::env::var("AOE4S_ADD") { add::open(&eng); add::test(&k); return sub_shot(); }
+    if let Ok(k) = std::env::var("AOE4S_GUIDE") { if k.starts_with("own") { access::open_own(&eng, &shell); } else { access::open_access(&eng, &shell); } access::test(&k); return sub_shot(); }
     if std::env::var_os("AOE4S_PICK").is_some() { aoe4engine::picker::open_pick(&eng, "age:castle", "Castle Age playlist", false, "spotify:playlist:p1"); pick::open(&eng); pick::test(); return sub_shot(); }
     let ui = Panel::new()?;
     PANEL.with(|p| *p.borrow_mut() = Some(ui.as_weak()));
@@ -234,6 +236,6 @@ fn gtg_shot(kind: &str) -> Result<(), slint::PlatformError> {
 /// Test render of the window that is open besides the (unshown) panel: Add a song / picker.
 fn sub_shot() -> Result<(), slint::PlatformError> {
     let out = std::env::var("AOE4S_SHOT").unwrap_or_default();
-    slint::Timer::single_shot(Duration::from_millis(600), move || { add::snapshot(&out); pick::snapshot(&out); let _ = slint::quit_event_loop(); });
+    slint::Timer::single_shot(Duration::from_millis(600), move || { add::snapshot(&out); pick::snapshot(&out); access::snapshot(&out); let _ = slint::quit_event_loop(); });
     slint::run_event_loop()
 }

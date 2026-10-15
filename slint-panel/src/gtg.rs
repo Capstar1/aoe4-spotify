@@ -78,7 +78,7 @@ fn build(eng: &Arc<Engine>, sh: &Arc<dyn Shell>) -> Option<Gtg> {
         if let Some(w) = ww.upgrade() { w.set_face(fr2[i2.get()].clone()); }
     });
     let ww = w.as_weak();
-    w.on_close(move || { let _ = ww; close(); });
+    w.on_dismiss(move || { let _ = ww; close(); });
     w.on_done(close);
     let s = sh.clone();
     w.on_open_panel(move || { s.show(Win::Panel); close(); });

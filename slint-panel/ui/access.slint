@@ -1,0 +1,159 @@
+// "Not invited yet" access guide (Tauri 1.1 ui/access.html, 1.0.9 access.py) and "Your Spotify app" (ui/own.html):
+// one grid of cards, pill buttons, entry box; Windows light / dark theme.
+export struct Th { bg: color, card: color, tx: color, mu: color, g: color, gtx: color, gact: color, gdis: color, gdtx: color, b2: color, b2a: color, b2tx: color,
+    dis: color, ent: color, enttx: color, err: color, pg: color, pglab: color, pgline: color, hl: color, hlo: color, hltx: color }
+export global GTh {
+    out property <Th> dark: { bg: #171717, card: #222222, tx: #e6e6e3, mu: #a3a29f, g: #1db954, gtx: #0e1a12, gact: #2fcf68, gdis: #35503f, gdtx: #5f7a68, b2: #303030, b2a: #3a3a3a, b2tx: #e6e6e3,
+        dis: #6c6c6c, ent: #2c2c2c, enttx: #ececea, err: #e8958c, pg: #2e2e2e, pglab: #aaaaa6, pgline: #4e4e4e, hl: #1e422c, hlo: #1db954, hltx: #e8e8e4 };
+    out property <Th> light: { bg: #efeeea, card: #e3e1dc, tx: #2b2b2a, mu: #62615d, g: #1a9f4a, gtx: #f4f3ef, gact: #178c41, gdis: #a9c8b3, gdtx: #e8efe9, b2: #d4d2cc, b2a: #c9c7c1, b2tx: #2b2b2a,
+        dis: #9a9893, ent: #f6f5f1, enttx: #262625, err: #b4473c, pg: #f0efeb, pglab: #585855, pgline: #ceccc7, hl: #d0e8d6, hlo: #1a9f4a, hltx: #242422 };
+}
+
+// Text centred vertically on cy (the CSS translateY(-50%) lines).
+component T inherits Text { in property <length> cy; y: cy - 15px; height: 30px; vertical-alignment: center; }
+
+component Pill inherits Rectangle {
+    in property <Th> p; in property <string> label; in property <bool> green; in property <bool> on: true;
+    callback clicked();
+    height: 44px; border-radius: 22px;
+    background: green ? (on ? (ta.has-hover ? p.gact : p.g) : p.gdis) : (ta.has-hover ? p.b2a : p.b2);
+    Text { text: root.label; font-size: 15px; font-weight: 700; color: green ? (on ? p.gtx : p.gdtx) : p.b2tx; horizontal-alignment: center; vertical-alignment: center; }
+    ta := TouchArea { enabled: root.on; mouse-cursor: root.on ? pointer : default; clicked => { root.clicked(); } }
+}
+
+component Card inherits Rectangle {
+    in property <Th> p; in property <int> n; in property <string> title;
+    x: 20px; width: 460px; border-radius: 12px; background: p.card;
+    Rectangle { x: 18px; y: 12px; width: 36px; height: 36px; border-radius: 18px; background: p.g;
+        Text { text: root.n; font-size: 17px; font-weight: 700; color: p.gtx; horizontal-alignment: center; vertical-alignment: center; } }
+    T { x: 72px; cy: 30px; text: root.title; font-size: 17px; font-weight: 700; color: p.tx; }
+}
+
+component Check inherits Rectangle {
+    in property <Th> p;
+    width: 26px; height: 26px; border-radius: 13px; background: p.g;
+    Path { width: 26px; height: 26px; viewbox-width: 26; viewbox-height: 26; stroke: p.gtx; stroke-width: 2.6px; stroke-line-cap: round; fill: transparent;
+        commands: "M 7.5 13.5 L 11.2 17.2 L 18.5 9.3"; }
+}
+
+// Entry box with placeholder (focus = green border).
+component Entry inherits Rectangle {
+    in property <Th> p; in property <string> placeholder; in-out property <string> text; in property <bool> enabled: true;
+    callback edited(); callback accepted(); callback escape();
+    height: 44px; border-radius: 8px; background: p.ent; border-width: 1.5px; border-color: ti.has-focus ? p.g : p.b2;
+    if root.text == "": Text { x: 14px; width: parent.width - 28px; text: root.placeholder; font-size: 15px; color: p.dis; vertical-alignment: center; }
+    FocusScope { x: 14px; width: parent.width - 28px; height: 26px;
+        key-pressed(e) => { if (e.text == Key.Escape) { root.escape(); return accept; } reject }
+        ti := TextInput { text <=> root.text; font-size: 15px; color: p.enttx; enabled: root.enabled; single-line: true;
+            vertical-alignment: center; edited => { root.edited(); } accepted => { root.accepted(); } } }
+    TouchArea { mouse-cursor: MouseCursor.text; clicked => { ti.focus(); } }
+    public function focus-in() { ti.focus(); }
+}
+
+component Link inherits T {
+    in property <Th> p; callback clicked();
+    font-size: 13px; color: la.has-hover ? p.gact : p.g;
+    la := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// access.py illustration: Account page -> "Edit personal info" row, arrow, Email field.
+component Illus inherits Rectangle {
+    in property <Th> p;
+    property <length> pw: 173px; property <length> rx0: 197px; property <length> cy: 48px;
+    width: 370px; height: 118px;
+    Rectangle { x: 0; width: pw; border-radius: 10px; background: p.pg; }
+    Rectangle { x: rx0; width: pw; border-radius: 10px; background: p.pg; }
+    Text { x: 12px; y: 10px; height: 16px; vertical-alignment: center; text: "Account"; font-size: 11.5px; font-weight: 700; color: p.pglab; }
+    Rectangle { x: 8px; y: 34px; width: pw - 16px; height: 28px; border-radius: 8px; background: p.hl; border-width: 1.8px; border-color: p.hlo; }
+    Rectangle { x: 14px; y: cy - 8px; width: 16px; height: 16px; border-radius: 4px; background: p.pgline; }
+    Path { x: 0; y: 0; width: 370px; height: 118px; viewbox-width: 370; viewbox-height: 118; stroke: p.hltx; stroke-width: 2.2px; stroke-line-cap: round; fill: transparent;
+        commands: "M 18.8 51.2 L 25.6 44.4"; }
+    Path { x: 0; y: 0; width: 370px; height: 118px; viewbox-width: 370; viewbox-height: 118; fill: p.hltx; commands: "M 16.8 53.2 L 17.4 50.4 L 19.6 52.6 Z"; }
+    Text { x: 37px; y: cy - 8px; height: 16px; vertical-alignment: center; text: "Edit personal info"; font-size: 10.5px; font-weight: 700; color: p.hltx; }
+    Path { x: 0; y: 0; width: 370px; height: 118px; viewbox-width: 370; viewbox-height: 118; stroke: p.hltx; stroke-width: 1.8px; stroke-line-cap: round; fill: transparent;
+        commands: "M 153 44 L 157 48 L 153 52"; }
+    Rectangle { x: 12px; y: 78px; width: 149px * 0.62; height: 6px; border-radius: 3px; background: p.pgline; }
+    Rectangle { x: 12px; y: 93px; width: 149px * 0.45; height: 6px; border-radius: 3px; background: p.pgline; }
+    // mouse pointer at (129, 50)
+    Path { x: 0; y: 0; width: 370px; height: 118px; viewbox-width: 370; viewbox-height: 118; fill: p.hltx; stroke: p.pg; stroke-width: 1.2px;
+        commands: "M 129 50 L 129 65.5 L 132.8 62.2 L 135.6 68 L 138.2 66.8 L 135.5 61.2 L 140.4 61.2 Z"; }
+    Path { x: 0; y: 0; width: 370px; height: 118px; viewbox-width: 370; viewbox-height: 118; stroke: p.hlo; stroke-width: 2px; stroke-line-cap: round; fill: transparent;
+        commands: "M 179 59 L 191 59 M 186.5 54.5 L 191 59 L 186.5 63.5"; }
+    Rectangle { x: rx0 + 12px; y: 15px; width: 149px * 0.55; height: 6px; border-radius: 3px; background: p.pgline; }
+    Text { x: rx0 + 12px; y: 34px; height: 16px; vertical-alignment: center; text: "Email"; font-size: 10.5px; font-weight: 700; color: p.pglab; }
+    Rectangle { x: rx0 + 8px; y: 52px; width: pw - 16px; height: 26px; border-radius: 8px; background: p.hl; border-width: 1.8px; border-color: p.hlo; }
+    Text { x: rx0 + 16px; y: 57px; height: 16px; vertical-alignment: center; text: "you@example.com"; font-size: 10px; color: p.hltx; }
+    Rectangle { x: rx0 + 12px; y: 92px; width: 149px * 0.7; height: 6px; border-radius: 3px; background: p.pgline; }
+}
+
+// "Not invited yet" (W = 500).
+export component AccessWin inherits Window {
+    in property <bool> light; in property <bool> done; in property <bool> valid; in property <bool> sending;
+    in property <string> note; in property <bool> note-err;
+    in-out property <string> email;
+    callback open-own(); callback open-account(); callback send(); callback edited(); callback dismiss();
+    property <Th> p: light ? GTh.light : GTh.dark;
+    property <[length]> Y: [114px, 240px, 485px];
+    property <length> h3: note != "" ? 196px : 172px;
+    title: "AoE4 Spotify"; width: 500px; height: Y[2] + h3 + 20px; background: p.bg; default-font-family: "Segoe UI";
+    T { x: 28px; cy: 38px; height: 40px; y: 18px; text: "Not invited yet"; font-size: 26px; font-weight: 700; color: p.tx; }
+    T { x: 28px; cy: 70px; text: "Ask for access in 3 easy steps."; font-size: 15px; color: p.mu; }
+    Link { x: 28px; cy: 92px; p: p; text: "Or use your own Spotify app"; clicked => { root.open-own(); } }
+    if root.done: VerticalLayout { x: 28px; y: 128px; width: 450px; height: 160px; alignment: start;
+        Text { text: "✔  Done!"; font-size: 30px; font-weight: 700; color: p.g; }
+        Rectangle { height: 8px; }
+        Text { text: "You'll get access in about a minute."; font-size: 20px; font-weight: 700; color: p.tx; }
+        Rectangle { height: 6px; }
+        Text { text: "Keep this window open or reopen the app later.\nIt continues by itself when it works."; font-size: 15px; color: p.mu; } }
+    if !root.done: Rectangle {
+        Card { y: Y[0]; height: 114px; p: p; n: 1; title: "Open your Spotify page"; }
+        Pill { x: 92px; y: Y[0] + 52px; width: 200px; p: p; label: "Open Spotify page"; clicked => { root.open-account(); } }
+        Card { y: Y[1]; height: 233px; p: p; n: 2; title: "Find your email and copy it"; }
+        Illus { x: 92px; y: Y[1] + 52px; p: p; }
+        T { x: 92px; cy: Y[1] + 186px; text: "Click “Edit personal info” (the row with the pencil)."; font-size: 14px; color: p.mu; }
+        T { x: 92px; cy: Y[1] + 206px; text: "Then select your Email and press Ctrl + C."; font-size: 14px; color: p.mu; }
+        Card { y: Y[2]; height: h3; p: p; n: 3; title: "Paste or type your Spotify email"; }
+        if root.valid: Check { x: 406px; y: Y[2] + 52px + 9px; p: p; }
+        Pill { x: 92px; y: Y[2] + 110px; width: 200px; p: p; green: true; on: root.valid && !root.sending; label: root.sending ? "Sending…" : "Send request"; clicked => { root.send(); } }
+        if root.note != "": T { x: 92px; cy: Y[2] + 170px; text: root.note; font-size: 13px; color: root.note-err ? p.err : p.mu; }
+    }
+    em := Entry { x: 92px; y: Y[2] + 52px; width: 300px; visible: !root.done; enabled: !root.done; p: p; placeholder: "your Spotify email"; text <=> root.email;
+        edited => { root.edited(); } accepted => { root.send(); } escape => { root.dismiss(); } }
+    public function focus-entry() { em.focus-in(); }
+}
+
+// "Your Spotify app" (W = 500): 4 step cards.
+export component OwnWin inherits Window {
+    in property <bool> light; in property <bool> copied; in property <bool> valid; in property <bool> busy; in property <string> note;
+    in-out property <string> cid;
+    callback dashboard(); callback account(); callback copy(); callback save(); callback shared(); callback edited(); callback dismiss();
+    property <Th> p: light ? GTh.light : GTh.dark;
+    property <length> h4: 224px + (note != "" ? 24px : 0px);
+    property <length> y4: 114px + 3 * 178px;
+    title: "AoE4 Spotify"; width: 500px; height: y4 + h4 + 12px + 38px; background: p.bg; default-font-family: "Segoe UI";
+    T { x: 28px; y: 18px; height: 40px; text: "Your Spotify app"; font-size: 26px; font-weight: 700; color: p.tx; }
+    T { x: 28px; cy: 70px; text: "Use your own Spotify app in 4 steps."; font-size: 15px; color: p.mu; }
+    Card { y: 114px; height: 166px; p: p; n: 1; title: "Create an app"; }
+    T { x: 92px; cy: 176px; text: "Open the dashboard and log in. Click Create app,"; font-size: 14px; color: p.mu; }
+    T { x: 92px; cy: 196px; text: "name it AoE4 Spotify, tick Web API, and save."; font-size: 14px; color: p.mu; }
+    Pill { x: 92px; y: 218px; width: 240px; p: p; label: "Open Spotify Dashboard"; clicked => { root.dashboard(); } }
+    Card { y: 292px; height: 166px; p: p; n: 2; title: "Add this redirect"; }
+    T { x: 92px; cy: 354px; text: "Add this address under Redirect URIs and click Add."; font-size: 14px; color: p.mu; }
+    T { x: 92px; cy: 374px; text: "It has to match exactly."; font-size: 14px; color: p.mu; }
+    Rectangle { x: 92px; y: 396px; width: 260px; height: 44px; border-radius: 8px; background: p.ent; border-width: 1.5px; border-color: p.b2;
+        Text { x: 14px; text: "http://127.0.0.1:8888/callback"; font-size: 15px; color: p.enttx; vertical-alignment: center; } }
+    Pill { x: 364px; y: 396px; width: 98px; p: p; label: root.copied ? "Copied" : "Copy"; clicked => { root.copy(); } }
+    Card { y: 470px; height: 166px; p: p; n: 3; title: "Add yourself"; }
+    T { x: 92px; cy: 532px; text: "Settings → User Management → Add user."; font-size: 14px; color: p.mu; }
+    T { x: 92px; cy: 552px; text: "Use the email on your Spotify account."; font-size: 14px; color: p.mu; }
+    Pill { x: 92px; y: 574px; width: 240px; p: p; label: "Open your Spotify email"; clicked => { root.account(); } }
+    Card { y: y4; height: h4; p: p; n: 4; title: "Paste the Client ID"; }
+    T { x: 92px; cy: y4 + 62px; text: "Copy the Client ID (not the Client Secret)."; font-size: 14px; color: p.mu; }
+    T { x: 92px; cy: y4 + 82px; text: "Copying it fills this box."; font-size: 14px; color: p.mu; }
+    ce := Entry { x: 92px; y: y4 + 104px; width: 300px; p: p; placeholder: "paste the Client ID"; text <=> root.cid; edited => { root.edited(); } accepted => { root.save(); } escape => { root.dismiss(); } }
+    if root.valid: Check { x: 406px; y: y4 + 113px; p: p; }
+    Pill { x: 92px; y: y4 + 162px; width: 200px; p: p; green: true; label: root.busy ? "Saving…" : "Save and log in"; clicked => { root.save(); } }
+    if root.note != "": T { x: 92px; cy: y4 + 222px; text: root.note; font-size: 13px; color: p.err; }
+    Link { x: 28px; cy: y4 + h4 + 24px; p: p; text: "Use the shared app instead"; clicked => { root.shared(); } }
+    public function focus-entry() { ce.focus-in(); }
+}

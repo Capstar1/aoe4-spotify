@@ -16,7 +16,7 @@ export component AddWin inherits Window {
     in property <string> zone-path;        // dashed outline (backend-built path, 384 x 56)
     in-out property <string> query;
     in-out property <length> sc;
-    callback edited(string); callback enter(); callback playing(); callback open-menu(); callback pick(int); callback add(int); callback close();
+    callback edited(string); callback enter(); callback playing(); callback open-menu(); callback pick(int); callback add(int); callback dismiss();
     title: "AoE4 Spotify";
     default-font-family: "Segoe UI";
     width: 416px; height: 560px; background: #1f1f1f;
@@ -27,7 +27,7 @@ export component AddWin inherits Window {
         if root.query == "": Text { x: 29px; height: parent.height; text: "Search Spotify or paste a song link"; font-size: 14.5px; color: #6f6f6f; vertical-alignment: center; }
         qi := TextInput { x: 29px; width: parent.width - 37px; height: parent.height; text <=> root.query; font-size: 14.5px; color: Pal.tx; vertical-alignment: center; single-line: true;
             edited => { root.edited(self.text); } accepted => { root.enter(); }
-            key-pressed(e) => { if (e.text == Key.Escape) { if (root.menu) { root.menu = false; } else { root.close(); } return accept; } return reject; } }
+            key-pressed(e) => { if (e.text == Key.Escape) { if (root.menu) { root.menu = false; } else { root.dismiss(); } return accept; } return reject; } }
     }
     np := Rectangle { x: 16px; y: 100px; width: npt.preferred-width + 24px; height: 33px; background: npa.has-hover ? #333333 : #2a2a2a;
         npt := Text { x: 12px; height: parent.height; text: "♫  Add what's playing"; font-size: 13px; font-weight: 700; color: Pal.tx; vertical-alignment: center; }

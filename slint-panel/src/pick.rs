@@ -25,7 +25,7 @@ pub fn open(eng: &Arc<Engine>) {
     close();   // like 1.1 small_window: one picker, re-read for its new target
     let Ok(w) = PickWin::new() else { return };
     w.set_drop_path(paths::dashed_rect(364.0, 46.0, 10.0, 1.4, 5.0, 4.0).into());
-    w.on_close(close); w.window().on_close_requested(|| { close(); slint::CloseRequestResponse::HideWindow });
+    w.on_dismiss(close); w.window().on_close_requested(|| { close(); slint::CloseRequestResponse::HideWindow });
     w.on_select(|i| { with(|p| { let f = shown(p); if let Some(it) = f.get(i as usize) { p.sel = it["uri"].as_str().map(String::from); p.err.clear(); } }); draw(); });
     w.on_use_it(use_sel);
     w.on_ok(ok_link);

@@ -23,7 +23,7 @@ pub fn open(eng: &Arc<Engine>) {
     if let Some(w) = with(|a| a.w.clone_strong()) { let _ = w.show(); return; }
     let Ok(w) = AddWin::new() else { return };
     w.set_zone_path(paths::dashed_rect(384.0, 56.0, 10.0, 2.0, 7.0, 5.0).into());
-    w.on_close(close); w.window().on_close_requested(|| { close(); slint::CloseRequestResponse::HideWindow });
+    w.on_dismiss(close); w.window().on_close_requested(|| { close(); slint::CloseRequestResponse::HideWindow });
     w.on_edited(edited); w.on_enter(|| { let q = with(|a| a.w.get_query().to_string()).unwrap_or_default(); if !track_ids(&q).is_empty() { with(|a| a.w.set_query("".into())); intros::drop_text(q); } });
     w.on_playing(|| api("playing", String::new(), |v| { let items = v.as_array().cloned().unwrap_or_default(); if items.is_empty() { say("Nothing is playing on Spotify", true); return; }
         intros::add_songs(items); Timer::single_shot(Duration::from_millis(150), close); }));
