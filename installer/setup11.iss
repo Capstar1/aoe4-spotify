@@ -32,7 +32,7 @@ AppName={#AppName}
 AppVersion={#AppVer}
 AppPublisher=Capstar
 LicenseFile={#Root}\installer\LICENSE
-SetupIconFile={#Root}\app\icons\icon.ico
+SetupIconFile={#Root}\installer\icon.ico
 DefaultDirName={localappdata}\Programs\{#AppName}
 DisableDirPage=yes
 DisableProgramGroupPage=yes
@@ -51,7 +51,7 @@ CloseApplications=no
 [Files]
 Source: "{#Root}\target\release\aoe4spotify-slint.exe"; DestDir: "{app}"; DestName: "AoE4 Spotify.exe"; Flags: ignoreversion
 Source: "{#Root}\installer\config.json"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\app\icons\icon.ico"; DestDir: "{app}"; DestName: "app.ico"; Flags: ignoreversion
+Source: "{#Root}\installer\icon.ico"; DestDir: "{app}"; DestName: "app.ico"; Flags: ignoreversion
 Source: "{#Root}\installer\LICENSE"; DestDir: "{app}"
 
 [Icons]
