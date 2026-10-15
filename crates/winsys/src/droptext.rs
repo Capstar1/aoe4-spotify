@@ -67,3 +67,34 @@ pub fn register(hwnd: isize, cb: impl Fn(Ev) + 'static) -> bool {
         ok
     }
 }
+
+// ---- test: drive a window's registered OLE drop target the way DoDragDrop does (DragEnter / DragOver / Drop with an
+// IDataObject offering CF_UNICODETEXT), so the whole text path runs without moving the real mouse (hidden-desktop tests).
+#[repr(C)] struct FakeVtbl { qi: unsafe extern "system" fn(*mut Fake, *const [u8; 16], *mut *mut c_void) -> i32, add_ref: unsafe extern "system" fn(*mut Fake) -> u32,
+    release: unsafe extern "system" fn(*mut Fake) -> u32, get_data: unsafe extern "system" fn(*mut Fake, *const Formatetc, *mut Stgmedium) -> i32 }
+#[repr(C)] struct Fake { vtbl: *const FakeVtbl, text: Vec<u16> }
+unsafe extern "system" fn f_qi(this: *mut Fake, _i: *const [u8; 16], out: *mut *mut c_void) -> i32 { *out = this as *mut c_void; 0 }
+unsafe extern "system" fn f_ref(_t: *mut Fake) -> u32 { 1 }
+unsafe extern "system" fn f_get(this: *mut Fake, f: *const Formatetc, m: *mut Stgmedium) -> i32 {
+    #[link(name = "kernel32")] extern "system" { fn GlobalAlloc(f: u32, n: usize) -> *mut c_void; }
+    if (*f).cf != 13 || (*f).tymed & 1 == 0 { return 0x8004_0064u32 as i32; }   // DV_E_FORMATETC
+    let t = &(*this).text; let h = GlobalAlloc(0x0002, t.len() * 2); if h.is_null() { return 0x8007_000Eu32 as i32; }
+    let p = GlobalLock(h) as *mut u16; std::ptr::copy_nonoverlapping(t.as_ptr(), p, t.len()); GlobalUnlock(h);
+    (*m).tymed = 1; (*m).h = h; (*m).release = std::ptr::null_mut(); 0
+}
+static FAKE_VTBL: FakeVtbl = FakeVtbl { qi: f_qi, add_ref: f_ref, release: f_ref, get_data: f_get };
+
+/// Enter (+ Over) and then Drop (`drop`) or Leave on the target registered for `hwnd`. false = no drop target registered.
+pub fn simulate(hwnd: isize, text: &str, drop: bool) -> bool {
+    #[link(name = "user32")] extern "system" { fn GetPropW(h: isize, n: *const u16) -> *mut c_void; }
+    let n: Vec<u16> = "OleDropTargetInterface".encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let t = GetPropW(hwnd, n.as_ptr()) as *mut Target; if t.is_null() { return false; }
+        let vt = &*(*(t as *const *const Vtbl));
+        let mut fake = Fake { vtbl: &FAKE_VTBL, text: text.encode_utf16().chain(Some(0)).collect() };
+        let d = &mut fake as *mut Fake as *mut c_void; let mut eff = 0u32;
+        (vt.enter)(t, d, 1, 0, &mut eff); (vt.over)(t, 1, 0, &mut eff);
+        if drop { (vt.drop)(t, d, 0, 0, &mut eff); } else { (vt.leave)(t); }
+        eff == 1
+    }
+}

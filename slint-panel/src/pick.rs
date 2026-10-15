@@ -141,3 +141,6 @@ pub fn liked_tile(d: f32) -> slint::Image {
     let i = crate::netimg::corners(i, (8.0 * k).round() as u32);
     slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(i.as_raw(), n, n))
 }
+/// BTR self-test access: the open picker window.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn win() -> Option<crate::PickWin> { with(|p| p.w.clone_strong()) }

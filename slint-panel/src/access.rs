@@ -23,8 +23,10 @@ thread_local! {
     static ACC: RefCell<Option<(AccessWin, Vec<Timer>)>> = const { RefCell::new(None) };
     static OWN: RefCell<Option<(OwnWin, Vec<Timer>)>> = const { RefCell::new(None) };
 }
-fn acc() -> Option<AccessWin> { ACC.with(|a| a.borrow().as_ref().map(|(w, _)| w.clone_strong())) }
-fn own() -> Option<OwnWin> { OWN.with(|a| a.borrow().as_ref().map(|(w, _)| w.clone_strong())) }
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn acc() -> Option<AccessWin> { ACC.with(|a| a.borrow().as_ref().map(|(w, _)| w.clone_strong())) }
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn own() -> Option<OwnWin> { OWN.with(|a| a.borrow().as_ref().map(|(w, _)| w.clone_strong())) }
 
 /// Clipboard + theme poll (250 ms; theme every 8th tick). `fill` gets new clipboard text.
 fn poll(focused: impl Fn() -> bool + 'static, fill: impl Fn(String) + 'static, light: impl Fn(bool) + 'static) -> Timer {

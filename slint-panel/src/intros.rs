@@ -95,7 +95,7 @@ pub fn init(ui: &Panel, eng: Arc<Engine>, shell: Arc<dyn Shell>) {
 }
 
 fn ui_of() -> Option<Panel> { with(|e| e.ui.upgrade()).flatten() }
-fn page() -> String { ui_of().map(|u| u.global::<IntroUi>().get_page().to_string()).unwrap_or_default() }
+pub fn page() -> String { ui_of().map(|u| u.global::<IntroUi>().get_page().to_string()).unwrap_or_default() }
 pub fn set_page(p: &str) { if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); crate::tips_hide(&ui); g.set_pmenu(false); g.set_ctx_open(false); g.set_page(p.into()); } refresh(); }
 fn close_dialog() { if let Some(ui) = ui_of() { ui.global::<IntroUi>().set_dialog("".into()); ui.invoke_refocus(); } }
 fn toast(m: &str) { with(|e| e.toast_t = Some(Instant::now())); if let Some(ui) = ui_of() { ui.global::<IntroUi>().set_toast(m.into()); } }
@@ -367,3 +367,6 @@ pub fn drag_over(on: bool) { if let Some(ui) = ui_of() { let g = ui.global::<Int
 /// Songs dragged out of the Add a song list (same process: no OLE drag source needed).
 pub fn drop_on_page_items(items: Vec<Value>) { if page() == "age" { add_songs(items); } else { tell("Open an age to drop songs on it", true); } }
 pub fn drop_on_page(t: String) { if page() == "age" { drop_text(t); } }
+/// BTR self-test: the age page's drop highlight.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn drop_over() -> bool { ui_of().map(|u| u.global::<IntroUi>().get_drop_over()).unwrap_or(false) }

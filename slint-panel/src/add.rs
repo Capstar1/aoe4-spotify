@@ -102,3 +102,10 @@ mod tests {
 }
 /// Test switch: save the window as a PNG.
 pub fn snapshot(path: &str) { with(|a| if let Ok(b) = a.w.window().take_snapshot() { let _ = crate::save_png(path, b.as_bytes(), b.width(), b.height()); }); }
+/// BTR self-test access: the open window and its list length.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn win() -> Option<crate::AddWin> { with(|a| a.w.clone_strong()) }
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn items_len() -> usize { with(|a| a.items.len()).unwrap_or(0) }
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn item_uri(i: usize) -> Option<String> { with(|a| a.items.get(i).and_then(|v| v["uri"].as_str().map(String::from))).flatten() }

@@ -12,6 +12,7 @@ mod view;
 mod assets;
 mod intros;
 mod access;
+mod btrtest;
 mod add;
 mod pick;
 mod dnd;
@@ -179,6 +180,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let (e, sh) = (eng.clone(), shell.clone());
         if e.spotify.lock().unwrap().logged_in() { std::thread::spawn(move || aoe4engine::guides::after_login(&sh, &e)); } else { aoe4engine::guides::do_login(sh, e); }
     } else if !st.hidden { windows::show(Win::Panel); }
+    #[cfg(windows)] if let Ok(f) = std::env::var("AOE4S_BTRTEST") { btrtest::start(eng.clone(), shell.clone(), f); }
     slint::run_event_loop_until_quit()?;
     drop((poll, pr, fire_timer));
     Ok(())
@@ -251,3 +253,14 @@ pub fn panel_point(w: &slint::Window, x: f32, y: f32) -> Option<(f32, f32)> {
 fn inside(x: f32, y: f32, w: f32, h: f32) -> bool { x >= 0.0 && y >= 0.0 && x < w && y < h }
 #[cfg(test)]
 mod pt_tests { #[test] fn inside() { assert!(super::inside(1.0, 1.0, 10.0, 10.0) && !super::inside(-1.0, 1.0, 10.0, 10.0) && !super::inside(1.0, 10.0, 10.0, 10.0)); } }
+
+/// The panel (UI thread).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn panel() -> Option<Panel> { PANEL.with(|p| p.borrow().as_ref().and_then(|w| w.upgrade())) }
+/// The panel's native window handle (0 = none / not Windows).
+#[cfg(windows)]
+pub fn panel_hwnd() -> isize {
+    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use slint::winit_030::WinitWindowAccessor;
+    panel().and_then(|u| u.window().with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) { Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(), _ => 0 })).unwrap_or(0)
+}

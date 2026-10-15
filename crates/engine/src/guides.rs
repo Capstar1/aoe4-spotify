@@ -121,6 +121,8 @@ pub fn set_clip_text(t: &str) {
 }
 /// Clipboard text (Windows; the guide fills the email box as soon as you copy one).
 pub fn clip_text() -> String {
+    // tests: AOE4S_TEST=1 + AOE4S_CLIP=<text> stands in for the clipboard (never touch the user's real clipboard)
+    if std::env::var("AOE4S_TEST").ok().as_deref() == Some("1") { if let Ok(t) = std::env::var("AOE4S_CLIP") { return t; } }
     #[cfg(windows)] unsafe {
         #[link(name = "user32")] extern "system" { fn OpenClipboard(h: isize) -> i32; fn CloseClipboard() -> i32; fn GetClipboardData(f: u32) -> isize; }
         #[link(name = "kernel32")] extern "system" { fn GlobalLock(h: isize) -> *const u16; fn GlobalUnlock(h: isize) -> i32; }
