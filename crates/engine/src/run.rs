@@ -2,7 +2,7 @@
 use crate::{Engine, Status, data::{resolve, after_cfg}};
 use aoe4core::aoe4::Aoe4;
 use aoe4core::boss::{intro_nap, intro_poll, Cue, IntroPoll, Seq, Step};
-use aoe4core::finish::{release, within_minute, Heard, Latch};
+use aoe4core::finish::{release, Heard, Latch};
 use aoe4core::game::{GameAdapter, GameEvent};
 use aoe4core::logtail::{Poll, Tail};
 use aoe4core::switcher::{Action, Switcher};
@@ -10,10 +10,6 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-fn holdable(a: &Action) -> bool {
-    matches!(a, Action::Play { .. } | Action::Stop | Action::AfterMatch { .. } | Action::HandBack)
-}
 
 fn heard(v: &serde_json::Value) -> Option<Heard> {
     let uri = v["item"]["uri"].as_str().unwrap_or("").to_string();
@@ -32,16 +28,6 @@ fn nap(h: Option<&Heard>) -> Duration {
         _ => 500,
     };
     Duration::from_millis(ms)
-}
-
-fn label(a: &Action) -> String {
-    match a {
-        Action::Play { age, .. } => format!("play {age}"),
-        Action::HandBack => "hand Spotify back".into(),
-        Action::Stop => "stop".into(),
-        Action::AfterMatch { .. } => "after match".into(),
-        Action::Restore => "restore".into(),
-    }
 }
 
 fn intro_memory(dir: &std::path::Path) -> serde_json::Value { aoe4core::userstore::read_json(&dir.join("intro_last.json")) }
@@ -103,14 +89,6 @@ fn wait(app: &Engine, rx: &std::sync::mpsc::Receiver<Action>, seq: &mut Seq, mod
                     }
                 }
             }
-            Ok(a) if holdable(&a) => match mode {
-                WaitOn::Intro => { seq.clear(); return WaitOut::Now(a); }
-                WaitOn::Track => {
-                    seq.clear();
-                    push(&app.status, format!("Finish song first: waiting to {}", label(&a)));
-                    preempt = Some(a);
-                }
-            },
             Ok(a) => { seq.clear(); return WaitOut::Now(a); }
             Err(RecvTimeoutError::Disconnected) => return WaitOut::Closed,
             Err(RecvTimeoutError::Timeout) => {
@@ -230,25 +208,13 @@ fn dispatch(app: &Engine, rx: &std::sync::mpsc::Receiver<Action>, seq: &mut Seq,
         }
         return drive(app, rx, seq, steps, now);
     }
-    if !skip_gate && holdable(&action) && app.finish.load(Ordering::SeqCst) {
-        let v = app.spotify.lock().unwrap().player_state();
-        if let Some(h) = heard(&v).filter(within_minute) {
-            push(&app.status, format!("Finish song first: waiting to {}", label(&action)));
-            let latch = Latch::playing(h.uri.clone());
-            return match wait(app, rx, seq, WaitOn::Track, latch, Some(h), Some(action)) {
-                WaitOut::Steps(steps) => drive(app, rx, seq, steps, None),
-                WaitOut::Now(a) => Drive::Follow(a),
-                WaitOut::Closed => Drive::Exit,
-            };
-        }
-    }
     run_now(app, action)
 }
 
 /// Spotify worker. Ages run one at a time so fades never overlap and the log watcher never blocks.
 /// An age with an intro plays it, then the playlist when that intro ends or is skipped.
 /// A pause holds the playlist until playback resumes. Finish song first waits out a track
-/// with a minute or less left before the intro.
+/// with a minute or less left before the intro. Handing Spotify back, stopping, and after-match do not wait.
 pub fn player(app: Arc<Engine>, rx: std::sync::mpsc::Receiver<Action>) {
     let mut seq = Seq::new();
     let mut follow: Option<Action> = None;
@@ -257,9 +223,16 @@ pub fn player(app: Arc<Engine>, rx: std::sync::mpsc::Receiver<Action>) {
             Some(a) => (a, true),
             None => match rx.recv() { Ok(a) => (a, false), Err(_) => return },
         };
+        let restoring = matches!(action, Action::Restore);
         match dispatch(&app, &rx, &mut seq, action, skip_gate) {
-            Drive::Done => sync_logged(&app),
-            Drive::Exit => return,
+            Drive::Done => {
+                sync_logged(&app);
+                if restoring { app.restore_done.store(true, Ordering::SeqCst); }
+            }
+            Drive::Exit => {
+                if restoring { app.restore_done.store(true, Ordering::SeqCst); }
+                return;
+            }
             Drive::Follow(a) => follow = Some(a),
         }
     }

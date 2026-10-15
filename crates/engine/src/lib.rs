@@ -32,6 +32,8 @@ pub struct Engine {
     pub pick: Mutex<serde_json::Value>, pub gtg: Mutex<serde_json::Value>,
     /// Set when the game closes so the log watcher leaves the loop.
     pub stop: AtomicBool,
+    /// Set when the player finishes an `Action::Restore`, so game-close can wait out that fade.
+    pub restore_done: AtomicBool,
 }
 
 impl Engine {
@@ -51,7 +53,7 @@ impl Engine {
             ages, status: Mutex::new(status), cv: Condvar::new(), logged: AtomicBool::new(logged0), stat: Mutex::new(None),
             replays: AtomicBool::new(replays0), finish: AtomicBool::new(finish0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx),
             ed: Mutex::new(data::load_ed(&dir)), dir, pick: Mutex::new(serde_json::Value::Null), gtg: Mutex::new(serde_json::Value::Null),
-            stop: AtomicBool::new(false) });
+            stop: AtomicBool::new(false), restore_done: AtomicBool::new(false) });
         (e, rx, path)
     }
     /// Start the game-log watcher and the Spotify worker threads. The panel does not call this.

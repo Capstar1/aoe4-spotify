@@ -23,6 +23,14 @@ struct Token { access_token: String, refresh_token: String, expires_at: u64 }
 pub const API: &str = "https://api.spotify.com/v1";
 pub const ACCOUNTS: &str = "https://accounts.spotify.com";
 
+/// How a Windows-volume ramp ended. `last` is the last readback written, so a dead session
+/// can be put back only while the slider is still sitting on that write.
+enum Ramp {
+    Done,
+    Moved,
+    Failed { last: Option<f32> },
+}
+
 pub struct Spotify {
     cid: String,
     api_base: String,
@@ -259,33 +267,65 @@ impl Spotify {
         Some(sess)
     }
 
-    /// 60 fps dip or return on the Windows app volume. False: the listener moved the slider, or the session died.
-    fn ramp(sess: &crate::appvol::Session, orig: f32, secs: f32, down: bool) -> bool {
+fn near(a: f32, b: f32) -> bool { (a - b).abs() <= 0.02 }
+
+    /// Record the readback, not the commanded level, so a crash still matches `restore_after_crash`.
+    fn note_level(sess: &crate::appvol::Session, orig: f32, commanded: f32) -> f32 {
+        let back = sess.get().unwrap_or(commanded);
+        crate::appvol::guard(Some(orig), Some(back));
+        back
+    }
+
+    /// Put `orig` back when the live level is still our last write. Leave the guard file if that write does not land.
+    fn recover(sess: &crate::appvol::Session, orig: f32, last: Option<f32>) {
+        let Some(prev) = last else { return };
+        match sess.get() {
+            Some(cur) if Self::near(cur, prev) => {
+                if !sess.set(orig) { return; }
+                match sess.get() {
+                    Some(back) if Self::near(back, orig) => crate::appvol::guard(None, None),
+                    Some(back) => crate::appvol::guard(Some(orig), Some(back)),
+                    None => crate::appvol::guard(Some(orig), Some(orig)),
+                }
+            }
+            Some(_) => crate::appvol::guard(None, None),
+            None => {}
+        }
+    }
+
+    /// Fade back to `orig`. A listener move keeps their level. A dead session is restored in place.
+    fn settle(sess: &crate::appvol::Session, orig: f32, secs: f32) {
+        match Self::ramp(sess, orig, secs, false) {
+            Ramp::Done | Ramp::Moved => crate::appvol::guard(None, None),
+            Ramp::Failed { last } => Self::recover(sess, orig, last),
+        }
+    }
+
+    /// 60 fps dip or return on the Windows app volume.
+    fn ramp(sess: &crate::appvol::Session, orig: f32, secs: f32, down: bool) -> Ramp {
         let level = |t: f32| (orig * crate::appvol::fade_gain(if down { t } else { 1.0 - t })).clamp(0.0, 1.0);
         if secs <= 0.05 {
             let v = level(1.0);
-            return sess.set(v).then(|| { crate::appvol::guard(Some(orig), Some(v)); }).is_some();
+            if !sess.set(v) { return Ramp::Failed { last: None }; }
+            Self::note_level(sess, orig, v);
+            return Ramp::Done;
         }
         let t0 = Instant::now();
         let frame = Duration::from_secs_f64(1.0 / 60.0);
         let mut last: Option<f32> = None;
-        let mut wrote = t0 - Duration::from_secs(1);
         loop {
             if let Some(prev) = last {
                 match sess.get() {
-                    Some(cur) if (cur - prev).abs() <= 0.02 => {}
-                    _ => return false,
+                    Some(cur) if Self::near(cur, prev) => {}
+                    Some(_) => return Ramp::Moved,
+                    None => return Ramp::Failed { last: Some(prev) },
                 }
             }
             let t = (t0.elapsed().as_secs_f32() / secs).min(1.0);
             let v = level(t);
-            if !sess.set(v) { return false; }
-            last = Some(sess.get().unwrap_or(v));
-            if t >= 1.0 || wrote.elapsed() >= Duration::from_millis(200) {
-                crate::appvol::guard(Some(orig), Some(v));
-                wrote = Instant::now();
-            }
-            if t >= 1.0 { return true; }
+            if !sess.set(v) { return Ramp::Failed { last }; }
+            last = Some(Self::note_level(sess, orig, v));
+            if t >= 1.0 { return Ramp::Done; }
             let step = (t0.elapsed().as_secs_f64() / frame.as_secs_f64()).floor() as u32 + 1;
             let wake = t0 + frame * step;
             let now = Instant::now();
@@ -372,19 +412,31 @@ impl Spotify {
         let old = st["item"]["uri"].as_str().map(|s| s.to_string());
         if playing && fade_s > 0.05 {
             if let Some(sess) = self.local_session(st) {
-                let orig = sess.get().unwrap_or(1.0);
-                crate::appvol::note(&format!("Fade: Windows app volume, {half:.1}s each way"));
-                if Self::ramp(&sess, orig, half, true) {
-                    let body = self.payload(uri)?;
-                    let r = self.put_play(dev, body);
-                    self.wait_started(old.as_deref());
-                    let _ = Self::ramp(&sess, orig, half, false);
-                    crate::appvol::guard(None, None);
-                    return r;
+                if let Some(orig) = sess.get() {
+                    crate::appvol::note(&format!("Fade: Windows app volume, {half:.1}s each way"));
+                    match Self::ramp(&sess, orig, half, true) {
+                        Ramp::Done => {
+                            let body = match self.payload(uri) {
+                                Ok(b) => b,
+                                Err(e) => { Self::settle(&sess, orig, half); return Err(e); }
+                            };
+                            let r = self.put_play(dev, body);
+                            self.wait_started(old.as_deref());
+                            Self::settle(&sess, orig, half);
+                            return r;
+                        }
+                        Ramp::Moved => {
+                            crate::appvol::guard(None, None);
+                            let body = self.payload(uri)?;
+                            return self.put_play(dev, body);
+                        }
+                        Ramp::Failed { last } => {
+                            Self::recover(&sess, orig, last);
+                            let body = self.payload(uri)?;
+                            return self.put_play(dev, body);
+                        }
+                    }
                 }
-                crate::appvol::guard(None, None);
-                let body = self.payload(uri)?;
-                return self.put_play(dev, body);
             }
         }
         if playing { self.fade(cur, low, half) } else { self.set_volume(low) }
@@ -421,13 +473,25 @@ impl Spotify {
         let playing = st["is_playing"].as_bool() == Some(true);
         if playing && fade_s > 0.05 {
             if let Some(sess) = self.local_session(&st) {
-                let orig = sess.get().unwrap_or(1.0);
-                crate::appvol::note(&format!("Fade: Windows app volume, {fade_s:.1}s out"));
-                let owned = Self::ramp(&sess, orig, fade_s, true);
-                let _ = self.api("PUT", &format!("/me/player/pause?device_id={dev}"), None);
-                if owned { let _ = sess.set(orig); }
-                crate::appvol::guard(None, None);
-                return Ok(());
+                if let Some(orig) = sess.get() {
+                    crate::appvol::note(&format!("Fade: Windows app volume, {fade_s:.1}s out"));
+                    let end = Self::ramp(&sess, orig, fade_s, true);
+                    let _ = self.api("PUT", &format!("/me/player/pause?device_id={dev}"), None);
+                    match end {
+                        Ramp::Done => {
+                            if sess.set(orig) {
+                                match sess.get() {
+                                    Some(back) if Self::near(back, orig) => crate::appvol::guard(None, None),
+                                    Some(back) => crate::appvol::guard(Some(orig), Some(back)),
+                                    None => crate::appvol::guard(Some(orig), Some(orig)),
+                                }
+                            }
+                        }
+                        Ramp::Moved => crate::appvol::guard(None, None),
+                        Ramp::Failed { last } => Self::recover(&sess, orig, last),
+                    }
+                    return Ok(());
+                }
             }
         }
         if playing { self.fade(cur, vol / 5, fade_s); }
@@ -446,17 +510,32 @@ impl Spotify {
         let old = st["item"]["uri"].as_str().map(|s| s.to_string());
         if st["is_playing"].as_bool() == Some(true) && fade_s > 0.05 {
             if let Some(sess) = self.local_session(&st) {
-                let orig = sess.get().unwrap_or(1.0);
-                crate::appvol::note(&format!("Fade: Windows app volume, {half:.1}s each way"));
-                if Self::ramp(&sess, orig, half, true) {
-                    let msg = self.restore_body(&dev, &prev)?;
-                    if prev["is_playing"].as_bool() == Some(true) { self.wait_started(old.as_deref()); }
-                    let _ = Self::ramp(&sess, orig, half, false);
-                    crate::appvol::guard(None, None);
-                    return Ok(msg);
+                if let Some(orig) = sess.get() {
+                    crate::appvol::note(&format!("Fade: Windows app volume, {half:.1}s each way"));
+                    match Self::ramp(&sess, orig, half, true) {
+                        Ramp::Done => match self.restore_body(&dev, &prev) {
+                            Ok(msg) => {
+                                if prev["is_playing"].as_bool() == Some(true) { self.wait_started(old.as_deref()); }
+                                Self::settle(&sess, orig, half);
+                                return Ok(msg);
+                            }
+                            Err(e) => {
+                                self.saved = Some(prev);
+                                self.saved_volume = Some(vol);
+                                Self::settle(&sess, orig, half);
+                                return Err(e);
+                            }
+                        },
+                        Ramp::Moved => {
+                            crate::appvol::guard(None, None);
+                            return self.restore_or_keep(&dev, prev, vol);
+                        }
+                        Ramp::Failed { last } => {
+                            Self::recover(&sess, orig, last);
+                            return self.restore_or_keep(&dev, prev, vol);
+                        }
+                    }
                 }
-                crate::appvol::guard(None, None);
-                return self.restore_body(&dev, &prev);
             }
         }
         self.fade(cur, vol / 5, half);
@@ -464,6 +543,14 @@ impl Spotify {
         if prev["is_playing"].as_bool() == Some(true) && fade_s > 0.05 { self.wait_started(old.as_deref()); }
         self.fade(vol / 5, vol, half);
         Ok(msg)
+    }
+
+    /// Put the saved playback back if the restore request fails, so a later close can try again.
+    fn restore_or_keep(&mut self, dev: &str, prev: Value, vol: i64) -> Result<String, String> {
+        match self.restore_body(dev, &prev) {
+            Ok(msg) => Ok(msg),
+            Err(e) => { self.saved = Some(prev); self.saved_volume = Some(vol); Err(e) }
+        }
     }
 
     fn restore_body(&mut self, dev: &str, prev: &Value) -> Result<String, String> {

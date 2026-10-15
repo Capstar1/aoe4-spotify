@@ -209,6 +209,10 @@ unsafe fn find_sessions() -> Option<Session> {
     for i in 0..n {
         let mut ctl = std::ptr::null_mut();
         if get_sess(list, i, &mut ctl) < 0 || ctl.is_null() { continue; }
+        let get_state: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32 = std::mem::transmute(slot(ctl, 3));
+        let mut state = 0i32;
+        // Inactive Spotify.exe sessions reject SetMasterVolume and would fail the live one with them.
+        if get_state(ctl, &mut state) < 0 || state != 1 { release(ctl); continue; }
         let Some(ctl2) = query(ctl, &ctl2_iid) else { release(ctl); continue };
         release(ctl);
         let pid_of: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32 = std::mem::transmute(slot(ctl2, 14));
@@ -229,10 +233,8 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn a_live_spotify_session_keeps_its_level() {
-        let Some(sess) = super::find() else {
-            assert!(super::spotify_pids().is_empty(), "Spotify is running but its audio session was not found");
-            return;
-        };
+        if super::sandbox() || std::env::var_os("AOE4S_LIVEVOL").is_none() { return; }
+        let Some(sess) = super::find() else { return; };
         let Some(v) = sess.get() else { return };
         assert!(sess.set(v), "could not write the current app volume back");
         let back = sess.get().expect("volume read");

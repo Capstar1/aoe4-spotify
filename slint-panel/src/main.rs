@@ -69,6 +69,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // Steam / --attach: headless switcher, no Slint. The panel is a different process and never calls eng.start().
     #[cfg(windows)]
     if st.hidden && !test { bg::run(&dir, st.attach); return Ok(()); }
+    // The switcher owns the guard file for its whole life, including a fade still in progress.
+    #[cfg(windows)]
+    if !aoe4winsys::launcher::switcher_running() { aoe4core::appvol::restore_after_crash(); }
+    #[cfg(not(windows))]
     aoe4core::appvol::restore_after_crash();
     #[cfg(not(windows))]
     let _attach = st.attach;

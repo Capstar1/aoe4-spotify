@@ -44,8 +44,14 @@ pub fn run(dir: &Path, attach: bool) {
         s.in_match = false; s.age = None; s.playing = None;
     }
     aoe4core::userstore::clear_now(&eng.dir);
-    let _ = eng.tx.lock().unwrap().send(Action::Restore);
-    std::thread::sleep(Duration::from_secs(2));
+    eng.restore_done.store(false, Ordering::SeqCst);
+    if eng.tx.lock().unwrap().send(Action::Restore).is_ok() {
+        // 5 s each way, plus a switch already in flight, fits under this. A stuck call still lets the process exit.
+        let t0 = Instant::now();
+        while !eng.restore_done.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     launcher::music_sync(launcher::enabled_now());
     std::thread::sleep(Duration::from_secs(3));
     eng.status.lock().unwrap().in_match = false;
