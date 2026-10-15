@@ -61,7 +61,11 @@ pub fn load(install_cfg: &Path, user_cfg: &Path, names: &Path) -> Settings {
 }
 
 /// 1.1's own copies (imported once from 1.0.9 into %APPDATA%\AoE4Spotify-1.1).
-pub fn load_own(dir: &Path) -> Settings { load(&dir.join("base.json"), &dir.join("config.json"), &dir.join("playlist_names.json")) }
+pub fn load_own(dir: &Path) -> Settings {
+    let exe_cfg = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("config.json")));
+    let base = if dir.join("base.json").is_file() { dir.join("base.json") } else { exe_cfg.unwrap_or_else(|| dir.join("base.json")) };   // installer ships config.json next to the exe
+    load(&base, &dir.join("config.json"), &dir.join("playlist_names.json"))
+}
 
 /// The 1.0.x files on this PC (installed app + user data) - only used by the one-time import.
 pub fn load_installed() -> Settings {

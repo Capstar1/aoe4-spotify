@@ -31,19 +31,63 @@ fn load_ed(dir: &std::path::Path) -> serde_json::Value {
 /// One-time import of the 1.0.9 data (install config, settings, playlist names, intros/presets, cover cache) into
 /// 1.1's own folder; afterwards 1.1 reads only its own files. Writes import.json with the copied counts.
 fn import_109(dir: &std::path::Path) {
-    if dir.join("import.json").exists() { return; }
+    if !dir.join("import.json").exists() { let _ = migrate_109(dir, None, false); return; }
+    // the installer's cleanup can leave the 1.0.9 folder behind (its update log was still open): finish it once verified
     let ad = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify");
-    let inst = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join(r"Programs\AoE4 Spotify\_internal\config.json");
-    if !ad.join("config.json").exists() && !inst.exists() { return; }
+    let ok = std::fs::read_to_string(dir.join("import.json")).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).map_or(false, |v| v["ok"] == true && v["cleaned"] == true);
+    if ok && ad.exists() { let _ = std::fs::remove_dir_all(&ad); }
+}
+fn count_json(p: &std::path::Path, f: impl Fn(&serde_json::Value) -> usize) -> usize { std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).map(|v| f(&v)).unwrap_or(0) }
+fn cnt(v: &serde_json::Value) -> usize { v.as_array().map(|a| a.len()).or_else(|| v.as_object().map(|o| o.len())).unwrap_or(0) }
+/// 1.0.9 -> 1.1 import (installer runs `--migrate-109 [--cleanup]`, first run does the same without cleanup):
+/// settings, playlist names, intros + presets, cover cache, the Spotify login (refresh token, never logged) and the
+/// saved game-music level (1.0.9 kept it next to its exe). Copies only; verified by counts; with cleanup the 1.0.9
+/// data is deleted only after the copy verified. Returns Ok(summary) when verified.
+fn migrate_109(dir: &std::path::Path, inst109: Option<PathBuf>, cleanup: bool) -> Result<serde_json::Value, String> {
+    use serde_json::{json, Value};
+    let ad = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify");
+    let inst = inst109.unwrap_or_else(launcher::install_dir);
+    let base = [inst.join("config.json"), inst.join(r"_internal\config.json"), PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join(r"Programs\AoE4 Spotify\_internal\config.json")].into_iter().find(|p| p.is_file());
+    if !ad.join("config.json").exists() && base.is_none() { return Err("no 1.0.9 data".into()); }
     let _ = std::fs::create_dir_all(dir.join("covers"));
-    let cp = |a: &std::path::Path, b: &str| if a.exists() && !dir.join(b).exists() { std::fs::copy(a, dir.join(b)).is_ok() } else { dir.join(b).exists() };
-    let (b1, b2, b3) = (cp(&inst, "base.json"), cp(&ad.join("config.json"), "config.json"), cp(&ad.join("playlist_names.json"), "playlist_names.json"));
-    let mut n = 0; let mut src = 0;
+    let cp = |a: &std::path::Path, b: &str| if a.exists() && !dir.join(b).exists() { std::fs::copy(a, dir.join(b)).is_ok() } else { dir.join(b).exists() || !a.exists() };
+    let ok_base = base.as_ref().map_or(true, |b| cp(b, "base.json"));
+    let ok_cfg = cp(&ad.join("config.json"), "config.json"); let ok_names = cp(&ad.join("playlist_names.json"), "playlist_names.json");
+    let (mut n, mut src) = (0, 0);
     for e in std::fs::read_dir(ad.join("covers")).into_iter().flatten().flatten() { if e.path().is_file() { src += 1; let t = dir.join("covers").join(e.file_name()); if t.exists() || std::fs::copy(e.path(), &t).is_ok() { n += 1; } } }
     if !dir.join("intros.json").exists() { let v = load_ed(dir); let _ = std::fs::write(dir.join("intros.json"), serde_json::to_string_pretty(&v).unwrap_or_default()); }
-    let mut pr: serde_json::Value = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::json!({}));
-    pr["real_playback"] = serde_json::json!(true); let _ = std::fs::write(dir.join("settings.json"), pr.to_string());   // 1.1 replaces 1.0.9: real playback on
-    let _ = std::fs::write(dir.join("import.json"), serde_json::json!({ "from": "1.0.9", "base": b1, "config": b2, "playlist_names": b3, "covers": n, "covers_src": src, "at": now() }).to_string());
+    // Spotify login: 1.0.9 token.json {access_token, refresh_token, expires_at: float, ...} -> 1.1 {access_token, refresh_token, expires_at: u64=0 (refresh on first use)}
+    let tok_src: Option<Value> = std::fs::read_to_string(ad.join("token.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
+    let rt = tok_src.as_ref().and_then(|t| t["refresh_token"].as_str()).filter(|s| !s.is_empty()).map(String::from);
+    let ok_tok = match &rt { None => true, Some(r) => {
+        if !dir.join("token.json").exists() { let t = json!({ "access_token": "", "refresh_token": r, "expires_at": 0 }); let tmp = dir.join("token.tmp");
+            if std::fs::write(&tmp, t.to_string()).is_ok() { let _ = std::fs::rename(&tmp, dir.join("token.json")); } }
+        std::fs::read_to_string(dir.join("token.json")).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).map_or(false, |t| t["refresh_token"].as_str().map_or(false, |x| !x.is_empty())) } };
+    // saved game-music level (only when 1.0.9 muted the music)
+    let gm = inst.join("game_music.json"); let ok_music = if gm.is_file() && !dir.join("game_music.json").exists() { std::fs::copy(&gm, dir.join("game_music.json")).is_ok() } else { true };
+    let mut pr: Value = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+    if pr.get("real_playback").is_none() { pr["real_playback"] = json!(true); let _ = std::fs::write(dir.join("settings.json"), pr.to_string()); }   // 1.1 replaces 1.0.9: real playback on
+    // verify: counts in the copies match the originals
+    let k = |p: &std::path::Path, key: &str| count_json(p, |v| cnt(&v[key]));
+    let src_cfg = ad.join("config.json");
+    let checks = json!({
+        "custom_songs": [k(&src_cfg, "custom_songs"), k(&dir.join("intros.json"), "custom_songs")],
+        "intro_presets": [k(&src_cfg, "intro_presets"), k(&dir.join("intros.json"), "intro_presets")],
+        "intro_pools": [k(&src_cfg, "intro_pools"), k(&dir.join("intros.json"), "intro_pools")],
+        "playlists": [k(&src_cfg, "playlists"), k(&dir.join("config.json"), "playlists")],
+        "covers": [src, n] });
+    let counts_ok = checks.as_object().unwrap().values().all(|v| v[0] == v[1]);
+    let ok = ok_base && ok_cfg && ok_names && ok_tok && ok_music && counts_ok;
+    let sum = json!({ "from": "1.0.9", "ok": ok, "base": ok_base, "config": ok_cfg, "playlist_names": ok_names, "token": rt.is_some() && ok_tok, "music_level": gm.is_file(), "counts": checks, "at": now() });
+    let _ = std::fs::write(dir.join("import.json"), sum.to_string());
+    if !ok { launcher::log("1.0.9 import NOT verified - 1.0.9 data kept"); return Err(sum.to_string()); }
+    launcher::log("1.0.9 settings, intros, presets, covers and login imported (verified)");
+    if cleanup {
+        let _ = std::fs::remove_dir_all(&ad); let _ = std::fs::remove_file(&gm);
+        let mut s2 = sum.clone(); s2["cleaned"] = serde_json::json!(true); let _ = std::fs::write(dir.join("import.json"), s2.to_string());
+        launcher::log(if ad.exists() { "1.0.9 data removed after the verified import (an open log file goes on next start)" } else { "1.0.9 data removed after the verified import" });
+    }
+    Ok(sum)
 }
 fn with_ed(s: &Settings, ed: &serde_json::Value) -> Settings {
     let mut s = s.clone(); s.user_pools = ed["intro_pools"].clone(); s.custom_songs = ed["custom_songs"].clone();
@@ -384,6 +428,10 @@ fn menu(app: tauri::State<Arc<AppState>>, kind: String) -> String {
                    let _ = std::fs::write(&p, app.status.lock().unwrap().log.join("\r\n")); open_path(&p.display().to_string()); String::new() }
         "replays" => { let v = !app.replays.load(Ordering::SeqCst); app.replays.store(v, Ordering::SeqCst); save_prefs(&app); String::new() }
         "uninstall" => {   // installed copy: hand over to "<exe> --uninstall" (asks, then removes everything) and close the panel
+            let unins = launcher::install_dir().join("unins000.exe");
+            if unins.is_file() && std::env::var_os("AOE4S_DRYOPEN").is_none() {   // installer build: its uninstaller asks and does everything (like 1.0.9)
+                let _ = std::process::Command::new(&unins).spawn(); return String::new();
+            }
             if launcher::installed() && std::env::var_os("AOE4S_DRYOPEN").is_none() {
                 if let Ok(exe) = std::env::current_exe() { let _ = std::process::Command::new(exe).arg("--uninstall").spawn(); std::thread::spawn(|| { std::thread::sleep(Duration::from_millis(300)); std::process::exit(0) }); }
                 return String::new();
@@ -427,12 +475,14 @@ fn set_real(app: tauri::State<Arc<AppState>>, on: bool) {
 
 fn main() {
     let dir = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify-1.1");
-    import_109(&dir);
+    if std::env::args().nth(1).as_deref() != Some("--migrate-109") { import_109(&dir); }
     let settings = settings::load_own(&dir);
     // 1.0.9 start-up modes: Steam launch (%command%), --set/--remove-launch-option, panel (one instance)
     let mut hidden = false;
     match launcher::mode(settings.enabled) {
         launcher::Mode::Done => return,
+        launcher::Mode::Migrate(inst, cleanup) => { std::process::exit(if migrate_109(&dir, inst, cleanup).is_ok() { 0 } else { 2 }); }
+        launcher::Mode::Attach => { if !launcher::aoe_running() || !settings.enabled || !launcher::single_instance() { return; } hidden = true; }
         launcher::Mode::Game(args) => {
             if !launcher::start_game(&args, settings.enabled) { return; }
             hidden = true;     // the switcher runs with its window hidden; opening the panel shows it

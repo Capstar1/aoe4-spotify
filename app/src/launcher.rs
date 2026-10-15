@@ -77,11 +77,11 @@ pub fn music_sync(enabled: bool) -> bool {
 
 // ---- uninstall (1.0.9 setup.iss: "Removes the app, its shortcuts and settings, and puts the game's launch options and music volume back.")
 fn arp_key() -> String { test_env("AOE4S_ARP").unwrap_or_else(|| r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\AoE4Spotify11".into()) }
-pub fn installed() -> bool { install_dir().file_name().map_or(false, |n| n.to_string_lossy().eq_ignore_ascii_case("AoE4 Spotify 1.1")) || test_env("AOE4S_INSTALLED").is_some() }
+pub fn installed() -> bool { install_dir().join("unins000.exe").is_file() || install_dir().file_name().map_or(false, |n| n.to_string_lossy().eq_ignore_ascii_case("AoE4 Spotify 1.1")) || test_env("AOE4S_INSTALLED").is_some() }
 /// Apps & features entry for the installed copy (idempotent).
 pub fn register_uninstall() {
     use std::os::windows::process::CommandExt;
-    if !installed() { return; } let exe = install_dir().join("AoE4 Spotify.exe"); let k = arp_key();
+    if !installed() || install_dir().join("unins000.exe").is_file() { return; } let exe = install_dir().join("AoE4 Spotify.exe"); let k = arp_key();
     for (n, t, v) in [("DisplayName", "REG_SZ", "AoE4 Spotify".to_string()), ("DisplayVersion", "REG_SZ", env!("CARGO_PKG_VERSION").to_string()), ("Publisher", "REG_SZ", "Capstar1".into()),
         ("DisplayIcon", "REG_SZ", install_dir().join("app.ico").display().to_string()), ("InstallLocation", "REG_SZ", install_dir().display().to_string()),
         ("UninstallString", "REG_SZ", format!("\"{}\" --uninstall", exe.display())), ("NoModify", "REG_DWORD", "1".into()), ("NoRepair", "REG_DWORD", "1".into())] {
@@ -117,7 +117,7 @@ pub fn single_instance() -> bool {
 pub fn wait_single_instance(secs: u64) -> bool { let t0 = Instant::now(); while !single_instance() { if t0.elapsed().as_secs() > secs { return false; } std::thread::sleep(Duration::from_secs(1)); } true }
 
 /// What main() should do with the command line.
-pub enum Mode { Panel, Game(Vec<String>), Done }
+pub enum Mode { Panel, Game(Vec<String>), Done, Attach, Migrate(Option<PathBuf>, bool) }
 pub fn mode(enabled: bool) -> Mode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
@@ -125,7 +125,10 @@ pub fn mode(enabled: bool) -> Mode {
         Some("--set-launch-option") => { with_steam_closed(set_launch_option); music_sync(enabled); Mode::Done }
         Some("--uninstall") => { uninstall(args.iter().any(|a| a == "--yes")); Mode::Done }
         Some("--remove-launch-option") => { remove_launch_option(); music_sync(false); Mode::Done }
-        Some(a) if a.starts_with("--") => Mode::Panel,
+        Some("--attach") => Mode::Attach,                  // setup ran while the game runs: follow that game (hidden), else exit
+        Some("--migrate-109") => Mode::Migrate(args.iter().skip(1).find(|a| !a.starts_with("--")).map(PathBuf::from), args.iter().any(|a| a == "--cleanup")),
+        Some("--updated") => Mode::Panel,
+        Some(a) if a.starts_with("--") => Mode::Done,
         _ => Mode::Game(args),
     }
 }

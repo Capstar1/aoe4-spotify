@@ -1,0 +1,142 @@
+{
+  "client_id": "025bc354ba624ce4ba0b98a5b74f8539",
+  "playlists": {
+    "dark": "spotify:playlist:3suhOyH8k2za0LbWbwJdaM",
+    "feudal": "spotify:playlist:5nKpTJWyJbiLHsu5eaRvG9",
+    "castle": "spotify:playlist:6W8iwAy9LVOiZHc95F0N0J",
+    "imperial": "spotify:playlist:3IofYhHHJJ10WyvSFnXDjb"
+  },
+  "device_id": "",
+  "log_path": "",
+  "fade_seconds": 2,
+  "shuffle": true,
+  "repeat": true,
+  "boss_intro": {
+    "enabled": true,
+    "ages": [
+      "imperial"
+    ],
+    "pools": {
+      "french": [
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+        "spotify:track:0JhmuCu4N8XT9nRVFsngS9"
+      ],
+      "hre": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+      ],
+      "templar": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+      ],
+      "french_ha_01": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY"
+      ],
+      "abbasid": [
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
+      ],
+      "abbasid_ha_01": [
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
+      ],
+      "byzantine": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY"
+      ],
+      "malian": [
+        "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+      ],
+      "sultanate": [
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:0JhmuCu4N8XT9nRVFsngS9"
+      ],
+      "ottoman": [
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
+      ],
+      "english": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K"
+      ],
+      "hre_ha_01": [
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K"
+      ],
+      "lancaster": [
+        "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp"
+      ],
+      "mongol": [
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+      ],
+      "mongol_ha_gol": [
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+      ],
+      "rus": [
+        "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+      ],
+      "chinese_ha_01": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+      ],
+      "chinese": [
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
+      ],
+      "japanese": [
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B",
+        "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+      ],
+      "jin_dynasty": [
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+        "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
+      ],
+      "japanese_ha_sen": [
+        "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
+        "spotify:track:3LxsqAQ0rXaLEHonDax63B"
+      ],
+      "sultanate_ha_tug": [
+        "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+        "spotify:track:0JhmuCu4N8XT9nRVFsngS9"
+      ],
+      "byzantine_ha_mac": [
+        "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+        "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+        "spotify:track:0JhmuCu4N8XT9nRVFsngS9"
+      ]
+    },
+    "default": [
+      "spotify:track:5sEHThQpQWTZZVIbmFIx4k",
+      "spotify:track:0iBkJlkxLIZvw64YMJEhpY",
+      "spotify:track:4RmbTKOJGdfKVEnwTUAobp",
+      "spotify:track:6bZVraEtKL5lQ7TtUrhX8K",
+      "spotify:track:6hdfIg76lNerf0bLt7ppAo",
+      "spotify:track:0JhmuCu4N8XT9nRVFsngS9",
+      "spotify:track:3LxsqAQ0rXaLEHonDax63B",
+      "spotify:track:5X8te47Qx2kIeAqAicMrgC"
+    ]
+  },
+  "default_playlists": {
+    "dark": "spotify:playlist:3suhOyH8k2za0LbWbwJdaM",
+    "feudal": "spotify:playlist:5nKpTJWyJbiLHsu5eaRvG9",
+    "castle": "spotify:playlist:6W8iwAy9LVOiZHc95F0N0J",
+    "imperial": "spotify:playlist:3IofYhHHJJ10WyvSFnXDjb"
+  },
+  "enabled": true
+}
