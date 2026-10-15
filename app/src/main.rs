@@ -48,7 +48,9 @@ fn migrate_109(dir: &std::path::Path, inst109: Option<PathBuf>, cleanup: bool) -
     let ad = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify");
     let inst = inst109.unwrap_or_else(launcher::install_dir);
     let base = [inst.join("config.json"), inst.join(r"_internal\config.json"), PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join(r"Programs\AoE4 Spotify\_internal\config.json")].into_iter().find(|p| p.is_file());
-    if !ad.join("config.json").exists() && base.is_none() { return Err("no 1.0.9 data".into()); }
+    // Nothing of 1.0.9's user data left (fresh install, or already imported and cleaned): quietly do nothing -
+    // no "NOT verified" log line and import.json is left untouched.
+    if !ad.join("config.json").exists() && !ad.join("token.json").exists() && !inst.join("game_music.json").is_file() { return Err("no 1.0.9 data".into()); }
     let _ = std::fs::create_dir_all(dir.join("covers"));
     let cp = |a: &std::path::Path, b: &str| if a.exists() && !dir.join(b).exists() { std::fs::copy(a, dir.join(b)).is_ok() } else { dir.join(b).exists() || !a.exists() };
     let ok_base = base.as_ref().map_or(true, |b| cp(b, "base.json"));
