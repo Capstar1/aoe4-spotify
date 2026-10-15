@@ -27,7 +27,7 @@ impl Rep {
     fn note(&mut self, t: &str) { let _ = writeln!(self.f, "INFO {t}"); let _ = self.f.flush(); }
 }
 
-#[repr(C)] #[derive(Default)] struct R { l: i32, t: i32, r: i32, b: i32 }
+use crate::geom::Rect as R;
 #[link(name = "dwmapi")] extern "system" { fn DwmGetWindowAttribute(h: isize, a: u32, v: *mut std::ffi::c_void, n: u32) -> i32; }
 #[link(name = "user32")] extern "system" { fn GetWindowLongW(h: isize, i: i32) -> i32; fn GetWindowRect(h: isize, r: *mut R) -> i32; fn GetClientRect(h: isize, r: *mut R) -> i32; fn IsWindowVisible(h: isize) -> i32; }
 

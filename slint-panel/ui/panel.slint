@@ -118,6 +118,8 @@ export component Panel inherits Window {
     property <length> ch: main ? client-h : intros-h;
     out property <length> intros-page-h: intros-h;   // the intros pages' client height (backend: scroll range, drop rows)
 
+    out property <length> win-w: PW + 2px;          // window size (backend: centring, page-switch regrow)
+    out property <length> win-h: ch + 30px + 2px;
     title: "AoE4 Spotify";
     no-frame: true;
     default-font-family: "Segoe UI";

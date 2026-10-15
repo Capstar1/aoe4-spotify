@@ -96,7 +96,7 @@ pub fn init(ui: &Panel, eng: Arc<Engine>, shell: Arc<dyn Shell>) {
 
 fn ui_of() -> Option<Panel> { with(|e| e.ui.upgrade()).flatten() }
 pub fn page() -> String { ui_of().map(|u| u.global::<IntroUi>().get_page().to_string()).unwrap_or_default() }
-pub fn set_page(p: &str) { if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); crate::tips_hide(&ui); g.set_pmenu(false); g.set_ctx_open(false); g.set_page(p.into()); } refresh(); }
+pub fn set_page(p: &str) { if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); crate::tips_hide(&ui); g.set_pmenu(false); g.set_ctx_open(false); g.set_page(p.into()); crate::geom::regrow_panel(&ui); } refresh(); }
 fn close_dialog() { if let Some(ui) = ui_of() { ui.global::<IntroUi>().set_dialog("".into()); ui.invoke_refocus(); } }
 fn toast(m: &str) { with(|e| e.toast_t = Some(Instant::now())); if let Some(ui) = ui_of() { ui.global::<IntroUi>().set_toast(m.into()); } }
 fn hint(m: &str, x: f32, y: f32) { with(|e| e.hint_t = Some(Instant::now())); if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); g.set_hint(m.into()); g.set_hint_x(x); g.set_hint_y(y); } }

@@ -18,6 +18,7 @@ mod pick;
 mod dnd;
 mod netimg;
 mod paths;
+mod geom;
 use aoe4engine::{guides::{Shell, Win}, menu, updater, Engine};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
 use std::cell::RefCell;
@@ -49,7 +50,7 @@ mod windows {
             match w { Win::Gtg => return crate::gtg::open(&e, &s), Win::Add => return crate::add::open(&e), Win::Pick => return crate::pick::open(&e),
                 Win::Access => return crate::access::open_access(&e, &s), Win::Own => return crate::access::open_own(&e, &s), Win::Panel => {} }
         }
-        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); crate::first_show(&u); })
+        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { if !PANEL_SHOWN.with(|v| v.get()) && !crate::FIRST.with(|d| d.get()) { crate::geom::centre_panel(&u); } let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); crate::first_show(&u); })
     }
     pub fn close(w: Win) { match w { Win::Gtg => crate::gtg::close(), Win::Add => crate::add::close(), Win::Pick => crate::pick::close(), Win::Access => crate::access::close_access(), Win::Own => crate::access::close_own(), Win::Panel => {} } }
 }
@@ -206,10 +207,10 @@ fn shot(ui: &Panel, path: String) {
         let _ = slint::quit_event_loop();
     });
 }
+thread_local! { static FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// Once the panel has a native window: DWM rounded corners, text drops (age page).
 fn first_show(ui: &Panel) {
-    thread_local! { static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-    if DONE.with(|d| d.replace(true)) { return; }
+    if FIRST.with(|d| d.replace(true)) { return; }
     #[cfg(windows)] round_corners(ui);
     dnd::register(ui, dnd::Target::Panel);
 }
