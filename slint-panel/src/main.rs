@@ -1,18 +1,39 @@
 #![windows_subsystem = "windows"]
 #![deny(warnings)]
-//! Slint prototype of the 1.1 main panel: the view is ui/*.slint, this file only feeds it data (backend.rs, read-only)
-//! and runs the fire animation (fire.rs). Settings are saved through aoe4core::userstore (same files as Tauri 1.1).
-//! `--fire <row>` starts with the fire on that row (as when that age's music plays in a match).
-mod backend;
+//! AoE4 Spotify, Slint front end. The views are ui/*.slint (pure: data in, callbacks out); all behaviour lives in
+//! the aoe4engine crate (the Tauri 1.1 logic without a toolkit). This file only connects the two: it pushes engine
+//! state into the views when it changes (checked every 250 ms, like the Tauri notifier) and turns callbacks into
+//! engine calls. `fire.rs` animates the 1.0.9 glow-pool fire on the age row that is playing.
+//! Test switches: AOE4S_SHOT=<png> (render once and quit), AOE4S_NOWATCH (no game-log watcher), `--fire <row>`.
 mod fire;
-use slint::{Model, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+mod view;
+use aoe4engine::{guides::{Shell, Win}, menu, updater, Engine};
+use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 slint::include_modules!();
 
 fn img(rgba: &[u8], w: usize, h: usize) -> Image { Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(rgba, w as u32, h as u32)) }
-fn load_img(p: Option<std::path::PathBuf>) -> (Image, bool) { match p.and_then(|p| Image::load_from_path(&p).ok()) { Some(i) => (i, true), None => (Image::default(), false) } }
+
+/// Windows the engine asks for (good to go, guides, picker...): handed to the UI thread.
+struct UiShell;
+impl Shell for UiShell {
+    fn show(&self, w: Win) { let _ = slint::invoke_from_event_loop(move || windows::show(w)); }
+    fn close(&self, w: Win) { let _ = slint::invoke_from_event_loop(move || windows::close(w)); }
+}
+mod windows {
+    use aoe4engine::guides::Win;
+    /// Small windows: added in later steps; until then the request is logged.
+    pub fn show(w: Win) { aoe4engine::sys::log(&format!("window {w:?} requested")); }
+    pub fn close(_w: Win) {}
+}
+
+/// Transient pill message (Checking..., Up to date) and when the "Updated to" pill appeared.
+#[derive(Default)]
+struct PillMsg { msg: Option<(String, bool, Option<Instant>)>, done_t0: Option<Instant> }
 
 fn main() -> Result<(), slint::PlatformError> {
     slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into())
@@ -21,50 +42,103 @@ fn main() -> Result<(), slint::PlatformError> {
             #[cfg(not(windows))] { a }
         })
         .select()?;
+    let dir = aoe4core::userstore::data_dir();
+    let (eng, rx, log_path) = Engine::new(dir.clone());
+    if std::env::var_os("AOE4S_NOWATCH").is_none() && std::env::var_os("AOE4S_SHOT").is_none() { eng.start(rx, log_path); updater::check_at_start(eng.clone()); }
+    let shell: Arc<dyn Shell> = Arc::new(UiShell);
     let ui = Panel::new()?;
-    fill(&ui, &backend::load());
-    // fire: 366 x 42 row (1.1 X-6 .. XR+6), scale 1 (96 DPI); glow drawn once
+    let pillm = Rc::new(RefCell::new(PillMsg::default()));
+    let forced_fire: Option<i32> = { let a: Vec<String> = std::env::args().collect(); a.iter().position(|x| x == "--fire").map(|i| a.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(1)) };
+
+    // ---- fire: 366 x 42 row (1.1 X-6 .. XR+6); glow drawn once, frames every 34 ms while a row plays
     let scale = ui.window().scale_factor();
     let (rw, rh) = ((366.0 * scale).round() as usize, (42.0 * scale).round() as usize);
     let (g, gw, gh) = fire::glow(rw, rh, 9.0 * scale, scale); ui.set_glow(img(&g, gw, gh));
     let fire = Rc::new(RefCell::new(fire::Fire::new(rw, rh, scale)));
-    let timer = Rc::new(slint::Timer::default());
-    let run = { let (w, f, t) = (ui.as_weak(), fire.clone(), timer.clone()); move |row: i32| {
-        let Some(u) = w.upgrade() else { return }; u.set_playing(row);
+    let fire_timer = Rc::new(slint::Timer::default());
+    let set_fire = { let (w, f, t) = (ui.as_weak(), fire.clone(), fire_timer.clone()); move |row: i32| {
+        let Some(u) = w.upgrade() else { return }; if u.get_playing() == row && (row < 0 || t.running()) { return; }
+        u.set_playing(row);
         if row < 0 { t.stop(); return; }
         let (w2, f2) = (w.clone(), f.clone());
-        t.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(34), move || {
+        t.start(slint::TimerMode::Repeated, Duration::from_millis(34), move || {
             let Some(u) = w2.upgrade() else { return }; let mut f = f2.borrow_mut(); let px = f.tick(); u.set_fire(img(&px, f.gw, f.gh)); });
     } };
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(i) = args.iter().position(|a| a == "--fire") { run(args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(1).min(ui.get_ages().row_count() as i32 - 1)); }
 
-    // actions: save like the Tauri 1.1 panel (same files, keys and allow-list), then refresh the view from disk
+    // ---- state -> view (250 ms change check, like the Tauri notifier; transient pill expiry)
+    let refresh = { let (w, e, d, pm, sf) = (ui.as_weak(), eng.clone(), dir.clone(), pillm.clone(), set_fire.clone()); move |force: bool, last: &mut String| {
+        let Some(u) = w.upgrade() else { return };
+        let fp = format!("{}|{}", e.fingerprint(), aoe4engine::picker::COVERS_VER.load(std::sync::atomic::Ordering::SeqCst));
+        let mut pm = pm.borrow_mut();
+        if let Some((_, _, Some(t))) = &pm.msg { if t.elapsed() > Duration::from_secs(2) { pm.msg = None; } }
+        let s = e.state(None);
+        if force || fp != *last { *last = fp; view::fill(&u, &s, &d); sf(forced_fire.unwrap_or_else(|| view::playing_row(&s))); }
+        if s["upd"]["phase"] == "done" && pm.done_t0.is_none() { pm.done_t0 = Some(Instant::now()); }
+        let gone = pm.done_t0.is_some_and(|t| t.elapsed() > Duration::from_secs(6));
+        let (t, err, click, badge) = view::pill(&s["upd"], pm.msg.as_ref().map(|(m, e, _)| (m.as_str(), *e)), gone);
+        u.set_pill_text(t.into()); u.set_pill_err(err); u.set_pill_click(click); u.set_badge(badge);
+    } };
+    let last = Rc::new(RefCell::new(String::new()));
+    refresh(true, &mut last.borrow_mut());
+    let poll = slint::Timer::default();
+    { let (r, l) = (refresh.clone(), last.clone()); poll.start(slint::TimerMode::Repeated, Duration::from_millis(250), move || r(false, &mut l.borrow_mut())); }
+    let now = { let (r, l) = (refresh.clone(), last.clone()); move || r(true, &mut l.borrow_mut()) };
+
+    // ---- actions (same files, keys and rules as the Tauri 1.1 commands)
     let w = ui.as_weak();
-    let save = { let w = w.clone(); move |k: &str, v: serde_json::Value| { let d = backend::data_dir(); aoe4core::userstore::set_user(&d, k, v); if let Some(u) = w.upgrade() { fill(&u, &backend::load()); } } };
-    ui.on_toggle_enabled({ let save = save.clone(); let w = w.clone(); move || { let Some(u) = w.upgrade() else { return }; let on = !u.get_enabled();
-        save("enabled", serde_json::json!(on)); backend::music_sync(on); } });
-    ui.on_toggle_boss({ let save = save.clone(); let w = w.clone(); move || { if let Some(u) = w.upgrade() { save("boss_intro_enabled", serde_json::json!(!u.get_boss_on())); } } });
-    ui.on_set_fade({ let save = save.clone(); move |v| save("fade_seconds", serde_json::json!(((v * 10.0).round() / 10.0) as f64)) });
-    ui.on_revert_fade({ let save = save.clone(); move || save("fade_seconds", serde_json::Value::Null) });
-    ui.on_revert_playlist({ let save = save.clone(); move |i| { let d = backend::load(); if let Some(v) = d.playlists_without(i as usize) { save("playlists", v); } } });
-    ui.on_toggle_wl({ let save = save.clone(); move || { let d = backend::load(); save("after_match", d.after_with(|a| { let on = !a["winloss_on"].as_bool().unwrap_or(false); a["winloss_on"] = serde_json::json!(on); })); } });
-    ui.on_set_mode({ let save = save.clone(); move |m| { let d = backend::load(); save("after_match", d.after_with(|a| a["mode"] = serde_json::json!(m.as_str()))); } });
-    ui.on_login(|| backend::login());
-    if let Ok(p) = std::env::var("AOE4S_SHOT") { shot(&ui, p); }
-    ui.on_toggle_playlists({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { u.set_pl_open(!u.get_pl_open()); } } });
-    ui.on_toggle_am({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { u.set_am_open(!u.get_am_open()); } } });
-            ui.on_open_in_spotify({ let run = run.clone(); let w = w.clone(); move |i| { let cur = w.upgrade().map(|u| u.get_playing()).unwrap_or(-1); run(if cur == i { -1 } else { i }); } });
+    let save = { let (e, n) = (eng.clone(), now.clone()); move |k: &str, v: serde_json::Value| { aoe4engine::data::set_user(&e, k, v); n(); } };
+    let state = { let e = eng.clone(); move || e.state(None) };
+    ui.on_toggle_enabled({ let (e, n, w) = (eng.clone(), now.clone(), w.clone()); move || { let Some(u) = w.upgrade() else { return }; aoe4engine::data::set_enabled(&e, !u.get_enabled()); n(); } });
+    ui.on_toggle_boss({ let (s, w) = (save.clone(), w.clone()); move || { if let Some(u) = w.upgrade() { s("boss_intro_enabled", serde_json::json!(!u.get_boss_on())); } } });
+    ui.on_set_fade({ let s = save.clone(); move |v| s("fade_seconds", serde_json::json!(((v * 2.0).round() / 2.0) as f64)) });
+    ui.on_revert_fade({ let s = save.clone(); move || s("fade_seconds", serde_json::Value::Null) });
+    ui.on_revert_playlist({ let (s, st) = (save.clone(), state.clone()); move |i| {   // 1.1: your playlists without this age and without defaults
+        let x = st(); let set = &x["settings"]; let Some(k) = x["ages"][i as usize][0].as_str().map(String::from) else { return };
+        let up: serde_json::Map<String, serde_json::Value> = set["playlists"].as_object().cloned().unwrap_or_default().into_iter()
+            .filter(|(a, v)| *a != k && v.as_str().unwrap_or("") != set["default_playlists"][a].as_str().unwrap_or("")).collect();
+        s("playlists", serde_json::Value::Object(up)); } });
+    let am_set = { let (s, st) = (save.clone(), state.clone()); move |f: &dyn Fn(&mut serde_json::Value)| {
+        let x = st(); let mut a = if x["settings"]["after_match"].is_object() { x["settings"]["after_match"].clone() } else { serde_json::json!({}) }; f(&mut a); s("after_match", a); } };
+    ui.on_toggle_wl({ let (a, w) = (am_set.clone(), w.clone()); move || { let Some(u) = w.upgrade() else { return }; let wl = u.get_am_wl();
+        a(&|x| { x["winloss_on"] = serde_json::json!(!wl); if x["mode"] == "winloss" { x["mode"] = serde_json::json!("stop"); } }); } });
+    let pick = { let (e, sh) = (eng.clone(), shell.clone()); move |target: &str, title: &str, tracks: bool, current: &str| { aoe4engine::picker::open_pick(&e, target, title, tracks, current); sh.show(Win::Pick); } };
+    ui.on_set_mode({ let (a, st, p) = (am_set.clone(), state.clone(), pick.clone()); move |m| { let m = m.to_string(); a(&|x| x["mode"] = serde_json::json!(m.as_str()));
+        if m == "playlist" && view::am_cfg(&st()["settings"]).2.is_empty() { p("am:playlist", "After match playlist", false, ""); } } });
+    ui.on_pick({ let (st, p) = (state.clone(), pick.clone()); move |which| { let (_, _, pl, win, loss) = view::am_cfg(&st()["settings"]);
+        match which.as_str() { "win" => p("am:win", "Victory", true, &win), "loss" => p("am:loss", "Defeat", true, &loss), _ => p("am:playlist", "After match playlist", false, &pl) } } });
+    ui.on_change_playlist({ let (st, p) = (state.clone(), pick.clone()); move |i| { let x = st(); let (Some(k), Some(lab)) = (x["ages"][i as usize][0].as_str(), x["ages"][i as usize][1].as_str()) else { return };
+        p(&format!("age:{k}"), lab, false, x["settings"]["playlists"][k].as_str().unwrap_or("")); } });
+    ui.on_open_in_spotify({ let (e, st) = (eng.clone(), state.clone()); move |i| { let x = st(); let k = x["ages"][i as usize][0].as_str().unwrap_or("").to_string();
+        let uri = x["settings"]["playlists"][&k].as_str().unwrap_or(""); if !uri.starts_with("aoe4s:list:") { menu::menu(&e, &format!("pl:{}", uri.rsplit(':').next().unwrap_or(""))); } } });
+    ui.on_login({ let (e, sh) = (eng.clone(), shell.clone()); move || aoe4engine::guides::do_login(sh.clone(), e.clone()) });
+    ui.on_pill_clicked({ let (e, n) = (eng.clone(), now.clone()); move || { updater::start_update(e.clone()); n(); } });
+    ui.on_menu_action({ let (e, sh, pm, n) = (eng.clone(), shell.clone(), pillm.clone(), now.clone()); move |k| match k.as_str() {
+        "check" => { let ph = e.upd.lock().unwrap()["phase"].as_str().unwrap_or("").to_string(); if ph == "dl" || ph == "run" { return; }
+            pm.borrow_mut().msg = Some(("Checking\u{2026}".into(), false, None)); n();
+            let e2 = e.clone();
+            std::thread::spawn(move || { let r = updater::check_update(&e2); let _ = slint::invoke_from_event_loop(move || PILL_RESULT.with(|p| *p.borrow_mut() = Some(r))); }); }
+        "own" => sh.show(Win::Own),
+        other => { menu::menu(&e, other); n(); }
+    } });
+    ui.on_open_intros(|| windows::show(Win::Panel));
     ui.on_close_app({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { let _ = u.hide(); } let _ = slint::quit_event_loop(); } });
     ui.on_minimize({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { use slint::winit_030::WinitWindowAccessor; u.window().with_winit_window(|ww| ww.set_minimized(true)); } } });
     ui.on_drag({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { use slint::winit_030::WinitWindowAccessor; u.window().with_winit_window(|ww| { let _ = ww.drag_window(); }); } } });
-    // round the corners like 1.1 (Windows 11 DWM: 8 px round, 1 px #3a3a3a border drawn by the view)
+    ui.on_gear(|| {});
+    // "Check for updates" result -> pill (2 s), or the update pill itself when one was found
+    let pr = slint::Timer::default();
+    { let (pm, n) = (pillm.clone(), now.clone()); pr.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
+        if let Some(r) = PILL_RESULT.with(|p| p.borrow_mut().take()) {
+            pm.borrow_mut().msg = if r.starts_with('\u{2193}') { None } else { let err = r.starts_with("Couldn"); Some((r, err, Some(Instant::now()))) }; n(); } }); }
+
+    if let Ok(p) = std::env::var("AOE4S_SHOT") { shot(&ui, p); }
     ui.show()?;
     #[cfg(windows)] round_corners(&ui);
     slint::run_event_loop()?;
-    let _ = timer;
+    drop((poll, pr, fire_timer));
     Ok(())
 }
+thread_local! { static PILL_RESULT: RefCell<Option<String>> = const { RefCell::new(None) }; }
 
 #[cfg(windows)]
 fn round_corners(ui: &Panel) {
@@ -75,38 +149,16 @@ fn round_corners(ui: &Panel) {
         let pref: u32 = 2; unsafe { DwmSetWindowAttribute(h.hwnd.get(), 33, &pref, 4); } } } });
 }
 
-/// Push the saved state into the view (start-up and after every save: the files are the truth, as in 1.1).
-fn fill(ui: &Panel, d: &backend::Data) {
-    ui.set_enabled(d.set.enabled);
-    ui.set_logged_in(d.logged_in);
-    ui.set_fade(d.set.fade_seconds);
-    ui.set_default_fade(2.0);
-    ui.set_boss_on(d.set.boss_on);
-    let rows: Vec<AgeRow> = d.ages.iter().map(|(k, lab)| {
-        let uri = d.set.playlists.get(k).cloned().unwrap_or_default(); let (cover, has) = load_img(d.cover(&uri));
-        let name = { let n = d.name(&uri); if n.is_empty() { "Not set".to_string() } else { backend::trunc(&n, 15) } };
-        AgeRow { label: lab.replace(" Age", "").into(), name: name.into(), set: !uri.is_empty(), cover, has_cover: has, is_default: uri == d.set.default_playlists.get(k).cloned().unwrap_or_default() }
-    }).collect();
-    ui.set_ages(ModelRc::new(VecModel::from(rows)));
-    let lit = d.intro_lit();
-    ui.set_intros(ModelRc::new(VecModel::from(["I", "II", "III", "IV"].iter().zip(lit).map(|(r, l)| IntroAge { roman: (*r).into(), lit: l }).collect::<Vec<_>>())));
-    let (mode, wl, pl, win, loss) = d.after();
-    ui.set_am_mode(mode.into()); ui.set_am_wl(wl); ui.set_am_playlist_name(backend::trunc(&d.name(&pl), 10).into()); ui.set_am_header_name(backend::trunc(&d.name(&pl), 14).into());
-    let (c, h) = load_img(d.cover(&pl)); ui.set_am_playlist_cover(c); ui.set_am_playlist_has(h);
-    let (c, h) = load_img(d.cover(&win)); ui.set_win_cover(c); ui.set_win_has(h);
-    let (c, h) = load_img(d.cover(&loss)); ui.set_loss_cover(c); ui.set_loss_has(h);
-
-}
-
-/// AOE4S_SHOT=<file.png>: render once (software renderer snapshot), save, quit. For the side-by-side renders.
+/// AOE4S_SHOT=<file.png>: render once (software renderer snapshot), save, quit. AOE4S_SHOT_MENU=1 opens the cog menu first.
 fn shot(ui: &Panel, path: String) {
+    if std::env::var_os("AOE4S_SHOT_MENU").is_some() { ui.set_menu_open(true); }
     let w = ui.as_weak();
-    slint::Timer::single_shot(std::time::Duration::from_millis(900), move || {
+    slint::Timer::single_shot(Duration::from_millis(900), move || {
         if let Some(u) = w.upgrade() { if let Ok(b) = u.window().take_snapshot() { let _ = save_png(&path, b.as_bytes(), b.width(), b.height()); } }
         let _ = slint::quit_event_loop();
     });
 }
-fn save_png(path: &str, rgba: &[u8], w: u32, h: u32) -> Result<(), Box<dyn std::error::Error>> {
+pub fn save_png(path: &str, rgba: &[u8], w: u32, h: u32) -> Result<(), Box<dyn std::error::Error>> {
     let f = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut e = png::Encoder::new(f, w, h); e.set_color(png::ColorType::Rgba); e.set_depth(png::BitDepth::Eight);
     e.write_header()?.write_image_data(rgba)?; Ok(())

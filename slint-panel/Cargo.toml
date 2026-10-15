@@ -2,10 +2,11 @@
 name = "aoe4spotify-slint"
 version = "1.1.0"
 edition = "2021"
-description = "Slint prototype of the AoE4 Spotify main panel (no WebView2)"
+description = "AoE4 Spotify with a Slint UI (no WebView2): views in ui/*.slint, logic in aoe4engine"
 
 [dependencies]
 aoe4core = { path = "../crates/core" }
+aoe4engine = { path = "../crates/engine" }
 png = "0.17"
 serde_json = "1"
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "software-renderer-systemfonts", "unstable-winit-030"] }
