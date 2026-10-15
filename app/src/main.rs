@@ -2,8 +2,7 @@
 #![deny(warnings)]
 //! M1 shell: one fixed-size window; the core follows the game log. Playback is always real, as in 1.0.9 (no dry-run switch)
 //! so 1.1 never fights the 1.0.9 app over Spotify; the toggle is saved in %APPDATA%\AoE4Spotify-1.1.
-mod shadow;
-mod launcher;
+use aoe4winsys::{launcher, shadow};
 mod data;
 mod engine;
 mod picker;
@@ -298,4 +297,4 @@ fn main() {
         .invoke_handler(tauri::generate_handler![get_state, guides::login, logout, resize, cfg, cover, region, shadow, picker::preview, data::save_ed, data::encode_preset, data::decode_preset, picker::sp, picker::cache_covers, picker::open_add, dbg, menu, updater::check_update, guides::show_panel, data::set_user, data::set_enabled, updater::start_update, picker::open_pick, picker::pick_done, picker::pick_info, guides::gtg_info, guides::gtg_fix, picker::save_list, picker::delete_list, guides::access_info, guides::access_send, guides::access_check, guides::clip_text, guides::open_own, guides::own_info, guides::own_save, guides::own_shared])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
-}
+}

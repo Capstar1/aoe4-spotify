@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "app", "slint-panel"]
+members = ["crates/core", "crates/winsys", "app", "slint-panel"]
 resolver = "2"
 
 [profile.release]

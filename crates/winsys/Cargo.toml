@@ -1,0 +1,8 @@
+[package]
+name = "aoe4winsys"
+version = "1.1.0"
+edition = "2021"
+description = "Windows-only pieces shared by the AoE4 Spotify front ends: Steam launch option, game launch/follow, single instance, uninstall, game music sync, window shadow."
+
+[dependencies]
+serde_json = "1"
