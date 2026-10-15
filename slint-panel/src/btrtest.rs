@@ -27,8 +27,10 @@ impl Rep {
 
 #[repr(C)] #[derive(Default)] struct R { l: i32, t: i32, r: i32, b: i32 }
 #[link(name = "dwmapi")] extern "system" { fn DwmGetWindowAttribute(h: isize, a: u32, v: *mut std::ffi::c_void, n: u32) -> i32; }
-#[link(name = "user32")] extern "system" { fn GetWindowLongW(h: isize, i: i32) -> i32; fn GetWindowRect(h: isize, r: *mut R) -> i32; fn IsWindowVisible(h: isize) -> i32; }
+#[link(name = "user32")] extern "system" { fn GetWindowLongW(h: isize, i: i32) -> i32; fn GetWindowRect(h: isize, r: *mut R) -> i32; fn GetClientRect(h: isize, r: *mut R) -> i32; fn IsWindowVisible(h: isize) -> i32; }
 
+/// No non-client area: the client rect fills the whole window (winit keeps WS_CAPTION for snap / shadow but removes the frame).
+fn no_nc(h: isize) -> bool { unsafe { let (mut w, mut c) = (R::default(), R::default()); GetWindowRect(h, &mut w); GetClientRect(h, &mut c); w.r - w.l == c.r && w.b - w.t == c.b } }
 /// DWM state of a window: (corner preference, NC rendering on, style, ex style, window rect == visible frame).
 fn dwm(h: isize) -> (u32, u32, u32, u32, bool) {
     unsafe {
@@ -57,21 +59,25 @@ fn run(eng: &Arc<Engine>, sh: &Arc<dyn Shell>, r: &mut Rep) {
         let (c, n, st, ex, same) = dwm(ph);
         r.ok("rounded corners (DWMWA_WINDOW_CORNER_PREFERENCE = round)", c == 2, &format!("{c}"));
         r.ok("shadow: DWM non-client rendering on", n == 1, &format!("{n}"));
-        r.ok("borderless: no caption / sizing frame", st & 0x00C0_0000 != 0x00C0_0000 && st & 0x0004_0000 == 0, &format!("style {st:#x}"));
+        r.ok("borderless: no native frame / title bar (client = window)", no_nc(ph), &format!("style {st:#x}"));
         r.ok("panel takes clicks (not WS_EX_TRANSPARENT / LAYERED)", ex & 0x20 == 0 && ex & 0x80000 == 0, &format!("ex {ex:#x}"));
         r.ok("shadow click-through: input rect == visible frame (no invisible borders)", same, "");
     }
     // ---- live Spotify reads (read-only)
-    let logged = eng.spotify.lock().unwrap().logged_in(); r.ok("Spotify logged in (sandbox copy of the real token)", logged, "");
-    let st = guides::access_status(eng); r.ok("access status (GET /me, no request sent)", st == Some("ok"), &format!("{st:?}"));
+    let logged = eng.spotify.lock().unwrap().logged_in(); let fake = std::env::var_os("AOE4S_FAKESP").is_some();
+    if !logged && fake { r.note("SKIP live Spotify: not logged in - Spotify flows below use fake data (AOE4S_FAKESP)"); } else {
+    r.ok("Spotify logged in (sandbox copy of the real token)", logged, "");
+    let st = guides::access_status(eng); r.ok("access status (GET /me, no request sent)", st == Some("ok"), &format!("{st:?}")); }
+    let src = if fake && !logged { "fake" } else { "live" };
     let cnt = |v: &Result<serde_json::Value, String>| v.as_ref().ok().and_then(|v| v.as_array().map(|a| a.len()));
-    let pls = picker::sp(eng, "playlists", ""); r.ok("live: your playlists", cnt(&pls).unwrap_or(0) > 0, &format!("{:?} items", cnt(&pls)));
-    let srch = picker::sp(eng, "search", "piano"); r.ok("live: search", cnt(&srch).unwrap_or(0) > 0, &format!("{:?} items", cnt(&srch)));
-    let play = picker::sp(eng, "playing", ""); r.ok("live: now playing (read)", play.is_ok(), &format!("{:?} items", cnt(&play)));
+    let pls = picker::sp(eng, "playlists", ""); r.ok(&format!("{src}: your playlists"), cnt(&pls).unwrap_or(0) > 0, &format!("{:?} items", cnt(&pls)));
+    let srch = picker::sp(eng, "search", "piano"); r.ok(&format!("{src}: search"), cnt(&srch).unwrap_or(0) > 0, &format!("{:?} items", cnt(&srch)));
+    let play = picker::sp(eng, "playing", ""); r.ok(&format!("{src}: now playing (read)"), play.is_ok(), &format!("{:?} items", cnt(&play)));
     let tracks: Vec<String> = srch.as_ref().ok().and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["uri"].as_str().map(String::from)).collect();
-    if let Some(t) = tracks.first() { let id = t.rsplit(':').next().unwrap_or("").to_string(); let tr = picker::sp(eng, "tracks", &id); r.ok("live: track lookup", cnt(&tr) == Some(1), ""); }
-    let pl = pls.as_ref().ok().and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().filter_map(|p| p["id"].as_str().filter(|i| i.len() == 22).map(String::from)).next();
-    if let Some(p) = &pl { let m = picker::sp(eng, "plmeta", p); r.ok("live: playlist meta", cnt(&m) == Some(1), ""); }
+    if let Some(t) = tracks.first() { let id = t.rsplit(':').next().unwrap_or("").to_string(); let tr = picker::sp(eng, "tracks", &id); r.ok(&format!("{src}: track lookup"), cnt(&tr) == Some(1), ""); }
+    let pl = pls.as_ref().ok().and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().filter_map(|p| p["id"].as_str().filter(|i| i.len() == 22).map(String::from)).next()
+        .or_else(|| if fake { Some("37i9dQZF1DX4sWSpwq3LiO".to_string()) } else { None });
+    if let Some(p) = &pl { let m = picker::sp(eng, "plmeta", p); r.ok(&format!("{src}: playlist meta"), cnt(&m).unwrap_or(0) >= 1, ""); }
     // ---- OLE text drop on the age page
     ui(|| { crate::intros::test_state("age:castle"); });
     let have = || ui(|| crate::intros::have_uris());

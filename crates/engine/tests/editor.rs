@@ -2,6 +2,7 @@ use aoe4engine::{editor::{self, Ctx, History}, Engine};
 use serde_json::json;
 
 fn ctx() -> (Ctx, serde_json::Value, std::path::PathBuf) {
+    std::env::set_var("APPDATA", std::env::temp_dir().join(format!("aoe4s_ed_appdata_{}", std::process::id())));   // keep log lines out of the real app log
     let d = std::env::temp_dir().join(format!("aoe4s_ed_{}", std::process::id())); let _ = std::fs::remove_dir_all(&d); std::fs::create_dir_all(&d).unwrap();
     std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../installer/config.json"), d.join("base.json")).unwrap();
     let (e, _rx, _p) = Engine::new(d.clone()); let (_, s) = e.static_state();

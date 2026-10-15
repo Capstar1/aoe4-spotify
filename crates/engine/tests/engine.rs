@@ -1,7 +1,8 @@
 use aoe4engine::{data, menu, presets, Engine};
 use serde_json::json;
 
-fn tmp(n: &str) -> std::path::PathBuf { let d = std::env::temp_dir().join(format!("aoe4s_eng_{n}_{}", std::process::id())); let _ = std::fs::remove_dir_all(&d); std::fs::create_dir_all(&d).unwrap(); d }
+/// Also points APPDATA at a temp dir: engine log lines must never land in the real app log.
+fn tmp(n: &str) -> std::path::PathBuf { std::env::set_var("APPDATA", std::env::temp_dir().join(format!("aoe4s_eng_appdata_{}", std::process::id()))); let d = std::env::temp_dir().join(format!("aoe4s_eng_{n}_{}", std::process::id())); let _ = std::fs::remove_dir_all(&d); std::fs::create_dir_all(&d).unwrap(); d }
 
 #[test]
 fn import_check_and_timestamp() {
