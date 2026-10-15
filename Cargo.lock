@@ -138,10 +138,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "aoe4engine"
+version = "1.1.0"
+dependencies = [
+ "aoe4core",
+ "aoe4winsys",
+ "base64 0.22.1",
+ "flate2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ureq",
+]
+
+[[package]]
 name = "aoe4spotify"
 version = "1.1.0"
 dependencies = [
  "aoe4core",
+ "aoe4winsys",
  "base64 0.22.1",
  "flate2",
  "serde",
@@ -157,9 +172,20 @@ name = "aoe4spotify-slint"
 version = "1.1.0"
 dependencies = [
  "aoe4core",
+ "aoe4engine",
+ "aoe4winsys",
+ "image",
+ "png 0.17.16",
  "serde_json",
  "slint",
  "slint-build",
+]
+
+[[package]]
+name = "aoe4winsys"
+version = "1.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -2910,6 +2936,7 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png 0.18.1",
