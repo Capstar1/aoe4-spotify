@@ -135,9 +135,9 @@ function trayLayout(d, u) {
 }
 const GL = { n: 54 }; fetch("img/age/glow.json").then((r) => r.json()).then((j) => Object.assign(GL, j));
 function glow(cx, cy, r, badge) {   // the 1.0.9 render_glow / render_badge frames (genglow.py), 54 x 33 ms breathing cycle
-  const R = r >= 16 ? 19 : 14, k = r / R, D = (GL[(badge ? "eq" : "glow") + R] || (R === 19 ? 74 : 64)) * k, nm = (badge ? "eq" : "glow") + R;
+  const R = r >= 16 ? 19 : 14, k = r / R, D = (GL[(badge ? "eq" : "glow") + R] || (R === 19 ? 74 : 64)) * k, nm = (badge ? "eq" : "glow") + R, ext = badge ? "png" : "webp";   // glow strips: lossless WebP (same pixels, ~1/3 the size)
   const e = el("div", "glowf", { left: (cx - D / 2) + "px", top: (cy - D / 2) + "px", width: D + "px", height: D + "px", "--D": D + "px",
-    backgroundImage: `image-set(url(img/age/${nm}@1.png) 1x, url(img/age/${nm}@1.5.png) 1.5x)`, backgroundSize: `${D * GL.n}px ${D}px`,
+    backgroundImage: `image-set(url(img/age/${nm}@1.${ext}) 1x, url(img/age/${nm}@1.5.${ext}) 1.5x)`, backgroundSize: `${D * GL.n}px ${D}px`,
     animationDelay: (-(((Date.now() - (age.t0 || 0)) / 1000) % 1.782)) + "s" });
   e.style.setProperty("--D", D + "px"); if (age.fadeIn) e.classList.add("fadein"); return e;
 }

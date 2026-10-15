@@ -6,7 +6,7 @@
   "build": { "frontendDist": "../ui" },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "title": "AoE4 Spotify", "label": "main", "width": 554, "height": 880, "decorations": false, "transparent": true, "shadow": false, "resizable": false, "maximizable": false, "center": true, "backgroundColor": "#00000000", "dragDropEnabled": false, "visible": false }],
+    "windows": [{ "title": "AoE4 Spotify", "label": "main", "width": 554, "height": 880, "decorations": false, "transparent": true, "shadow": false, "resizable": false, "maximizable": false, "center": true, "backgroundColor": "#00000000", "dragDropEnabled": false, "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,AutofillServerCommunication,OptimizationHints,MediaRouter,SpareRendererForSitePerProcess --disable-background-networking --disable-component-update --disable-sync --disable-default-apps --no-pings", "visible": false }],
     "security": { "csp": null }
   },
   "bundle": { "active": false, "icon": ["icons/icon.ico"] }

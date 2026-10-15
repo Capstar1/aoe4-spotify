@@ -64,7 +64,7 @@ pub fn cache_covers(app: tauri::State<Arc<AppState>>, items: Vec<serde_json::Val
     std::thread::spawn(move || { let dir = a.dir.join("covers"); let _ = std::fs::create_dir_all(&dir);
         for it in items { let (Some(u), Some(img)) = (it["uri"].as_str(), it["img"].as_str()) else { continue };
             let id: String = u.rsplit(':').next().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric()).collect(); let p = dir.join(format!("track_{id}.jpg"));
-            if img.starts_with("https://") && !p.exists() { let b = aoe4core::spotify::fetch(img); if let Ok(b) = b { let _ = std::fs::write(&p, b); } } } });
+            if img.starts_with("https://") && !p.exists() { let b = aoe4core::spotify::fetch(img); if let Ok(b) = b { let _ = std::fs::write(&p, b); covers_changed(); } } } });
 }
 #[tauri::command]
 pub async fn open_add(app: tauri::AppHandle) {
@@ -72,7 +72,7 @@ pub async fn open_add(app: tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("add") { let _ = w.unminimize(); let _ = w.set_focus(); return; }
     let main = app.get_webview_window("main"); let z = zoom();
     let mut b = tauri::WebviewWindowBuilder::new(&app, "add", tauri::WebviewUrl::App("add.html".into())).title("AoE4 Spotify").inner_size(416.0 * z, 560.0 * z)
-        .resizable(false).maximizable(false).minimizable(false).theme(Some(tauri::Theme::Dark)).background_color(tauri::window::Color(33, 33, 33, 255)).disable_drag_drop_handler().visible(false);
+        .resizable(false).maximizable(false).minimizable(false).theme(Some(tauri::Theme::Dark)).background_color(tauri::window::Color(33, 33, 33, 255)).disable_drag_drop_handler().additional_browser_args(WV_ARGS).visible(false);
     if let Some(m) = &main { if let (Ok(p), Ok(sz)) = (m.outer_position(), m.outer_size()) { b = b.position((p.x as f64 + sz.width as f64 + 4.0) / m.scale_factor().unwrap_or(1.0), (p.y as f64 + 40.0) / m.scale_factor().unwrap_or(1.0)); } b = b.parent(m).unwrap_or_else(|e| panic!("{e}")); }
     if let Ok(w) = b.build() { if z != 1.0 { let _ = w.set_zoom(z); } let _ = w.show(); let _ = w.set_focus(); }
 }
@@ -81,10 +81,11 @@ pub async fn open_add(app: tauri::AppHandle) {
 /// 1.0.9 list_picker as its own window: target "age:<key>" | "am:playlist" | "am:win" | "am:loss".
 pub fn small_window(app: &tauri::AppHandle, label: &str, page: &str, w: f64, h: f64) {
     use tauri::Manager;
-    if let Some(x) = app.get_webview_window(label) { let _ = x.close(); }
+    // already open: reuse it - reload the page (it reads its new target) and centre it, instead of a new WebView
+    if let Some(x) = app.get_webview_window(label) { let _ = x.center(); let _ = x.eval("location.reload()"); let _ = x.set_focus(); return; }
     let main = app.get_webview_window("main"); let z = zoom();
     let mut b = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(page.into())).title("AoE4 Spotify").inner_size(w * z, h * z)
-        .resizable(false).maximizable(false).minimizable(false).theme(Some(tauri::Theme::Dark)).background_color(tauri::window::Color(18, 18, 18, 255)).disable_drag_drop_handler().visible(false).center();
+        .resizable(false).maximizable(false).minimizable(false).theme(Some(tauri::Theme::Dark)).background_color(tauri::window::Color(18, 18, 18, 255)).disable_drag_drop_handler().additional_browser_args(WV_ARGS).visible(false).center();
     if let Some(m) = &main { if m.is_visible().unwrap_or(false) { b = b.parent(m).unwrap_or_else(|e| panic!("{e}")); } }
     if let Ok(w) = b.build() { if z != 1.0 { let _ = w.set_zoom(z); } }
 }
@@ -105,7 +106,7 @@ pub fn save_list(app: tauri::State<Arc<AppState>>, id: String, name: String, tra
     let name: String = { let n: String = name.trim().chars().take(40).collect(); if n.is_empty() { "My list".into() } else { n } };
     let mut cl = read_user(&app.dir)["custom_lists"].clone(); if !cl.is_object() { cl = serde_json::json!({}); }
     cl[&id] = serde_json::json!({ "name": name, "tracks": tr }); set_user_(&app, "custom_lists", cl);
-    if let Some(b) = mosaic.strip_prefix("data:image/png;base64,") { if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(b) { let d = app.dir.join("covers"); let _ = std::fs::create_dir_all(&d); let _ = std::fs::write(d.join(format!("list_{id}.png")), b); } }
+    if let Some(b) = mosaic.strip_prefix("data:image/png;base64,") { if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(b) { let d = app.dir.join("covers"); let _ = std::fs::create_dir_all(&d); let _ = std::fs::write(d.join(format!("list_{id}.png")), b); covers_changed(); } }
     format!("{LIST_PREFIX}{id}")
 }
 /// Delete list (pressed twice): ages and After match picks that used it go back to their defaults / empty.
@@ -115,7 +116,7 @@ pub fn delete_list(app: tauri::State<Arc<AppState>>, id: String) {
     let mut cl = u["custom_lists"].clone(); if let Some(o) = cl.as_object_mut() { o.remove(&id); } set_user_(&app, "custom_lists", cl);
     let mut pl = u["playlists"].clone(); if let Some(o) = pl.as_object_mut() { o.retain(|_, v| v.as_str() != Some(uri.as_str())); set_user_(&app, "playlists", pl); }
     let mut am = u["after_match"].clone(); if am.is_object() { for k in ["playlist", "win", "loss"] { if am[k].as_str() == Some(uri.as_str()) { am[k] = serde_json::json!(""); } } set_user_(&app, "after_match", am); }
-    let _ = std::fs::remove_file(app.dir.join("covers").join(format!("list_{id}.png")));
+    let _ = std::fs::remove_file(app.dir.join("covers").join(format!("list_{id}.png"))); covers_changed();
     launcher::log(&format!("Deleted app list {id}"));
 }
 #[tauri::command]
@@ -128,10 +129,10 @@ pub fn pick_done(app: tauri::State<Arc<AppState>>, uri: String, name: String, im
     let id = uri.rsplit(':').next().unwrap_or("").to_string();
     if !name.is_empty() && !uri.starts_with(LIST_PREFIX) {           // name + cover for the panel rows (1.0.9 playlist_names.json / covers)
         let np = app.dir.join("playlist_names.json"); let mut n = read_json(&np); n[&id] = serde_json::json!(name);
-        let _ = std::fs::write(&np, serde_json::to_string_pretty(&n).unwrap_or_default()); app.settings.lock().unwrap().playlist_names.insert(id.clone(), name);
+        let _ = std::fs::write(&np, serde_json::to_string_pretty(&n).unwrap_or_default()); app.settings.lock().unwrap().playlist_names.insert(id.clone(), name); app.ver.fetch_add(1, Ordering::SeqCst);
         if img.starts_with("https://") { let a = app.inner().clone(); let tr = uri.starts_with("spotify:track:"); std::thread::spawn(move || {
             let dir = a.dir.join("covers"); let _ = std::fs::create_dir_all(&dir); let f = dir.join(if tr { format!("track_{id}.jpg") } else { format!("{id}_pick.jpg") });
-            if let Ok(b) = aoe4core::spotify::fetch(&img) { let _ = std::fs::write(f, b); } }); }
+            if let Ok(b) = aoe4core::spotify::fetch(&img) { let _ = std::fs::write(f, b); covers_changed(); } }); }
     }
     let u = read_user(&app.dir);
     if let Some(k) = t.strip_prefix("age:") { let mut pl = u["playlists"].clone(); if !pl.is_object() { pl = serde_json::json!({}); } pl[k] = serde_json::json!(uri); set_user_(&app, "playlists", pl); }

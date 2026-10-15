@@ -392,13 +392,16 @@ document.addEventListener("keydown", (e) => { if (e.target && e.target.tagName =
 const W_ = window.__TAURI__.window.getCurrentWindow();
 $("tbmin").onclick = () => W_.minimize(); $("tbclose").onclick = () => W_.close();
 window.addEventListener("blur", () => document.body.classList.add("inactive")); window.addEventListener("focus", () => document.body.classList.remove("inactive"));
-let lastJ = "";
+let lastJ = "", SK = null, SF = null, tickT = 0, ticking = false, again = false;   // SF: last settings-side state (version SK)
 async function tick() {
-  try { const v0 = window.EDV || 0; const s = await invoke("get_state"); if ((window.EDV || 0) !== v0) { setTimeout(tick, 100); return; } const j = JSON.stringify([s.settings, s.spotify, s.status.in_match, s.status.age, s.status.watching, s.intros, s.upd, s.user]);
+  clearTimeout(tickT); if (ticking) { again = true; return; } ticking = true;
+  try { const v0 = window.EDV || 0; const r = await invoke("get_state", { since: SK }); if ((window.EDV || 0) !== v0) { ticking = false; tickT = setTimeout(tick, 100); return; }
+    if (r.settings || !SF) SF = r; SK = r.skey; const s = Object.assign(structuredClone(SF), r); const j = JSON.stringify([s.settings, s.spotify, s.status.in_match, s.status.age, s.status.watching, s.intros, s.upd, s.user]);
     if (j !== lastJ) { const first = !lastJ; lastJ = j; render(s); if (first) { await apply("main"); invoke("cfg").then((c) => { if (c.open) setTimeout(() => { const [pg, k, tr, hv, pl, x] = c.open.split(":"); if (tr) S.ed.intro_pack_open = tr === "octo"; if (pg === "age") openAge(k); else go(pg);
       setTimeout(() => { const d = S.agedata; if (hv) { age.hovTray = +hv; redraw(); } if (pl) { age.song = d.songs[+pl][0]; redraw(); } shotState(x); if (x === "dom") domDump(); }, 300); }, 300); if (c.addtest) setTimeout(addTest, 1500); if (c.edtest) setTimeout(() => edTest().catch((e) => invoke("dbg", { s: "ERROR " + e.stack })), 1500); if (c.menutest) setTimeout(() => menuTest().catch((e) => invoke("dbg", { s: "ERROR " + e + "\n" + (window.__mt || []).join("\n") })), 1500); }); } else await redraw(); } } catch (e) { console.error(e); }
-  setTimeout(tick, 500);
+  ticking = false; if (again) { again = false; tickT = setTimeout(tick, 0); } else tickT = setTimeout(tick, 5000);   // pushed ("state-changed"); 5 s fallback
 }
+window.__TAURI__.event.listen("state-changed", () => tick());
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", tick); else tick();   // age.js (tipOn) loaded first
 async function tickNow() { try { const s = await invoke("get_state"); lastJ = JSON.stringify([s.settings, s.spotify, s.status.in_match, s.status.age, s.status.watching, s.intros, s.upd, s.user]); if (!drag.on) { render(s); await redraw(); } } catch (e) { console.error(e); } }
 window.addEventListener("focus", () => tickNow());

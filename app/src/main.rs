@@ -29,19 +29,59 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Default, serde::Serialize, Clone)]
 struct Status { result: Option<i32>, match_n: u64, game: String, log_path: String, watching: bool, in_match: bool, age: Option<String>, playing: Option<String>, log: Vec<String> }
 
-struct AppState { pick: Mutex<serde_json::Value>, gtg: Mutex<serde_json::Value>, settings: Mutex<Settings>, ver: std::sync::atomic::AtomicU64, upd: Mutex<serde_json::Value>, ages: Vec<(String, String)>, status: Mutex<Status>, cv: Condvar, logged: AtomicBool, replays: AtomicBool, busy: AtomicBool, spotify: Mutex<Spotify>, tx: Mutex<Sender<Action>>, dir: PathBuf, ed: Mutex<serde_json::Value> }
+struct AppState { pick: Mutex<serde_json::Value>, gtg: Mutex<serde_json::Value>, settings: Mutex<Settings>, ver: std::sync::atomic::AtomicU64, upd: Mutex<serde_json::Value>, ages: Vec<(String, String)>, status: Mutex<Status>, cv: Condvar, logged: AtomicBool, stat: Mutex<Option<(u64, serde_json::Value)>>, replays: AtomicBool, busy: AtomicBool, spotify: Mutex<Spotify>, tx: Mutex<Sender<Action>>, dir: PathBuf, ed: Mutex<serde_json::Value> }
 
-#[tauri::command]
-fn get_state(app: tauri::State<Arc<AppState>>) -> serde_json::Value {
-    let st = app.status.lock().unwrap().clone();
-    // never wait for the Spotify lock here (a fade / after-match step holds it): use the last known state then
-    let logged_in = match app.spotify.try_lock() { Ok(s) => { let v = s.logged_in(); app.logged.store(v, Ordering::SeqCst); v } Err(_) => app.logged.load(Ordering::SeqCst) };
+/// Settings-side part of the state (settings, your lists / after match, intros, age data, edits): built once per
+/// settings version (`ver`, bumped on every settings / intros change) and reused.
+fn static_state(app: &AppState) -> (u64, serde_json::Value) {
+    let v = app.ver.load(Ordering::SeqCst);
+    let mut c = app.stat.lock().unwrap();
+    if let Some((k, s)) = c.as_ref() { if *k == v { return (v, s.clone()); } }
     let keys: Vec<String> = app.ages.iter().map(|(k, _)| k.clone()).collect();
     let ed = app.ed.lock().unwrap().clone(); let set = app.settings.lock().unwrap().clone(); let es = with_ed(&set, &ed);
     let user = read_user(&app.dir);
-    serde_json::json!({ "settings": set, "user": { "custom_lists": user["custom_lists"], "after_match": user["after_match"], "fade_seconds": user["fade_seconds"] }, "upd": app.upd.lock().unwrap().clone(), "ages": app.ages, "status": st, "intros": aoe4core::intros::overview(&es, &keys), "agedata": aoe4core::intros::age_data(&es, &keys), "ed": ed,
-        "spotify": { "logged_in": logged_in, "replays": app.replays.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
+    let s = serde_json::json!({ "settings": set, "user": { "custom_lists": user["custom_lists"], "after_match": user["after_match"], "fade_seconds": user["fade_seconds"] }, "ages": app.ages, "intros": aoe4core::intros::overview(&es, &keys), "agedata": aoe4core::intros::age_data(&es, &keys), "ed": ed });
+    *c = Some((v, s.clone())); (v, s)
 }
+fn live_state(app: &AppState) -> serde_json::Value {
+    let st = app.status.lock().unwrap().clone();
+    // never wait for the Spotify lock here (a fade / after-match step holds it): use the last known state then
+    let logged_in = match app.spotify.try_lock() { Ok(s) => { let v = s.logged_in(); app.logged.store(v, Ordering::SeqCst); v } Err(_) => app.logged.load(Ordering::SeqCst) };
+    serde_json::json!({ "upd": app.upd.lock().unwrap().clone(), "status": st, "spotify": { "logged_in": logged_in, "replays": app.replays.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
+}
+/// Panel state. `since` = the settings version the panel already has: then the settings-side part is left out
+/// (the panel keeps its copy); "skey" says which version the answer belongs to.
+#[tauri::command]
+fn get_state(app: tauri::State<Arc<AppState>>, since: Option<u64>) -> serde_json::Value {
+    let mut out = live_state(&app);
+    let (k, s) = static_state(&app);
+    if since != Some(k) { if let (Some(o), Some(m)) = (out.as_object_mut(), s.as_object()) { for (a, b) in m { o.insert(a.clone(), b.clone()); } } }
+    out["skey"] = serde_json::json!(k); out
+}
+/// Push instead of the panel's poll: "state-changed" goes out when anything the panel shows changes (checked
+/// every 250 ms here, in-process); the panel then fetches. The panel keeps a slow 5 s poll as a fallback.
+fn notifier(h: tauri::AppHandle, app: Arc<AppState>) {
+    use tauri::Emitter;
+    let mut last = String::new();
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let st = app.status.lock().unwrap().clone();
+        let f = serde_json::json!([app.ver.load(Ordering::SeqCst), app.upd.lock().unwrap().clone(), st.in_match, st.age, st.watching, st.playing, st.result, st.match_n,
+            app.logged.load(Ordering::SeqCst), app.replays.load(Ordering::SeqCst), app.busy.load(Ordering::SeqCst)]).to_string();
+        if f != last { last = f; let _ = h.emit("state-changed", ()); }
+    }
+}
+/// WebView2 switches for every window (all windows share one WebView2 environment, so they must be identical;
+/// main's copy is in tauri.conf.json). Tauri's defaults plus: no translate / autofill / hints / cast / sync / background traffic.
+pub const WV_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,AutofillServerCommunication,OptimizationHints,MediaRouter,SpareRendererForSitePerProcess --disable-background-networking --disable-component-update --disable-sync --disable-default-apps --no-pings";
+#[cfg(test)]
+mod tests { #[test] fn webview_args_match_conf() { assert!(include_str!("../tauri.conf.json").contains(&format!("\"additionalBrowserArgs\": \"{}\"", super::WV_ARGS))); }
+    #[test] fn import_check_and_timestamp() {
+        use serde_json::json; use super::data::{covered, iso_now};
+        assert!(covered(&json!(null), &json!({ "a": 1 })) && covered(&json!({}), &json!({ "a": 1 })) && covered(&json!({ "a": 1 }), &json!({ "a": 2, "b": 3 })));
+        assert!(!covered(&json!({ "a": 1, "c": 1 }), &json!({ "a": 1 })) && covered(&json!([1, 2]), &json!([2, 1, 3])) && !covered(&json!([4]), &json!([1])));
+        let t = iso_now(); assert!(t.len() == 20 && t.starts_with("20") && t.ends_with('Z') && &t[10..11] == "T", "{t}");
+    } }
 
 mod win {
     #[link(name = "user32")] extern "system" { fn FindWindowW(c: *const u16, t: *const u16) -> isize; fn ShowWindow(h: isize, c: i32) -> i32; fn SetForegroundWindow(h: isize) -> i32; fn IsWindowVisible(h: isize) -> i32; }
@@ -108,11 +148,23 @@ fn switch_test(win_: tauri::WebviewWindow, dir: PathBuf) {
     std::process::exit(0);
 }
 
+/// Covers already served (data URLs), cleared whenever a cover is written or removed and when the covers folder
+/// changes; misses are not remembered (a cover can arrive any moment).
+static COVERS: Mutex<Option<(Option<SystemTime>, std::collections::HashMap<String, String>)>> = Mutex::new(None);
+pub(crate) fn covers_changed() { *COVERS.lock().unwrap() = None; }
 /// Cached 1.0.9 cover (playlist <id>_<snapshot>.jpg newest, or track_<id>.jpg) as a data URL; None if missing.
 #[tauri::command]
 fn cover(uri: String) -> Option<String> {
-    use base64::Engine;
     let dir = PathBuf::from(std::env::var("APPDATA").ok()?).join(r"AoE4Spotify-1.1\covers");
+    let m = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+    { let mut c = COVERS.lock().unwrap(); if c.as_ref().map_or(true, |(t, map)| *t != m || map.len() > 600) { *c = Some((m, Default::default())); }
+      if let Some(v) = c.as_ref().and_then(|(_, map)| map.get(&uri)) { return Some(v.clone()); } }
+    let v = read_cover(&dir, &uri)?;
+    if let Some((t, map)) = COVERS.lock().unwrap().as_mut() { if *t == m { map.insert(uri, v.clone()); } }
+    Some(v)
+}
+fn read_cover(dir: &std::path::Path, uri: &str) -> Option<String> {
+    use base64::Engine;
     let id = uri.rsplit(':').next()?.to_string();
     if uri.contains(":list:") { let b = std::fs::read(dir.join(format!("list_{id}.png"))).ok()?; return Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))); }
     let path = if uri.starts_with("spotify:track:") { dir.join(format!("track_{id}.jpg")) } else {
@@ -222,13 +274,14 @@ fn main() {
     let prefs: serde_json::Value = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     let spotify = Spotify::new(settings.client_id.clone(), dir.join("token.json")); let logged0 = spotify.logged_in();
     let (tx, rx) = channel(); let replays0 = prefs["music_in_replays"].as_bool().unwrap_or(settings.music_in_replays);
-    let app = Arc::new(AppState { pick: Mutex::new(serde_json::Value::Null), gtg: Mutex::new(serde_json::Value::Null), settings: Mutex::new(settings), ver: Default::default(), upd: Mutex::new(serde_json::json!({ "phase": if std::env::args().any(|a| a == "--updated") { "done" } else { "idle" }, "msg": format!("Updated to {}", env!("CARGO_PKG_VERSION")) })), ages, status: Mutex::new(status), cv: Condvar::new(), logged: AtomicBool::new(logged0),
+    let app = Arc::new(AppState { pick: Mutex::new(serde_json::Value::Null), gtg: Mutex::new(serde_json::Value::Null), settings: Mutex::new(settings), ver: Default::default(), upd: Mutex::new(serde_json::json!({ "phase": if std::env::args().any(|a| a == "--updated") { "done" } else { "idle" }, "msg": format!("Updated to {}", env!("CARGO_PKG_VERSION")) })), ages, status: Mutex::new(status), cv: Condvar::new(), stat: Mutex::new(None), logged: AtomicBool::new(logged0),
         replays: AtomicBool::new(replays0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx), ed: Mutex::new(load_ed(&dir)), dir });
     let a2 = app.clone(); std::thread::spawn(move || watch(a2, path));
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));
+    let a4 = app.clone();
     tauri::Builder::default()
         .manage(app)
-        .setup(move |a| { use tauri::Manager; if let Some(h) = a.get_webview_window("main").and_then(|w| w.hwnd().ok()) { shadow::init(h.0 as isize); } if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
+        .setup(move |a| { use tauri::Manager; { let h = a.handle().clone(); std::thread::spawn(move || notifier(h, a4)); } if let Some(h) = a.get_webview_window("main").and_then(|w| w.hwnd().ok()) { shadow::init(h.0 as isize); } if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
             { let w = a.get_webview_window("main").unwrap();
               if hidden { let h = w.hwnd().map(|h| h.0 as isize).unwrap_or(0); let ah = a.handle().clone();
                   let a5 = a.state::<Arc<AppState>>().inner().clone(); let a6 = a5.clone();

@@ -30,8 +30,13 @@ pub fn migrate_109(dir: &std::path::Path, inst109: Option<PathBuf>, cleanup: boo
     let inst = inst109.unwrap_or_else(launcher::install_dir);
     let base = [inst.join("config.json"), inst.join(r"_internal\config.json"), PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join(r"Programs\AoE4 Spotify\_internal\config.json")].into_iter().find(|p| p.is_file());
     // Nothing of 1.0.9's user data left (fresh install, or already imported and cleaned): quietly do nothing -
-    // no "NOT verified" log line and import.json is left untouched.
-    if !ad.join("config.json").exists() && !ad.join("token.json").exists() && !inst.join("game_music.json").is_file() { return Err("no 1.0.9 data".into()); }
+    // no "NOT verified" log line. An old "not verified" import.json from when 1.0.9 data still existed is replaced
+    // (that data is gone, so there is nothing left to verify or keep).
+    if !ad.join("config.json").exists() && !ad.join("token.json").exists() && !inst.join("game_music.json").is_file() {
+        let old: Value = std::fs::read_to_string(dir.join("import.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
+        if old.is_object() && old["ok"] != true { let _ = std::fs::write(dir.join("import.json"), json!({ "from": "1.0.9", "ok": true, "nothing_left": true, "cleaned": true, "earlier": old, "at": iso_now() }).to_string()); }
+        return Err("no 1.0.9 data".into());
+    }
     let _ = std::fs::create_dir_all(dir.join("covers"));
     let cp = |a: &std::path::Path, b: &str| if a.exists() && !dir.join(b).exists() { std::fs::copy(a, dir.join(b)).is_ok() } else { dir.join(b).exists() || !a.exists() };
     let ok_base = base.as_ref().map_or(true, |b| cp(b, "base.json"));
@@ -50,6 +55,8 @@ pub fn migrate_109(dir: &std::path::Path, inst109: Option<PathBuf>, cleanup: boo
     let gm = inst.join("game_music.json"); let ok_music = if gm.is_file() && !dir.join("game_music.json").exists() { std::fs::copy(&gm, dir.join("game_music.json")).is_ok() } else { true };
     // verify: counts in the copies match the originals
     let k = |p: &std::path::Path, key: &str| count_json(p, |v| cnt(&v[key]));
+    // a copy is verified when everything in the 1.0.9 original is in 1.1's copy (1.1 may already have more of its own)
+    let has = |a: &std::path::Path, b: &std::path::Path, key: &str| { let (x, y) = (read_json(a), read_json(b)); covered(&x[key], &y[key]) };
     let src_cfg = ad.join("config.json");
     let checks = json!({
         "custom_songs": [k(&src_cfg, "custom_songs"), k(&dir.join("intros.json"), "custom_songs")],
@@ -57,9 +64,10 @@ pub fn migrate_109(dir: &std::path::Path, inst109: Option<PathBuf>, cleanup: boo
         "intro_pools": [k(&src_cfg, "intro_pools"), k(&dir.join("intros.json"), "intro_pools")],
         "playlists": [k(&src_cfg, "playlists"), k(&dir.join("config.json"), "playlists")],
         "covers": [src, n] });
-    let counts_ok = checks.as_object().unwrap().values().all(|v| v[0] == v[1]);
+    let i2 = dir.join("intros.json"); let c2 = dir.join("config.json");
+    let counts_ok = src == n && has(&src_cfg, &i2, "custom_songs") && has(&src_cfg, &i2, "intro_presets") && has(&src_cfg, &i2, "intro_pools") && has(&src_cfg, &c2, "playlists");
     let ok = ok_base && ok_cfg && ok_names && ok_tok && ok_music && counts_ok;
-    let sum = json!({ "from": "1.0.9", "ok": ok, "base": ok_base, "config": ok_cfg, "playlist_names": ok_names, "token": rt.is_some() && ok_tok, "music_level": gm.is_file(), "counts": checks, "at": now() });
+    let sum = json!({ "from": "1.0.9", "ok": ok, "base": ok_base, "config": ok_cfg, "playlist_names": ok_names, "token": rt.is_some() && ok_tok, "music_level": gm.is_file(), "counts": checks, "at": iso_now() });
     let _ = std::fs::write(dir.join("import.json"), sum.to_string());
     if !ok { launcher::log("1.0.9 import NOT verified - 1.0.9 data kept"); return Err(sum.to_string()); }
     launcher::log("1.0.9 settings, intros, presets, covers and login imported (verified)");
@@ -70,6 +78,24 @@ pub fn migrate_109(dir: &std::path::Path, inst109: Option<PathBuf>, cleanup: boo
     }
     Ok(sum)
 }
+/// Every entry of `src` is in `dst` (objects: same keys; arrays: same elements). Nothing in `src` = covered.
+pub fn covered(src: &serde_json::Value, dst: &serde_json::Value) -> bool {
+    match src {
+        serde_json::Value::Object(o) => o.keys().all(|k| dst.get(k).is_some()),
+        serde_json::Value::Array(a) => a.iter().all(|x| dst.as_array().map_or(false, |d| d.contains(x))),
+        _ => true,
+    }
+}
+/// UTC timestamp like 2026-10-15T03:19:48Z (import.json).
+pub fn iso_now() -> String {
+    let s = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let (days, t) = (s.div_euclid(86400), s.rem_euclid(86400));
+    // civil-from-days (Howard Hinnant)
+    let z = days + 719468; let era = z.div_euclid(146097); let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153; let d = doy - (153 * mp + 2) / 5 + 1; let m = if mp < 10 { mp + 3 } else { mp - 9 }; let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", t / 3600, t / 60 % 60, t % 60)
+}
 pub fn with_ed(s: &Settings, ed: &serde_json::Value) -> Settings {
     let mut s = s.clone(); s.user_pools = ed["intro_pools"].clone(); s.custom_songs = ed["custom_songs"].clone();
     s.intro_ages = ed["intro_ages"].as_object().map(|o| o.iter().filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b))).collect()).unwrap_or_default(); s
@@ -78,7 +104,7 @@ pub fn with_ed(s: &Settings, ed: &serde_json::Value) -> Settings {
 pub fn save_ed(app: tauri::State<Arc<AppState>>, u: serde_json::Value) {
     let mut m = serde_json::Map::new(); for k in ED_KEYS { if !u[k].is_null() { m.insert(k.into(), u[k].clone()); } }
     let v = serde_json::Value::Object(m); let _ = std::fs::create_dir_all(&app.dir);
-    let _ = std::fs::write(app.dir.join("intros.json"), serde_json::to_string_pretty(&v).unwrap_or_default()); *app.ed.lock().unwrap() = v;
+    let _ = std::fs::write(app.dir.join("intros.json"), serde_json::to_string_pretty(&v).unwrap_or_default()); *app.ed.lock().unwrap() = v; app.ver.fetch_add(1, Ordering::SeqCst);
 }
 /// 1.0.9 share codes: "AOE4S1:" + urlsafe base64 (no padding) of zlib(json {v,name,pools,ages,custom}).
 #[tauri::command]
