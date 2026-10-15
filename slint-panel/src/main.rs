@@ -11,6 +11,11 @@ mod startup;
 mod view;
 mod assets;
 mod intros;
+mod add;
+mod pick;
+mod dnd;
+mod netimg;
+mod paths;
 use aoe4engine::{guides::{Shell, Win}, menu, updater, Engine};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
 use std::cell::RefCell;
@@ -38,11 +43,13 @@ mod windows {
     pub fn panel_visible() -> bool { PANEL_SHOWN.with(|v| v.get()) }
     /// Show a window. Not yet ported windows fall back to the panel (never leave an invisible process).
     pub fn show(w: Win) {
-        if w == Win::Gtg { if let Some((e, s)) = CTX.with(|c| c.borrow().clone()) { crate::gtg::open(&e, &s); } return; }
+        if let Some((e, s)) = CTX.with(|c| c.borrow().clone()) {
+            match w { Win::Gtg => return crate::gtg::open(&e, &s), Win::Add => return crate::add::open(&e), Win::Pick => return crate::pick::open(&e), _ => {} }
+        }
         if w != Win::Panel { aoe4engine::sys::log(&format!("window {w:?} requested (not ported yet: showing the panel)")); }
-        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); })
+        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); crate::first_show(&u); })
     }
-    pub fn close(w: Win) { if w == Win::Gtg { crate::gtg::close(); } }
+    pub fn close(w: Win) { match w { Win::Gtg => crate::gtg::close(), Win::Add => crate::add::close(), Win::Pick => crate::pick::close(), _ => {} } }
 }
 
 /// Transient pill message (Checking..., Up to date) and when the "Updated to" pill appeared.
@@ -52,6 +59,7 @@ struct PillMsg { msg: Option<(String, bool, Option<Instant>)>, done_t0: Option<I
 fn main() -> Result<(), slint::PlatformError> {
     slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into())
         .with_winit_window_attributes_hook(|a| {
+            let a = a.with_theme(Some(slint::winit_030::winit::window::Theme::Dark));   // dark native title bars (good to go, picker, Add a song)
             #[cfg(windows)] { use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows; a.with_undecorated_shadow(true) }
             #[cfg(not(windows))] { a }
         })
@@ -64,6 +72,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let shell: Arc<dyn Shell> = Arc::new(UiShell);
     CTX.with(|c| *c.borrow_mut() = Some((eng.clone(), shell.clone())));
     if let Ok(k) = std::env::var("AOE4S_GTG") { return gtg_shot(&k); }
+    if let Ok(k) = std::env::var("AOE4S_ADD") { add::open(&eng); add::test(&k); return sub_shot(); }
+    if std::env::var_os("AOE4S_PICK").is_some() { aoe4engine::picker::open_pick(&eng, "age:castle", "Castle Age playlist", false, "spotify:playlist:p1"); pick::open(&eng); pick::test(); return sub_shot(); }
     let ui = Panel::new()?;
     PANEL.with(|p| *p.borrow_mut() = Some(ui.as_weak()));
     let pillm = Rc::new(RefCell::new(PillMsg::default()));
@@ -167,7 +177,6 @@ fn main() -> Result<(), slint::PlatformError> {
         let (e, sh) = (eng.clone(), shell.clone());
         if e.spotify.lock().unwrap().logged_in() { std::thread::spawn(move || aoe4engine::guides::after_login(&sh, &e)); } else { aoe4engine::guides::do_login(sh, e); }
     } else if !st.hidden { windows::show(Win::Panel); }
-    #[cfg(windows)] if !st.hidden { round_corners(&ui); }
     slint::run_event_loop_until_quit()?;
     drop((poll, pr, fire_timer));
     Ok(())
@@ -194,6 +203,13 @@ fn shot(ui: &Panel, path: String) {
         let _ = slint::quit_event_loop();
     });
 }
+/// Once the panel has a native window: DWM rounded corners, text drops (age page).
+fn first_show(ui: &Panel) {
+    thread_local! { static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    if DONE.with(|d| d.replace(true)) { return; }
+    #[cfg(windows)] round_corners(ui);
+    dnd::register(ui.window(), dnd::Target::Panel);
+}
 /// Hide the tooltip (page switches, drags).
 pub fn tips_hide(ui: &Panel) { ui.global::<Tips>().invoke_hide(); }
 pub fn save_png(path: &str, rgba: &[u8], w: u32, h: u32) -> Result<(), Box<dyn std::error::Error>> {
@@ -212,5 +228,12 @@ fn gtg_shot(kind: &str) -> Result<(), slint::PlatformError> {
     let out = std::env::var("AOE4S_SHOT").unwrap_or_default();
     let ww = w.as_weak();
     slint::Timer::single_shot(Duration::from_millis(400), move || { if let Some(w) = ww.upgrade() { if let Ok(b) = w.window().take_snapshot() { let _ = save_png(&out, b.as_bytes(), b.width(), b.height()); } } let _ = slint::quit_event_loop(); });
+    slint::run_event_loop()
+}
+
+/// Test render of the window that is open besides the (unshown) panel: Add a song / picker.
+fn sub_shot() -> Result<(), slint::PlatformError> {
+    let out = std::env::var("AOE4S_SHOT").unwrap_or_default();
+    slint::Timer::single_shot(Duration::from_millis(600), move || { add::snapshot(&out); pick::snapshot(&out); let _ = slint::quit_event_loop(); });
     slint::run_event_loop()
 }

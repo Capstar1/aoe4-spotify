@@ -330,3 +330,38 @@ pub fn selftest() {
     g.invoke_back(); g.invoke_back(); ok("back twice -> main", g.get_page() == "main");
     let _ = s;
 }
+
+// ---- M3 Add a song: songs / links dropped on the age page or the Add a song window -> YOURS (one undo step per add)
+/// Uris already in the song list (built-ins + YOURS).
+pub fn have_uris() -> Vec<String> { with(|e| { let s = state(&e.eng); ctx(&s).songs_of(&ed_of(&s)).into_iter().map(|x| x.uri).collect() }).unwrap_or_default() }
+/// Where messages show on the age page: just above the YOURS '+'.
+fn plus_at() -> (f32, f32) { ui_of().filter(|u| u.global::<IntroUi>().get_page() == "age").map(|u| (u.global::<IntroUi>().get_plus_cx(), 119.0)).unwrap_or((IW / 2.0, 120.0)) }
+fn tell(m: &str, err: bool) { if page() == "age" { let (x, y) = plus_at(); hint(m, x, y); } crate::add::say(m, err); }
+pub fn add_songs(items: Vec<Value>) -> usize {
+    let mut fresh: Vec<Value> = vec![];
+    edit(|cx, u, _| { fresh = cx.add_songs(u, &items); !fresh.is_empty() });
+    if fresh.is_empty() { tell(if items.is_empty() { "No songs found" } else if items.len() > 1 { "Already in YOURS" } else { "Already added" }, false); return 0; }
+    // covers for the new chips: the picked items carry their artwork urls
+    let urls: Vec<Value> = items.iter().filter(|i| fresh.iter().any(|f| f["uri"] == i["uri"])).cloned().collect();
+    with(|e| picker::cache_covers(e.eng.clone(), urls));
+    let m = if fresh.len() > 1 { format!("Added {} songs to YOURS", fresh.len()) } else { format!("Added \u{201c}{}\u{201d}", fresh[0]["name"].as_str().unwrap_or("Song")) };
+    tell(&m, false); crate::add::paint(); fresh.len()
+}
+/// Text with Spotify song links: look up the songs we don't know (Spotify), then add them.
+pub fn drop_text(t: String) {
+    let ids = crate::add::track_ids(&t);
+    if ids.is_empty() { tell("Drop a Spotify song or song link", true); return; }
+    let have = have_uris(); let miss: Vec<String> = ids.iter().filter(|i| !have.contains(&format!("spotify:track:{i}"))).cloned().collect();
+    if miss.is_empty() { add_songs(ids.iter().map(|i| json!({ "uri": format!("spotify:track:{i}") })).collect()); return; }
+    let Some(eng) = with(|e| e.eng.clone()) else { return };
+    std::thread::spawn(move || { let r = picker::sp(&eng, "tracks", &miss.join(","));
+        let _ = slint::invoke_from_event_loop(move || match r {
+            Ok(v) if v == "login" => { tell("Log in to Spotify in AoE4 Spotify to add songs", true); }
+            r => { let got = r.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+                let items: Vec<Value> = ids.iter().filter_map(|i| { let u = format!("spotify:track:{i}"); got.iter().find(|g| g["uri"] == json!(u)).cloned().or_else(|| have.contains(&u).then(|| json!({ "uri": u }))) }).collect();
+                add_songs(items); }
+        }); });
+}
+/// Something is dragged over the panel window: on the age page YOURS lights up ("DROP TO ADD").
+pub fn drag_over(on: bool) { if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); let on = on && g.get_page() == "age"; if g.get_drop_over() != on { crate::tips_hide(&ui); g.set_drop_over(on); } } }
+pub fn drop_on_page(t: String) { if page() == "age" { drop_text(t); } }

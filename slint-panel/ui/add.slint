@@ -1,0 +1,65 @@
+// "Add a song" window (Tauri 1.1 ui/add.html: 1.0.9 add_dialog + playlists, hint line, drop zone). 416 x 560, #1f1f1f.
+import { Pal } from "kit.slint";
+
+export struct AddRow { name: string, artist: string, img: image, has-img: bool, added: bool }
+export struct AddList { name: string, n: string, cur: bool }
+
+export component AddWin inherits Window {
+    in property <[AddRow]> rows;
+    in property <[AddList]> lists;
+    in-out property <bool> menu;
+    in property <string> pl-name: "Your playlists";
+    in property <string> msg: "Click a song to add it";
+    in property <bool> err;
+    in property <bool> zone-on;
+    in property <string> zone-text: "Drop Spotify songs or links here";
+    in property <string> zone-path;        // dashed outline (backend-built path, 384 x 56)
+    in-out property <string> query;
+    in-out property <length> sc;
+    callback edited(string); callback enter(); callback playing(); callback open-menu(); callback pick(int); callback add(int); callback close();
+    title: "AoE4 Spotify";
+    default-font-family: "Segoe UI";
+    width: 416px; height: 560px; background: #1f1f1f;
+    forward-focus: qi;
+    Text { x: 19px; y: 18px; height: 22px; text: "Add a song"; font-size: 16px; font-weight: 700; color: Pal.tx; vertical-alignment: center; }
+    Rectangle { x: 16px; y: 50px; width: 384px; height: 40px; background: #232323; border-width: 1px; border-color: qi.has-focus ? #1db954 : #3a3a3a;
+        Text { x: 9px; width: 16px; height: parent.height; text: "⌕"; font-family: "Segoe UI Symbol"; font-size: 16px; color: #9a9a9a; vertical-alignment: center; }
+        if root.query == "": Text { x: 29px; height: parent.height; text: "Search Spotify or paste a song link"; font-size: 14.5px; color: #6f6f6f; vertical-alignment: center; }
+        qi := TextInput { x: 29px; width: parent.width - 37px; height: parent.height; text <=> root.query; font-size: 14.5px; color: Pal.tx; vertical-alignment: center; single-line: true;
+            edited => { root.edited(self.text); } accepted => { root.enter(); }
+            key-pressed(e) => { if (e.text == Key.Escape) { if (root.menu) { root.menu = false; } else { root.close(); } return accept; } return reject; } }
+    }
+    np := Rectangle { x: 16px; y: 100px; width: npt.preferred-width + 24px; height: 33px; background: npa.has-hover ? #333333 : #2a2a2a;
+        npt := Text { x: 12px; height: parent.height; text: "♫  Add what's playing"; font-size: 13px; font-weight: 700; color: Pal.tx; vertical-alignment: center; }
+        npa := TouchArea { mouse-cursor: pointer; clicked => { root.menu = false; root.playing(); } } }
+    Rectangle { x: np.x + np.width + 10px; y: 100px; width: 400px - self.x; height: 33px; background: pla.has-hover ? #333333 : #2a2a2a;
+        Text { x: 12px; width: parent.width - 36px; height: parent.height; text: "♫  " + root.pl-name; font-size: 13px; font-weight: 700; color: Pal.tx; vertical-alignment: center; overflow: elide; }
+        Path { x: parent.width - 20px; y: 15px; width: 8px; height: 5px; viewbox-width: 8; viewbox-height: 5; fill: #c8c8c8; commands: "M 0 0 L 8 0 L 4 5 Z"; }
+        pla := TouchArea { mouse-cursor: pointer; clicked => { if (root.menu) { root.menu = false; } else { root.open-menu(); } } } }
+    // song list (8 .. 408, 312 tall), wheel scroll
+    Rectangle { x: 8px; y: 139px; width: 400px; height: 312px; clip: true;
+        TouchArea { scroll-event(e) => { root.sc = max(0px, min(root.sc - e.delta-y, max(0px, root.rows.length * 52px - 4px - 312px))); return accept; } }
+        for r[i] in root.rows: Rectangle { x: 0; y: i * 52px - root.sc; width: 394px; height: 48px; border-radius: 10px; background: ra.has-hover && !r.added ? #2a2a2a : transparent;
+            Rectangle { x: 8px; y: 4px; width: 40px; height: 40px; border-radius: 8px; background: #333333;
+                if r.has-img: Image { width: 40px; height: 40px; source: r.img; } }
+            Text { x: 58px; y: 7px; width: parent.width - 128px; height: 17px; text: r.name; font-size: 12.5px; font-weight: 700; color: r.added ? #9a9a9a : Pal.tx; overflow: elide; }
+            Text { x: 58px; y: 25px; width: parent.width - 128px; height: 14px; text: r.artist; font-size: 10.5px; color: #9a9a9a; overflow: elide; }
+            if ra.has-hover || r.added: Text { x: parent.width - 12px - self.preferred-width; y: 16px; text: r.added ? "✓ Added" : "+ Add"; font-size: 10.5px; font-weight: 700; color: #1db954; }
+            ra := TouchArea { mouse-cursor: pointer; clicked => { root.menu = false; if (!r.added) { root.add(i); } } } }
+        if root.rows.length * 52px - 4px > 312px: Rectangle { x: 394px; y: root.sc * 312px / (root.rows.length * 52px - 4px); width: 6px; height: 312px * 312px / (root.rows.length * 52px - 4px); border-radius: 3px; background: #3a3a3a; }
+    }
+    Text { x: 19px; y: 459px; text: "Drag songs in from Spotify, or drop them on the age page anytime"; font-size: 10.5px; color: #969696; }
+    Rectangle { x: 16px; y: 479px; width: 384px; height: 56px; border-radius: 10px; background: zone-on ? #1ed7601f : transparent;
+        drop-shadow-blur: zone-on ? 10px : 0; drop-shadow-color: #1ed76073;
+        Path { width: 384px; height: 56px; viewbox-width: 384; viewbox-height: 56; stroke: zone-on ? #1ed760 : #5a5a5a; stroke-width: 2px; fill: transparent; commands: root.zone-path; }
+        Text { text: root.zone-text; font-size: 12.5px; font-weight: zone-on ? 700 : 600; color: zone-on ? #1db954 : #7d7d7d; horizontal-alignment: center; vertical-alignment: center; width: parent.width; height: parent.height; } }
+    Text { x: 19px; y: 532px; text: root.msg; font-size: 12px; color: root.err ? #e5534b : #9a9a9a; }
+    if root.menu: Rectangle { x: 0; y: 0; width: root.width; height: root.height;
+        TouchArea { clicked => { root.menu = false; } }
+        Rectangle { x: 190px; y: 136px; width: 210px; height: min(300px, root.lists.length * 26px + 10px); background: #2e2e2e; border-width: 1px; border-color: #464646; border-radius: 6px; clip: true;
+            TouchArea {}
+            for l[i] in root.lists: Rectangle { x: 4px; y: 5px + i * 26px; width: parent.width - 8px; height: 26px; border-radius: 5px; background: la.has-hover || l.cur ? #3c3c3c : transparent;
+                Text { x: 10px; width: parent.width - 50px; height: parent.height; text: l.name; font-size: 12.5px; font-weight: 600; color: Pal.tx; vertical-alignment: center; overflow: elide; }
+                Text { x: parent.width - 10px - self.preferred-width; height: parent.height; text: l.n; font-size: 10.5px; color: #969696; vertical-alignment: center; }
+                la := TouchArea { mouse-cursor: pointer; clicked => { root.menu = false; root.pick(i); } } } } }
+}

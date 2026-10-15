@@ -1,0 +1,102 @@
+// 1.0.9 list_picker (Tauri 1.1 ui/pick.html, picker.py draw_pick): Your playlists grid + search, Paste link, your lists, Use. W = 420.
+import { Pal, Icon } from "kit.slint";
+
+export struct Tile { name: string, count: string, img: image, has-img: bool, liked: bool, sel: bool }
+export struct SavedList { name: string, count: string, img: image, has-img: bool }
+
+component GreenBtn inherits Rectangle {
+    in property <string> text; in property <length> fs: 11px; in property <bool> off;
+    callback clicked();
+    border-radius: self.height / 2; background: off ? #262626 : ta.has-hover ? #1ed760 : #1DB954;
+    Text { width: parent.width; height: parent.height; text: root.text; font-size: root.fs; font-weight: 700; color: off ? #6c6c6c : #121212; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+    ta := TouchArea { enabled: !off; mouse-cursor: off ? default : pointer; clicked => { root.clicked(); } }
+}
+
+export component PickWin inherits Window {
+    in property <string> head: "Playlist";
+    in property <string> state: "load";          // load | login | off | ok
+    in property <[Tile]> tiles;                  // already filtered by the search
+    in-out property <length> sc;
+    in property <length> max-sc;
+    in-out property <string> filter;
+    in-out property <string> link;
+    in property <string> hint;
+    in property <color> hint-col: #9a9a9a;
+    in property <bool> drag;
+    in property <string> drop-path;              // dashed outline (364 x 46)
+    in property <[SavedList]> saved;
+    in property <string> use-text: "Pick a playlist";
+    in property <bool> use-on;
+    callback select(int); callback use-it(); callback ok(); callback pasted(string); callback retry(); callback pick-saved(int); callback close(); callback filtered();
+    property <length> GT: 79.5px; property <length> GR: GT + 42px; property <length> GH: 241px;
+    property <length> ly: 497px + (saved.length > 0 ? 20px + saved.length * 46px : 0) + 6px;
+    title: "AoE4 Spotify";
+    default-font-family: "Segoe UI";
+    width: 420px; height: ly + 48px + 16px; background: #121212;
+    forward-focus: keys;
+    keys := FocusScope { key-pressed(e) => { if (e.text == Key.Escape) { root.close(); return accept; } return reject; } }
+    Text { x: 20px; y: 24px - 11px; height: 22px; text: root.head; font-size: 15px; font-weight: 700; color: Pal.tx; vertical-alignment: center; }
+    Rectangle { x: 16px; y: 44px; width: 388px; height: 301px; border-radius: 12px; background: #1f1f1f; }
+    Rectangle { x: 26px; y: 54px; width: 28px; height: 28px; border-radius: 14px; background: #2a2a2a; }
+    Icon { x: 29px; y: 57px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_pk_note22@1.png"); tint: Pal.green; }
+    Text { x: 64px; y: 68px - 9px; height: 18px; text: "Your playlists"; font-size: 12.5px; font-weight: 700; color: Pal.tx; vertical-alignment: center; }
+    Rectangle { x: 242px; y: 54px; width: 150px; height: 28px; border-radius: 14px; background: #181818; border-width: 1.2px; border-color: sq.has-focus ? #6a6a6a : #4a4a4a; }
+    Icon { x: 249px; y: 59px; width: 18px; height: 18px; source: @image-url("../../ui/img/mk_pk_search18@1.png"); tint: #9a9a9a; }
+    if root.filter == "": Text { x: 272px; y: 58px; height: 20px; text: "Search"; font-size: 10.5px; color: #6c6c6c; vertical-alignment: center; }
+    sq := TextInput { x: 272px; y: 58px; width: 108px; height: 20px; text <=> root.filter; font-size: 10.5px; color: Pal.tx; vertical-alignment: center; single-line: true;
+        edited => { root.sc = 0; root.filtered(); }
+        key-pressed(e) => { if (e.text == Key.Escape) { if (root.filter != "") { root.filter = ""; root.sc = 0; root.filtered(); return accept; } root.close(); return accept; } return reject; } }
+    // grid
+    Rectangle { x: 28px; y: 92px; width: 364px; height: GH; background: #1f1f1f; clip: true;
+        TouchArea { scroll-event(e) => { root.sc = max(0px, min(root.max-sc, root.sc - e.delta-y / 100px * GR * 0.6)); return accept; } }
+        for t[i] in root.tiles: Rectangle {
+            property <length> tx: 4px + mod(i, 4) * (GT + 10px);
+            property <length> ty: 4px + floor(i / 4) * GR - root.sc;
+            x: tx; y: ty; width: GT; height: GR;
+            Rectangle { x: 0; y: 0; width: GT; height: GT; border-radius: 8px; background: t.liked ? #6a6ad8 : #2c2c2c;
+                if t.liked: Rectangle { border-radius: 8px; background: @linear-gradient(135deg, #4527d6 0%, #9cc3e6 100%);
+                    Path { x: (GT - 40px) / 2; y: (GT - 40px) / 2 - 2.4px; width: 40px; height: 40px; viewbox-width: 100; viewbox-height: 100; fill: white;
+                        commands: "M 50 69 L 31.2 50 A 10.5 10.5 0 1 1 50 40 A 10.5 10.5 0 1 1 68.8 50 Z"; } }
+                if !t.liked && t.has-img: Image { width: GT; height: GT; source: t.img; }
+                if !t.liked && !t.has-img: Text { width: GT; height: GT; text: "♪"; font-size: 16px; color: #5a5a5a; horizontal-alignment: center; vertical-alignment: center; }
+                if ta.has-hover && !t.sel: Rectangle { border-radius: 8px; background: #ffffff1a; } }
+            if t.sel: Rectangle { x: -3px; y: -3px; width: 85.5px; height: 85.5px; border-radius: 10.5px; border-width: 2.2px; border-color: Pal.green; }
+            if t.sel: Rectangle { x: 53.5px; y: 53.5px; width: 20px; height: 20px; border-radius: 10px; background: Pal.green;
+                Path { width: 20px; height: 20px; viewbox-width: 20; viewbox-height: 20; stroke: #121212; stroke-width: 2.2px; fill: transparent; commands: "M 5.8 10.4 L 8.8 13.2 L 14.4 7.2"; } }
+            Text { x: 1px; y: 86px; width: 78px; height: 14px; text: t.name; font-size: 10.5px; font-weight: 700; color: Pal.tx; overflow: elide; vertical-alignment: center; }
+            Text { x: 1px; y: 102px; height: 13px; text: t.count; font-size: 9.5px; color: #9a9a9a; vertical-alignment: center; }
+            ta := TouchArea { mouse-cursor: pointer; pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.select(i); } } double-clicked => { root.select(i); root.use-it(); } } }
+        if root.max-sc > 0: Rectangle {
+            property <length> th: max(28px, GH * GH / (GH + root.max-sc));
+            x: 360px; y: (GH - th) * root.sc / root.max-sc; width: 4px; height: th; border-radius: 2px; background: sba.pressed ? #9a9a9a : sba.has-hover ? #7a7a7a : #5a5a5a;
+            sba := TouchArea { mouse-cursor: pointer; property <length> s0; property <length> y0;
+                pointer-event(e) => { if (e.kind == PointerEventKind.down) { self.s0 = root.sc; self.y0 = self.mouse-y + parent.y; } }
+                moved => { root.sc = max(0px, min(root.max-sc, self.s0 + (self.mouse-y + parent.y - self.y0) * root.max-sc / max(1px, GH - th))); } } }
+        if root.state != "ok" || root.tiles.length == 0: Rectangle { width: 364px; height: GH;
+            Text { y: GH / 2 - 14px - 9px; width: 364px; text: root.state == "load" ? "Loading your playlists…" : root.state == "login" ? "Log in to Spotify first" : root.state == "off" ? "Can't reach Spotify" : "No matches";
+                font-size: root.state == "ok" ? 12px : 12.5px; font-weight: root.state == "ok" ? 400 : 700; color: root.state == "ok" ? #9a9a9a : Pal.tx; horizontal-alignment: center; }
+            if root.state == "login": Text { y: GH / 2 - 14px - 9px + 21px; width: 364px; text: "Use Log in in the panel"; font-size: 10.5px; color: #9a9a9a; horizontal-alignment: center; }
+            if root.state == "off": GreenBtn { x: 364px / 2 - 52px; y: GH / 2 - 14px + 40px; width: 104px; height: 30px; text: "Retry"; clicked => { root.retry(); } } }
+    }
+    // paste link
+    Rectangle { x: 16px; y: 357px; width: 388px; height: 128px; border-radius: 12px; background: #1f1f1f; }
+    Rectangle { x: 26px; y: 367px; width: 28px; height: 28px; border-radius: 14px; background: #2a2a2a; }
+    Icon { x: 29px; y: 370px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_pk_link22@1.png"); tint: Pal.green; }
+    Text { x: 64px; y: 381px - 9px; height: 18px; text: "Paste link"; font-size: 12.5px; font-weight: 700; color: Pal.tx; vertical-alignment: center; }
+    Rectangle { x: 28px; y: 399px; width: 364px; height: 46px; border-radius: 10px; background: root.drag ? #1b2a20 : #181818;
+        Path { width: 364px; height: 46px; viewbox-width: 364; viewbox-height: 46; stroke: root.drag ? Pal.green : #4a4a4a; stroke-width: 1.4px; fill: transparent; commands: root.drop-path; } }
+    Icon { x: 37px; y: 411px; width: 22px; height: 22px; source: @image-url("../../ui/img/mk_pk_drop22@1.png"); tint: root.drag ? Pal.green : #9a9a9a; }
+    if root.link == "": Text { x: 64px; y: 410px; height: 24px; text: "Paste or drop a link"; font-size: 11px; color: #6c6c6c; vertical-alignment: center; }
+    TextInput { x: 64px; y: 410px; width: 268px; height: 24px; text <=> root.link; font-size: 11px; color: Pal.tx; vertical-alignment: center; single-line: true;
+        edited => { root.pasted(self.text); } accepted => { root.ok(); } }
+    GreenBtn { x: 340px; y: 410px; width: 42px; height: 24px; text: "OK"; clicked => { root.ok(); } }
+    Text { x: 30px; y: 465px - 8px; height: 16px; text: root.hint; font-size: 10.5px; color: root.hint-col; vertical-alignment: center; }
+    // your lists
+    if root.saved.length > 0: Text { x: 20px; y: 497px + 8px - 8px; height: 16px; text: "Your lists"; font-size: 10.5px; font-weight: 700; color: #9a9a9a; vertical-alignment: center; }
+    for l[i] in root.saved: Rectangle { x: 16px; y: 517px + i * 46px; width: 388px; height: 40px; border-radius: 10px; background: la.has-hover ? #262626 : #1f1f1f;
+        Rectangle { x: 10px; y: 6px; width: 28px; height: 28px; border-radius: 7px; background: #2a2a2a; if l.has-img: Image { width: 28px; height: 28px; source: l.img; } }
+        Text { x: 48px; height: 40px; text: l.name; font-size: 12px; font-weight: 700; color: Pal.tx; vertical-alignment: center; }
+        Text { x: parent.width - 14px - self.preferred-width; height: 40px; text: l.count; font-size: 10.5px; color: #9a9a9a; vertical-alignment: center; }
+        la := TouchArea { mouse-cursor: pointer; clicked => { root.pick-saved(i); } } }
+    GreenBtn { x: 16px; y: ly; width: 388px; height: 48px; fs: 13.5px; text: root.use-text; off: !root.use-on; clicked => { root.use-it(); } }
+}
