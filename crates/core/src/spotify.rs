@@ -97,6 +97,12 @@ impl Spotify {
     /// Read handle for use outside the lock (see `Web`).
     pub fn web(&mut self) -> Result<Web, String> { let tok = self.access()?; Ok(Web { agent: self.agent.clone(), api_base: self.api_base.clone(), tok }) }
     pub fn logged_in(&self) -> bool { self.tok.is_some() }
+    /// Re-read token.json. The panel may have logged in while this process was already up.
+    /// A missing file clears the login. A half-written file keeps the previous login. The token is never logged.
+    pub fn reload_token(&mut self) {
+        if !self.path.is_file() { self.tok = None; return; }
+        if let Ok(s) = std::fs::read_to_string(&self.path) { if let Ok(t) = serde_json::from_str::<Token>(&s) { self.tok = Some(t); } }
+    }
     pub fn has_client(&self) -> bool { !self.cid.is_empty() }
 
     fn save(&self) {

@@ -18,11 +18,18 @@ pub struct Aoe4 {
     my_hidx: Option<usize>,
     my_id: Option<i32>,
     in_match: bool,
+    /// True from RequestGameBegin until the mission starts or the match ends. A replay marker in that
+    /// window is for this load (1.0.9 sets in_match on begin; this flag is the same window).
+    loading: bool,
     replay: bool,
+    /// Music in replays was on when the marker was seen: keep emitting ages. Sticky for this match.
+    watching: bool,
     result: Option<i32>,
     ended: bool,
     ages: HashMap<i32, String>,
     resolver: IdResolver,
+    /// Cog "Music in replays", copied in by the engine before each feed. Read when the marker is seen.
+    pub replay_music: bool,
 }
 
 struct Res { human: Regex, steam: Regex, profile: Regex, begin: Regex, start: Regex, replay: Regex, upstart: Regex, updone: Regex, result: Regex, end: Regex }
@@ -53,9 +60,13 @@ impl Aoe4 {
                 end: r(r"MOD -- Game Over at frame|GameObj::ShutdownGameObj"),
             },
             me_name: None, me_profile: None, humans: vec![], first_human: None, my_slot: None, my_civ: None,
-            my_hidx: None, my_id: None, in_match: false, replay: false, result: None, ended: false, ages: HashMap::new(), resolver,
+            my_hidx: None, my_id: None, in_match: false, loading: false, replay: false, watching: false,
+            result: None, ended: false, ages: HashMap::new(), resolver, replay_music: false,
         }
     }
+
+    /// Music in replays is on and this match is being followed.
+    pub fn watching(&self) -> bool { self.watching }
 
     /// Real resolver: newest DataCRC*.txt playermap (setupindex -> simid - 1000).
     pub fn datacrc_resolver(dir: PathBuf) -> IdResolver {
@@ -70,7 +81,28 @@ impl Aoe4 {
 
     fn reset_match(&mut self) {
         self.humans.clear(); self.first_human = None; self.my_slot = None; self.my_civ = None; self.my_hidx = None;
-        self.my_id = None; self.in_match = false; self.replay = false; self.result = None; self.ended = false; self.ages.clear();
+        self.my_id = None; self.in_match = false; self.loading = false; self.replay = false; self.watching = false;
+        self.result = None; self.ended = false; self.ages.clear();
+    }
+
+    /// Whose ages a replay follows: you, if you are in it; otherwise the first human in the lobby.
+    fn pick_replay_player(&mut self, out: &mut Vec<GameEvent>) {
+        if self.my_slot.is_some() { return; }
+        if let Some((sl, civ)) = self.first_human.clone() {
+            self.my_slot = Some(sl); self.my_civ = Some(civ.clone()); self.my_hidx = Some(0);
+            out.push(GameEvent::Lobby { slot: sl, civ });
+        }
+    }
+
+    fn mark_replay(&mut self, out: &mut Vec<GameEvent>) {
+        if self.replay_music {
+            self.watching = true;
+            self.pick_replay_player(out);
+            if self.in_match { out.push(GameEvent::Replay); }
+        } else {
+            self.replay = true;
+            if self.in_match { out.push(GameEvent::Replay); }
+        }
     }
 
     fn is_player(&mut self, out: &mut Vec<GameEvent>) -> bool {
@@ -136,7 +168,7 @@ impl GameAdapter for Aoe4 {
             }
             return out;
         }
-        if self.re.begin.is_match(line) { self.reset_match(); return out; }
+        if self.re.begin.is_match(line) { self.reset_match(); self.loading = true; return out; }
         if let Some(c) = self.re.human.captures(line) {
             let prof = c[3].to_string();
             if !self.humans.contains(&prof) {
@@ -153,22 +185,25 @@ impl GameAdapter for Aoe4 {
             }
             return out;
         }
-        if self.re.replay.is_match(line) && self.in_match {
-            if !self.replay { self.replay = true; out.push(GameEvent::Replay); }
+        if self.re.replay.is_match(line) && (self.in_match || self.loading) {
+            if !self.replay && !self.watching { self.mark_replay(&mut out); }
             return out;
         }
         if self.re.start.is_match(line) {
             if self.in_match || self.replay { return out; }
-            if !self.is_player(&mut out) { self.replay = true; return out; }
-            self.in_match = true;
+            if self.watching { self.pick_replay_player(&mut out); }
+            if !self.is_player(&mut out) { self.replay = true; self.loading = false; return out; }
+            self.in_match = true; self.loading = false;
             if let Some(sl) = self.my_slot { self.my_id = (self.resolver)(sl, self.my_hidx); }
             if let Some(id) = self.my_id { self.ages.insert(id, "dark_age".into()); }
+            let follow = self.watching;
             out.push(GameEvent::MatchStart { civ: self.my_civ.clone() });
             out.push(GameEvent::Age { key: "dark".into(), reason: "start".into() });
+            if follow { out.push(GameEvent::Replay); }
             return out;
         }
         if self.re.end.is_match(line) && self.in_match {
-            self.in_match = false; self.ended = self.result.is_none();
+            self.in_match = false; self.loading = false; self.watching = false; self.ended = self.result.is_none();
             out.push(GameEvent::MatchEnd { result: self.result });
             return out;
         }

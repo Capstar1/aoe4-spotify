@@ -115,6 +115,127 @@ fn run_am(am: aoe4core::switcher::AfterMatch) -> Vec<Action> {
     for l in MATCH { for e in a.feed(l) { acts.extend(s.on_event(&e)); } }
     acts
 }
+fn play_ages(acts: &[Action]) -> Vec<&str> {
+    acts.iter().filter_map(|a| match a { Action::Play { age, .. } => Some(age.as_str()), _ => None }).collect()
+}
+
+/// A real match only holds the opening play. Age-ups after that are immediate.
+#[test]
+fn live_match_delays_only_the_opening_play() {
+    let mut a = adapter();
+    let mut s = Switcher::new(true, 2.0, lists());
+    s.start_delay = 3.0;
+    let mut acts = vec![];
+    for l in &MATCH[..5] { s.set_now(0.0); for e in a.feed(l) { acts.extend(s.on_event(&e)); } }
+    assert!(play_ages(&acts).is_empty());
+    s.set_now(3.0); acts.extend(s.poll());
+    assert_eq!(play_ages(&acts), ["dark"]);
+    s.set_now(10.0);
+    for e in a.feed("Age up started from dark_age to feudal_age for player id 6") { acts.extend(s.on_event(&e)); }
+    assert_eq!(play_ages(&acts), ["dark", "feudal"]);
+}
+
+/// The live 2026-10-15 case: replay marker about a second after the start. Music in replays off.
+#[test]
+fn replay_off_cancels_the_opening_play() {
+    let mut a = adapter();
+    let mut s = Switcher::new(true, 2.0, lists());
+    s.start_delay = 3.0;
+    let mut lines = MATCH.to_vec();
+    lines.insert(5, "PlaybackSynchronization::Start");
+    let mut acts = vec![];
+    for (i, l) in lines.iter().enumerate() {
+        s.set_now(if i < 5 { 0.0 } else { 1.0 });
+        for e in a.feed(l) { acts.extend(s.on_event(&e)); }
+        if i == 5 { s.set_now(3.0); acts.extend(s.poll()); }
+    }
+    s.set_now(30.0); acts.extend(s.poll());
+    assert!(play_ages(&acts).is_empty());
+    assert!(!acts.iter().any(|a| matches!(a, Action::Stop | Action::Restore)));
+}
+
+/// Marker during the load, before Starting mission, with the setting off: still no music.
+#[test]
+fn replay_off_before_start_never_plays() {
+    let mut a = adapter();
+    let mut s = Switcher::new(true, 2.0, lists());
+    s.start_delay = 3.0;
+    let lines = ["GAME -- Current Steam name is [Capstar]", "[Match Flow] GameApp::RequestGameBegin()",
+        "PlaybackSynchronization::Start", "GAME -- Human Player: 0 Capstar 111 0 english", "GAME -- Starting mission",
+        "Age up started from dark_age to feudal_age for player id 6"];
+    let mut acts = vec![];
+    for l in lines { s.set_now(0.0); for e in a.feed(l) { acts.extend(s.on_event(&e)); } }
+    s.set_now(10.0); acts.extend(s.poll());
+    assert!(play_ages(&acts).is_empty());
+}
+
+/// Music in replays on: dark plays after the start delay, later ages only forward and only after they hold.
+#[test]
+fn replay_on_follows_forward_after_settle() {
+    let mut a = adapter();
+    a.replay_music = true;
+    let mut s = Switcher::new(true, 2.0, lists());
+    s.start_delay = 3.0; s.replay_settle = 5.0; s.music_in_replays = true;
+    let mut acts = vec![];
+    for l in &MATCH[..5] { s.set_now(0.0); for e in a.feed(l) { acts.extend(s.on_event(&e)); } }
+    s.set_now(1.0);
+    for e in a.feed("PlaybackSynchronization::Start") { acts.extend(s.on_event(&e)); }
+    assert!(a.watching());
+    s.set_now(3.0); acts.extend(s.poll());
+    assert_eq!(play_ages(&acts), ["dark"]);
+    s.set_now(4.0);
+    for e in a.feed("Age up started from dark_age to feudal_age for player id 6") { acts.extend(s.on_event(&e)); }
+    acts.extend(s.poll());
+    assert_eq!(play_ages(&acts), ["dark"], "feudal has not held yet");
+    s.set_now(6.0);
+    for e in a.feed("Age up started from feudal_age to castle_age for player id 6") { acts.extend(s.on_event(&e)); }
+    acts.extend(s.poll());
+    assert_eq!(play_ages(&acts), ["dark"], "a newer age replaces the one that was waiting");
+    s.set_now(11.0); acts.extend(s.poll());
+    assert_eq!(play_ages(&acts), ["dark", "castle"]);
+    s.set_now(12.0);
+    for e in a.feed("Age up started from dark_age to feudal_age for player id 6") { acts.extend(s.on_event(&e)); }
+    s.set_now(20.0); acts.extend(s.poll());
+    assert_eq!(play_ages(&acts), ["dark", "castle"], "seeking backwards does not switch");
+}
+
+/// You are not in the replay lobby: follow the first human, still with replay pacing.
+#[test]
+fn replay_on_before_start_follows_first_human() {
+    let mut a = adapter();
+    a.replay_music = true;
+    let mut s = Switcher::new(true, 2.0, lists());
+    s.start_delay = 3.0; s.replay_settle = 5.0; s.music_in_replays = true;
+    let lines = ["GAME -- Current Steam name is [Capstar]", "[Match Flow] GameApp::RequestGameBegin()",
+        "PlaybackSynchronization::Start", "GAME -- Human Player: 0 A 1 0 english", "GAME -- Human Player: 1 B 2 1 french",
+        "GAME -- Starting mission", "Age up started from dark_age to feudal_age for player id 6"];
+    let mut acts = vec![];
+    for l in lines { s.set_now(0.0); for e in a.feed(l) { acts.extend(s.on_event(&e)); } }
+    assert!(a.watching());
+    s.set_now(3.0); acts.extend(s.poll());
+    assert_eq!(play_ages(&acts), ["dark"]);
+    s.set_now(5.0); acts.extend(s.poll());
+    assert_eq!(play_ages(&acts), ["dark", "feudal"]);
+}
+
+/// A watched replay still runs After match. The replay marker itself does not stop the music.
+#[test]
+fn watched_replay_restores_when_the_match_ends() {
+    let mut a = adapter();
+    a.replay_music = true;
+    let mut s = Switcher::new(true, 2.0, lists());
+    s.start_delay = 3.0; s.music_in_replays = true;
+    let mut acts = vec![];
+    for l in &MATCH[..5] { s.set_now(0.0); for e in a.feed(l) { acts.extend(s.on_event(&e)); } }
+    s.set_now(1.0);
+    for e in a.feed("PlaybackSynchronization::Start") { acts.extend(s.on_event(&e)); }
+    s.set_now(3.0); acts.extend(s.poll());
+    s.set_now(9.0);
+    for e in a.feed("MOD -- Game Over at frame 9") { acts.extend(s.on_event(&e)); }
+    assert_eq!(play_ages(&acts), ["dark"]);
+    assert_eq!(acts.last(), Some(&Action::Restore));
+}
+
 #[test]
 fn after_match_stop_and_winloss() {
     use aoe4core::switcher::AfterMatch;

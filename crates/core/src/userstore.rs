@@ -27,6 +27,23 @@ pub fn set_user(dir: &Path, k: &str, v: Value) -> bool {
     write_atomic(&dir.join("config.json"), &u).is_ok()
 }
 
-/// "Music in replays" (settings.json, 1.1 prefs).
+/// "Music in replays" (settings.json, 1.1 prefs). Other keys in that file stay.
 pub fn replays(dir: &Path, default: bool) -> bool { read_json(&dir.join("settings.json"))["music_in_replays"].as_bool().unwrap_or(default) }
-pub fn set_replays(dir: &Path, on: bool) -> bool { write_atomic(&dir.join("settings.json"), &json!({ "music_in_replays": on })).is_ok() }
+pub fn set_replays(dir: &Path, on: bool) -> bool {
+    let p = dir.join("settings.json"); let mut u = read_json(&p); u["music_in_replays"] = json!(on); write_atomic(&p, &u).is_ok()
+}
+
+/// What the switcher is playing, for the panel's row fire. Missing file means nothing (do not trust a stale read).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NowPlay { pub in_match: bool, pub age: Option<String>, pub playing: Option<String> }
+fn now_path(dir: &Path) -> PathBuf { dir.join("now_playing.json") }
+pub fn read_now(dir: &Path) -> Option<NowPlay> {
+    let p = now_path(dir); if !p.is_file() { return None; }
+    let v = read_json(&p);
+    let s = |k: &str| v[k].as_str().map(|s| s.to_string()).filter(|s| !s.is_empty());
+    Some(NowPlay { in_match: v["in_match"].as_bool().unwrap_or(false), age: s("age"), playing: s("playing") })
+}
+pub fn write_now(dir: &Path, in_match: bool, age: Option<&str>, playing: Option<&str>) -> bool {
+    write_atomic(&now_path(dir), &json!({ "in_match": in_match, "age": age, "playing": playing })).is_ok()
+}
+pub fn clear_now(dir: &Path) { let _ = std::fs::remove_file(now_path(dir)); }

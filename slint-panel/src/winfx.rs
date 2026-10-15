@@ -26,9 +26,89 @@ fn reveal() {
     let h = WIN.with(|x| x.get()); if h == 0 { return; }
     unsafe { RedrawWindow(h, std::ptr::null(), 0, 0x1 | 0x100); DwmFlush(); }   // RDW_INVALIDATE | RDW_UPDATENOW
     cloak(h, false);
+    super::restore::arm(h);
     if std::env::var_os("AOE4S_TIMING").is_some() { aoe4engine::sys::log("timing: first frame painted before uncloak"); }
 }
+}
 
+/// Minimize / restore. Windows hands back an empty surface, and the software renderer then blits only the
+/// regions it thinks changed, so a transparent panel comes back mostly see-through. Cloak across the restore,
+/// force a full-size blit (a 1px size nudge makes softbuffer drop the old buffer), clear the stuck minimize
+/// hover, then uncloak. `cb(true)` while minimized, `cb(false)` after the restored frame is up.
+#[cfg(windows)] pub mod restore {
+    use std::cell::Cell;
+    #[repr(C)] struct Cwp { lp: isize, wp: usize, msg: u32, h: isize }
+    #[repr(C)] struct Rc { l: i32, t: i32, r: i32, b: i32 }
+    #[link(name = "user32")] extern "system" {
+        fn SetWindowsHookExW(id: i32, f: unsafe extern "system" fn(i32, usize, isize) -> isize, m: isize, t: u32) -> isize;
+        fn CallNextHookEx(h: isize, c: i32, w: usize, l: isize) -> isize;
+        fn RedrawWindow(h: isize, r: *const crate::geom::Rect, rgn: isize, f: u32) -> i32;
+        fn GetWindowRect(h: isize, r: *mut Rc) -> i32;
+        fn SetWindowPos(h: isize, after: isize, x: i32, y: i32, w: i32, hh: i32, f: u32) -> i32;
+        fn SendMessageW(h: isize, m: u32, w: usize, l: isize) -> isize;
+    }
+    #[link(name = "kernel32")] extern "system" { fn GetCurrentThreadId() -> u32; }
+    #[link(name = "dwmapi")] extern "system" { fn DwmSetWindowAttribute(h: isize, a: u32, v: *const u32, n: u32) -> i32; fn DwmFlush() -> i32; }
+    thread_local! {
+        static HOOK: Cell<isize> = const { Cell::new(0) };
+        static WIN: Cell<isize> = const { Cell::new(0) };
+        static WAS: Cell<bool> = const { Cell::new(false) };
+        static BUSY: Cell<bool> = const { Cell::new(false) };
+        static CB: Cell<Option<fn(bool)>> = const { Cell::new(None) };
+    }
+    fn cloak(h: isize, on: bool) { let v: u32 = on as u32; unsafe { DwmSetWindowAttribute(h, 13, &v, 4) }; }
+    fn fire(min: bool) { if let Some(cb) = CB.with(|c| c.get()) { cb(min); } }
+    pub fn set_cb(cb: fn(bool)) { CB.with(|c| c.set(Some(cb))); }
+    /// Watch this window for minimize and restore. Safe to call again.
+    pub fn arm(h: isize) {
+        if h == 0 { return; }
+        WIN.with(|x| x.set(h));
+        if HOOK.with(|x| x.get()) != 0 { return; }
+        let k = unsafe { SetWindowsHookExW(4, proc, 0, GetCurrentThreadId()) };   // WH_CALLWNDPROC
+        HOOK.with(|x| x.set(k));
+    }
+    unsafe extern "system" fn proc(c: i32, w: usize, l: isize) -> isize {
+        if c >= 0 && l != 0 && !BUSY.with(|b| b.get()) {
+            let m = &*(l as *const Cwp);
+            let me = WIN.with(|x| x.get());
+            if m.h == me && m.msg == 5 {   // WM_SIZE
+                if m.wp == 1 {   // SIZE_MINIMIZED
+                    WAS.with(|x| x.set(true));
+                    slint::Timer::single_shot(std::time::Duration::ZERO, || fire(true));
+                } else if (m.wp == 0 || m.wp == 2) && WAS.with(|x| x.replace(false)) {   // restored or maximized
+                    BUSY.with(|b| b.set(true));
+                    cloak(me, true);
+                    slint::Timer::single_shot(std::time::Duration::ZERO, reveal);
+                }
+            }
+        }
+        CallNextHookEx(0, c, w, l)
+    }
+    fn paint(h: isize) { unsafe { RedrawWindow(h, std::ptr::null(), 0, 0x1 | 0x100 | 0x80 | 0x400); } }   // INVALIDATE|UPDATENOW|ALLCHILDREN|FRAME
+    fn reveal() {
+        let h = WIN.with(|x| x.get());
+        if h != 0 {
+            unsafe {
+                let mut r = Rc { l: 0, t: 0, r: 0, b: 0 };
+                if GetWindowRect(h, &mut r) != 0 {
+                    let (w, hh) = (r.r - r.l, r.b - r.t);
+                    if w > 50 && hh > 50 {
+                        // softbuffer keeps the old bitmap (age 1) and only blits dirty rects. A size change
+                        // allocates a new bitmap, so the next paint copies the whole window.
+                        SetWindowPos(h, 0, 0, 0, w - 1, hh, 0x2 | 0x4 | 0x10 | 0x100);   // NOMOVE|NOZORDER|NOACTIVATE|NOCOPYBITS
+                        paint(h);
+                        SendMessageW(h, 0x02A3, 0, 0);   // WM_MOUSELEAVE: drop the stuck minimize-button hover
+                        SetWindowPos(h, 0, 0, 0, w, hh, 0x2 | 0x4 | 0x10 | 0x100);
+                    }
+                }
+                paint(h);
+                DwmFlush();
+            }
+            cloak(h, false);
+        }
+        BUSY.with(|b| b.set(false));
+        fire(false);
+    }
 }
 #[cfg(windows)] pub mod resize {
 //! Page-switch resize with zero stale frames. DWM composes a moved/resized window with its OLD surface until the

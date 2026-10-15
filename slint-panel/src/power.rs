@@ -14,7 +14,19 @@ const TX: [f32; 3] = [242.0, 242.0, 242.0];      // #f2f2f2
 const CORAL_TX: [f32; 3] = [240.0, 214.0, 212.0]; // #f0d6d4
 
 struct St { frames: HashMap<i32, Image>, a: Option<f32>, pos: f32, anim: Option<(f32, f32, f32, Instant)>, timer: Option<Timer>, ui: Option<slint::Weak<Panel>> }
-thread_local! { static ST: RefCell<St> = RefCell::new(St { frames: HashMap::new(), a: None, pos: 0.0, anim: None, timer: None, ui: None }); }
+thread_local! {
+    static ST: RefCell<St> = RefCell::new(St { frames: HashMap::new(), a: None, pos: 0.0, anim: None, timer: None, ui: None });
+    static PAUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn paused() -> bool { PAUSED.with(|p| p.get()) }
+/// Minimized: stop the 8 ms redraw. A spin that was in progress finishes from the elapsed clock on restore.
+pub fn set_paused(p: bool) {
+    PAUSED.with(|c| c.set(p));
+    if p { ST.with(|s| s.borrow_mut().timer = None); return; }
+    if !ST.with(|s| s.borrow().anim.is_some()) { return; }
+    ST.with(|s| { let mut s = s.borrow_mut(); if s.timer.is_none() { let t = Timer::default(); t.start(TimerMode::Repeated, Duration::from_millis(8), step); s.timer = Some(t); } });
+    step();
+}
 
 /// Colour position: 0 deg = on (green), 180 = off (coral), 360 = on again.
 pub fn pwr_t(a: f32) -> f32 { let a = a.rem_euclid(360.0); 1.0 - (a - 180.0).abs() / 180.0 }
@@ -70,8 +82,8 @@ pub fn spin(ui: &Panel, to_off: bool, animate: bool) {
     let b = if mid && d == 0.0 { a0 } else { a0 + if d == 0.0 { 360.0 } else { d } };
     let dur = DUR * ((b - a0) / 180.0).max(0.35);
     ST.with(|s| { let mut s = s.borrow_mut(); s.anim = Some((a0, b, dur, Instant::now())); s.a = Some(a0);
-        if s.timer.is_none() { let t = Timer::default(); t.start(TimerMode::Repeated, Duration::from_millis(8), step); s.timer = Some(t); } });
-    step();
+        if s.timer.is_none() && !paused() { let t = Timer::default(); t.start(TimerMode::Repeated, Duration::from_millis(8), step); s.timer = Some(t); } });
+    if !paused() { step(); }
 }
 fn step() {
     let Some((a0, b, dur, t0, ui)) = ST.with(|s| { let s = s.borrow(); s.anim.map(|(a0, b, d, t)| (a0, b, d, t, s.ui.clone())) }) else { return };

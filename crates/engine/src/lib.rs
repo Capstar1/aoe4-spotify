@@ -30,6 +30,8 @@ pub struct Engine {
     pub status: Mutex<Status>, pub cv: Condvar, pub logged: AtomicBool, pub stat: Mutex<Option<(u64, serde_json::Value)>>,
     pub replays: AtomicBool, pub busy: AtomicBool, pub spotify: Mutex<Spotify>, pub tx: Mutex<Sender<Action>>, pub dir: PathBuf, pub ed: Mutex<serde_json::Value>,
     pub pick: Mutex<serde_json::Value>, pub gtg: Mutex<serde_json::Value>,
+    /// Set when the game closes so the log watcher leaves the loop.
+    pub stop: AtomicBool,
 }
 
 impl Engine {
@@ -47,12 +49,13 @@ impl Engine {
             upd: Mutex::new(serde_json::json!({ "phase": if updated { "done" } else { "idle" }, "msg": format!("Updated to {}", env!("CARGO_PKG_VERSION")) })),
             ages, status: Mutex::new(status), cv: Condvar::new(), logged: AtomicBool::new(logged0), stat: Mutex::new(None),
             replays: AtomicBool::new(replays0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx),
-            ed: Mutex::new(data::load_ed(&dir)), dir, pick: Mutex::new(serde_json::Value::Null), gtg: Mutex::new(serde_json::Value::Null) });
+            ed: Mutex::new(data::load_ed(&dir)), dir, pick: Mutex::new(serde_json::Value::Null), gtg: Mutex::new(serde_json::Value::Null),
+            stop: AtomicBool::new(false) });
         (e, rx, path)
     }
-    /// Start the game-log watcher and the Spotify worker threads.
-    pub fn start(self: &Arc<Self>, rx: Receiver<Action>, log_path: PathBuf) {
-        let a = self.clone(); std::thread::spawn(move || run::watch(a, log_path));
+    /// Start the game-log watcher and the Spotify worker threads. The panel does not call this.
+    pub fn start(self: &Arc<Self>, rx: Receiver<Action>, log_path: PathBuf, opts: run::WatchOpts) {
+        let a = self.clone(); std::thread::spawn(move || run::watch(a, log_path, opts));
         let b = self.clone(); std::thread::spawn(move || run::player(b, rx));
     }
     /// Settings-side state (settings, your lists / after match, intros, age data, edits), cached per settings version.

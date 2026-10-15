@@ -17,6 +17,12 @@ pub fn serve(f: impl Fn()) {
 pub fn ask_show() -> bool {
     unsafe { let h = OpenEventW(0x0002, 0, name().as_ptr()); if h == 0 { return false; } let ok = SetEvent(h) != 0; CloseHandle(h); ok }   // EVENT_MODIFY_STATE
 }
+/// Show `h`, or restore it when it is minimized, then bring it forward.
+pub fn reveal_hwnd(h: isize) {
+    #[link(name = "user32")] extern "system" { fn IsIconic(h: isize) -> i32; fn ShowWindow(h: isize, c: i32) -> i32; fn SetForegroundWindow(h: isize) -> i32; }
+    if h == 0 { return; }
+    unsafe { if IsIconic(h) != 0 { ShowWindow(h, 9); } else { ShowWindow(h, 5); } SetForegroundWindow(h); }
+}
 /// Older switchers (Tauri 1.1) have a window titled "AoE4 Spotify": show it.
 pub fn show_window_titled(t: &str) {
     #[link(name = "user32")] extern "system" { fn FindWindowW(c: *const u16, t: *const u16) -> isize; fn ShowWindow(h: isize, c: i32) -> i32; fn SetForegroundWindow(h: isize) -> i32; }

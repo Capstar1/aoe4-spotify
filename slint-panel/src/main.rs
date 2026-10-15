@@ -20,6 +20,7 @@ mod netimg;
 mod paths;
 mod geom;
 mod power;
+#[cfg(windows)] mod bg;
 #[cfg(windows)] mod winfx;
 use aoe4engine::{guides::{Shell, Win}, menu, updater, Engine};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
@@ -52,7 +53,7 @@ mod windows {
             match w { Win::Gtg => return crate::gtg::open(&e, &s), Win::Add => return crate::add::open(&e), Win::Pick => return crate::pick::open(&e),
                 Win::Access => return crate::access::open_access(&e, &s), Win::Own => return crate::access::open_own(&e, &s), Win::Panel => {} }
         }
-        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { if !PANEL_SHOWN.with(|v| v.get()) && !crate::FIRST.with(|d| d.get()) { crate::geom::centre_panel(&u); } let first = !crate::FIRST.with(|d| d.get()); if first { crate::power::init(&u); } #[cfg(windows)] if first { crate::winfx::arm_first_show(); } let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); crate::first_show(&u); })
+        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { if !PANEL_SHOWN.with(|v| v.get()) && !crate::FIRST.with(|d| d.get()) { crate::geom::centre_panel(&u); } let first = !crate::FIRST.with(|d| d.get()); if first { crate::power::init(&u); } #[cfg(windows)] if first { crate::winfx::arm_first_show(); } let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); #[cfg(windows)] crate::bg::set_panel_visible(true); crate::first_show(&u); })
     }
     pub fn close(w: Win) { match w { Win::Gtg => crate::gtg::close(), Win::Add => crate::add::close(), Win::Pick => crate::pick::close(), Win::Access => crate::access::close_access(), Win::Own => crate::access::close_own(), Win::Panel => {} } }
 }
@@ -62,6 +63,14 @@ mod windows {
 struct PillMsg { msg: Option<(String, bool, Option<Instant>)>, done_t0: Option<Instant> }
 
 fn main() -> Result<(), slint::PlatformError> {
+    let dir = aoe4core::userstore::data_dir();
+    let test = std::env::var_os("AOE4S_SHOT").is_some();
+    let Some(st) = (if test { Some(startup::Start { hidden: false, login_first: false, attach: false }) } else { startup::startup(&dir) }) else { return Ok(()) };
+    // Steam / --attach: headless switcher, no Slint. The panel is a different process and never calls eng.start().
+    #[cfg(windows)]
+    if st.hidden && !test { bg::run(&dir, st.attach); return Ok(()); }
+    #[cfg(not(windows))]
+    let _attach = st.attach;
     slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into())
         .with_winit_window_attributes_hook(|a| {
             let a = a.with_theme(Some(slint::winit_030::winit::window::Theme::Dark));   // dark native title bars (good to go, picker, Add a song)
@@ -69,11 +78,7 @@ fn main() -> Result<(), slint::PlatformError> {
             #[cfg(not(windows))] { a }
         })
         .select()?;
-    let dir = aoe4core::userstore::data_dir();
-    let test = std::env::var_os("AOE4S_SHOT").is_some();
-    let Some(st) = (if test { Some(startup::Start { hidden: false, login_first: false }) } else { startup::startup(&dir) }) else { return Ok(()) };
-    let (eng, rx, log_path) = Engine::new(dir.clone());
-    if std::env::var_os("AOE4S_NOWATCH").is_none() && !test { eng.start(rx, log_path); }
+    let (eng, _, _log_path) = Engine::new(dir.clone());   // no Spotify worker in this process; previews call Spotify directly
     let shell: Arc<dyn Shell> = Arc::new(UiShell);
     CTX.with(|c| *c.borrow_mut() = Some((eng.clone(), shell.clone())));
     if let Ok(k) = std::env::var("AOE4S_GTG") { return gtg_shot(&k); }
@@ -105,10 +110,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // ---- state -> view (250 ms change check, like the Tauri notifier; transient pill expiry)
     let refresh = { let (w, e, d, pm, sf) = (ui.as_weak(), eng.clone(), dir.clone(), pillm.clone(), set_fire.clone()); move |force: bool, last: &mut String| {
         let Some(u) = w.upgrade() else { return };
-        let fp = format!("{}|{}", e.fingerprint(), aoe4engine::picker::COVERS_VER.load(std::sync::atomic::Ordering::SeqCst));
+        let fp = format!("{}|{}|{}", e.fingerprint(), aoe4engine::picker::COVERS_VER.load(std::sync::atomic::Ordering::SeqCst), now_fp(&d));
         let mut pm = pm.borrow_mut();
         if let Some((_, _, Some(t))) = &pm.msg { if t.elapsed() > Duration::from_secs(2) { pm.msg = None; } }
-        let s = e.state(None);
+        let mut s = e.state(None);
+        overlay_live(&mut s, &d);
         if force || fp != *last { *last = fp; view::fill(&u, &s, &d); intros::tick(true); sf(forced_fire.unwrap_or_else(|| view::playing_row(&s))); }
         if s["upd"]["phase"] == "done" && pm.done_t0.is_none() { pm.done_t0 = Some(Instant::now()); }
         let gone = pm.done_t0.is_some_and(|t| t.elapsed() > Duration::from_secs(6));
@@ -117,8 +123,9 @@ fn main() -> Result<(), slint::PlatformError> {
     } };
     let last = Rc::new(RefCell::new(String::new()));
     refresh(true, &mut last.borrow_mut());
-    let poll = slint::Timer::default();
-    { let (r, l) = (refresh.clone(), last.clone()); poll.start(slint::TimerMode::Repeated, Duration::from_millis(250), move || r(false, &mut l.borrow_mut())); }
+    let poll = Rc::new(slint::Timer::default());
+    let start_poll: Rc<dyn Fn()> = Rc::new({ let (r, l, poll) = (refresh.clone(), last.clone(), poll.clone()); move || { let (r, l) = (r.clone(), l.clone()); poll.start(slint::TimerMode::Repeated, Duration::from_millis(250), move || r(false, &mut l.borrow_mut())); } });
+    start_poll();
     let now = { let (r, l) = (refresh.clone(), last.clone()); move || r(true, &mut l.borrow_mut()) };
 
     // ---- actions (same files, keys and rules as the Tauri 1.1 commands)
@@ -159,39 +166,68 @@ fn main() -> Result<(), slint::PlatformError> {
     } });
     intros::init(&ui, eng.clone(), shell.clone());
     ui.on_open_intros(|| intros::set_page("intros"));
-    // close: a game-launched switcher keeps running hidden (its window just hides); a panel quits
-    ui.on_close_app({ let w = w.clone(); let hidden = st.hidden; move || { if let Some(u) = w.upgrade() { let _ = u.hide(); } PANEL_SHOWN.with(|v| v.set(false)); if !hidden { let _ = slint::quit_event_loop(); } else { trim_when_hidden(); } } });
+    // The switcher is its own process. Closing the panel always quits this one; the game keeps being followed.
+    ui.on_close_app({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { let _ = u.hide(); } PANEL_SHOWN.with(|v| v.set(false)); #[cfg(windows)] bg::set_panel_visible(false); let _ = slint::quit_event_loop(); } });
     ui.on_minimize({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { use slint::winit_030::WinitWindowAccessor; u.window().with_winit_window(|ww| ww.set_minimized(true)); } } });
     ui.on_drag({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { use slint::winit_030::WinitWindowAccessor; u.window().with_winit_window(|ww| { let _ = ww.drag_window(); }); } } });
     ui.on_gear(|| {});
     // "Check for updates" result -> pill (2 s), or the update pill itself when one was found
-    let pr = slint::Timer::default();
-    { let (pm, n) = (pillm.clone(), now.clone()); pr.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
+    let pr = Rc::new(slint::Timer::default());
+    let start_pill: Rc<dyn Fn()> = Rc::new({ let (pm, n, pr) = (pillm.clone(), now.clone(), pr.clone()); move || { let (pm, n) = (pm.clone(), n.clone()); pr.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
         if let Some(r) = PILL_RESULT.with(|p| p.borrow_mut().take()) {
-            pm.borrow_mut().msg = if r.starts_with('\u{2193}') { None } else { let err = r.starts_with("Couldn"); Some((r, err, Some(Instant::now()))) }; n(); } }); }
+            pm.borrow_mut().msg = if r.starts_with('\u{2193}') { None } else { let err = r.starts_with("Couldn"); Some((r, err, Some(Instant::now()))) }; n(); } }); } });
+    start_pill();
+    #[cfg(windows)] {
+        let kick = now.clone();
+        MIN_POLL.with(|s| *s.borrow_mut() = Some(poll.clone()));
+        MIN_PILL.with(|s| *s.borrow_mut() = Some(pr.clone()));
+        MIN_FIRE.with(|s| *s.borrow_mut() = Some(fire_timer.clone()));
+        MIN_RESUME.with(|s| *s.borrow_mut() = Some(Rc::new(move || { start_poll(); start_pill(); kick(); })));
+        winfx::restore::set_cb(on_minimized);
+    }
 
     if let Ok(p) = std::env::var("AOE4S_SHOT") { shot(&ui, p); }
-    // ---- start-up (Tauri 1.1 setup): hidden switcher follows the game and auto-updates between matches;
-    // a panel checks for an update; started without arguments: log in first, then good to go
-    if st.hidden {
-        let e = eng.clone(); std::thread::spawn(move || updater::auto_update(e));
-        #[cfg(windows)] {
-            std::thread::spawn(|| aoe4winsys::signal::serve(|| { let _ = slint::invoke_from_event_loop(|| windows::show(Win::Panel)); }));
-            let e = eng.clone(); std::thread::spawn(move || aoe4winsys::launcher::follow_game(move || {
-                updater::install_pending(&e); let _ = slint::invoke_from_event_loop(|| { if !windows::panel_visible() { let _ = slint::quit_event_loop(); } }); }));
-        }
-        trim_when_hidden();
-    } else if !test { let e = eng.clone(); slint::Timer::single_shot(Duration::from_millis(1500), move || updater::check_at_start(e)); }   // deferred past the first screen
+    // A panel checks for an update. Started without arguments: log in first, then good to go.
+    // The game-launched switcher does its own silent update, in the other process.
+    if !test { let e = eng.clone(); slint::Timer::single_shot(Duration::from_millis(1500), move || updater::check_at_start(e)); }   // deferred past the first screen
     if st.login_first && !test {
         let (e, sh) = (eng.clone(), shell.clone());
         if e.spotify.lock().unwrap().logged_in() { std::thread::spawn(move || aoe4engine::guides::after_login(&sh, &e)); } else { aoe4engine::guides::do_login(sh, e); }
     } else if !st.hidden { windows::show(Win::Panel); }
+    #[cfg(windows)] if !test {
+        std::thread::spawn(|| aoe4winsys::signal::serve(|| { let _ = slint::invoke_from_event_loop(|| {
+            windows::show(Win::Panel); aoe4winsys::signal::reveal_hwnd(panel_hwnd()); }); }));
+        let e = eng.clone(); std::thread::spawn(move || bg::panel_attach(e));
+    }
     #[cfg(windows)] if let Ok(f) = std::env::var("AOE4S_BTRTEST") { btrtest::start(eng.clone(), shell.clone(), f); }
     slint::run_event_loop_until_quit()?;
     drop((poll, pr, fire_timer));
     Ok(())
 }
 thread_local! { static PILL_RESULT: RefCell<Option<String>> = const { RefCell::new(None) }; }
+#[cfg(windows)]
+thread_local! {
+    static MIN_POLL: RefCell<Option<Rc<slint::Timer>>> = const { RefCell::new(None) };
+    static MIN_PILL: RefCell<Option<Rc<slint::Timer>>> = const { RefCell::new(None) };
+    static MIN_FIRE: RefCell<Option<Rc<slint::Timer>>> = const { RefCell::new(None) };
+    static MIN_RESUME: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+}
+/// Pause the panel's redraw timers while minimized, and bring them back after the restored frame is painted.
+#[cfg(windows)]
+fn on_minimized(min: bool) {
+    bg::set_panel_visible(!min);
+    if min {
+        MIN_POLL.with(|t| { if let Some(t) = t.borrow().as_ref() { t.stop(); } });
+        MIN_PILL.with(|t| { if let Some(t) = t.borrow().as_ref() { t.stop(); } });
+        MIN_FIRE.with(|t| { if let Some(t) = t.borrow().as_ref() { t.stop(); } });
+        intros::set_fx_paused(true);
+        power::set_paused(true);
+    } else {
+        intros::set_fx_paused(false);
+        power::set_paused(false);
+        MIN_RESUME.with(|r| { if let Some(f) = r.borrow().clone() { f(); } });
+    }
+}
 
 /// DwmSetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE) result for the panel (1 = not set yet).
 #[cfg(windows)] pub static ROUND_HR: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
@@ -217,7 +253,7 @@ thread_local! { static FIRST: std::cell::Cell<bool> = const { std::cell::Cell::n
 /// Once the panel has a native window: DWM rounded corners, text drops (age page).
 fn first_show(ui: &Panel) {
     if FIRST.with(|d| d.replace(true)) { return; }
-    #[cfg(windows)] round_corners(ui);
+    #[cfg(windows)] { round_corners(ui); dnd::when_native(ui, winfx::restore::arm); }
     dnd::register(ui, dnd::Target::Panel);
 }
 /// Hide the tooltip (page switches, drags).
@@ -271,10 +307,26 @@ pub fn panel_hwnd() -> isize {
     panel().and_then(|u| u.window().with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) { Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(), _ => 0 })).unwrap_or(0)
 }
 
-/// Hidden switcher only (never on a click path): after 3 s with the panel still hidden, hand the working set back to
-/// Windows. Pages fault back in on the next show; clicks inside a shown panel are never affected.
-fn trim_when_hidden() {
-    slint::Timer::single_shot(Duration::from_secs(3), || { if PANEL_SHOWN.with(|v| v.get()) { return; }
-        #[cfg(windows)] { #[link(name = "kernel32")] extern "system" { fn K32EmptyWorkingSet(p: isize) -> i32; fn GetCurrentProcess() -> isize; }
-            unsafe { K32EmptyWorkingSet(GetCurrentProcess()); } } });
+/// Switcher's now_playing.json, so the 250 ms check redraws when the other process changes age. Empty while the panel is hidden.
+fn now_fp(dir: &std::path::Path) -> String {
+    #[cfg(windows)] {
+        if !windows::panel_visible() { return String::new(); }
+        if !aoe4winsys::launcher::switcher_running() { return "off".into(); }
+        let p = dir.join("now_playing.json");
+        if !p.is_file() { return "off".into(); }
+        return std::fs::read_to_string(p).unwrap_or_default();
+    }
+    #[cfg(not(windows))] { let _ = dir; String::new() }
+}
+/// Row fire and the Running chip come from the switcher, and only while that process is alive and this window is shown.
+fn overlay_live(s: &mut serde_json::Value, dir: &std::path::Path) {
+    #[cfg(windows)] {
+        if !windows::panel_visible() { return; }
+        let np = if aoe4winsys::launcher::switcher_running() { aoe4core::userstore::read_now(dir) } else { None };
+        let (inm, age, play) = match np { Some(n) => (n.in_match, n.age, n.playing), None => (false, None, None) };
+        s["status"]["in_match"] = serde_json::json!(inm);
+        s["status"]["age"] = match age { Some(a) => serde_json::Value::String(a), None => serde_json::Value::Null };
+        s["status"]["playing"] = match play { Some(a) => serde_json::Value::String(a), None => serde_json::Value::Null };
+    }
+    #[cfg(not(windows))] { let _ = (s, dir); }
 }

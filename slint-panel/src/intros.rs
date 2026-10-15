@@ -3,7 +3,7 @@ use crate::{assets, view, Chip, CivRow, ImpAge, IntroUi, OvAge, Panel, PresetRow
 use aoe4engine::{editor::{snap, Ctx, History, Song, DEFAULT_PRESET}, guides::{self, Shell, Win}, picker, presets, Engine};
 use serde_json::{json, Value};
 use slint::{Color, ComponentHandle, Image, ModelRc, SharedString, Timer, TimerMode, VecModel};
-use std::{cell::RefCell, sync::Arc, time::{Duration, Instant}};
+use std::{cell::{Cell, RefCell}, sync::Arc, time::{Duration, Instant}};
 
 const ROMAN: [&str; 8] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"];
 const LT: f32 = 178.0; const RH: f32 = 40.0; const STEP: f32 = 44.0; const IW: f32 = 520.0;
@@ -21,7 +21,11 @@ struct Ed {
     strips: [Vec<Image>; 4],
     pk_t: Option<f32>, pk_last: Instant,   // Octopath / YOURS fold: 0 = YOURS shown .. 1 = Octopath shown (1.0.9 pack_tick, 0.45 s)   // decoded at start: a song click must light up instantly
 }
-thread_local! { static ED: RefCell<Option<Ed>> = const { RefCell::new(None) }; static TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) }; }
+thread_local! {
+    static ED: RefCell<Option<Ed>> = const { RefCell::new(None) };
+    static TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
+    static FX_PAUSED: Cell<bool> = const { Cell::new(false) };
+}
 
 fn with<R>(f: impl FnOnce(&mut Ed) -> R) -> Option<R> { ED.with(|e| e.borrow_mut().as_mut().map(f)) }
 fn model<T: Clone + 'static>(v: Vec<T>) -> ModelRc<T> { ModelRc::new(VecModel::from(v)) }
@@ -84,25 +88,51 @@ pub fn init(ui: &Panel, eng: Arc<Engine>, shell: Arc<dyn Shell>) {
     g.on_import_go(|| { let p = with(|e| e.imp.clone()).flatten(); let Some(mut p) = p else { return }; close_dialog();
         edit(move |cx, u, _| { p["name"] = json!(cx.unique_name(u, p["name"].as_str().unwrap_or("Shared"))); let mut ps = u["intro_presets"].as_array().cloned().unwrap_or_default();
             ps.push(p.clone()); u["intro_presets"] = json!(ps); cx.apply_preset(u, &p); true }); toast("Imported"); });
-    // glow / equalizer frames (54 x 33 ms) while a song previews, fade-in 330 ms
-    let t = Timer::default();
-    t.start(TimerMode::Repeated, Duration::from_millis(33), || { with(|e| {
-        let Some(ui) = e.ui.upgrade() else { return }; let g = ui.global::<IntroUi>();
+}
+
+/// The 33 ms glow / toast timer runs only while a preview, toast, hint, or preset-delete countdown is showing.
+fn fx_tick() {
+    let idle = with(|e| {
+        let Some(ui) = e.ui.upgrade() else { return true };
+        let g = ui.global::<IntroUi>();
         if e.toast_t.is_some_and(|t| t.elapsed() >= Duration::from_millis(1800)) { e.toast_t = None; g.set_toast("".into()); }
         if e.hint_t.is_some_and(|t| t.elapsed() >= Duration::from_millis(2600)) { e.hint_t = None; g.set_hint("".into()); }
         if e.pdel.as_ref().is_some_and(|(_, t)| t.elapsed() >= Duration::from_secs(3)) { e.pdel = None; g.set_pdel("".into()); }
-        if e.song.is_none() || g.get_page() != "age" { return; }
-        glow_frame(e, &g);
-    }); });
-    TIMER.with(|x| *x.borrow_mut() = Some(t));
+        let glow = e.song.is_some() && g.get_page() == "age";
+        if glow { glow_frame(e, &g); }
+        !(e.toast_t.is_some() || e.hint_t.is_some() || e.pdel.is_some() || glow)
+    }).unwrap_or(true);
+    if idle { stop_fx(); }
+}
+fn arm_fx() {
+    if FX_PAUSED.with(|p| p.get()) { return; }
+    TIMER.with(|x| {
+        if x.borrow().is_some() { return; }
+        let t = Timer::default();
+        t.start(TimerMode::Repeated, Duration::from_millis(33), fx_tick);
+        *x.borrow_mut() = Some(t);
+    });
+}
+fn stop_fx() { TIMER.with(|x| { x.borrow_mut().take(); }); }
+/// Minimized: the glow timer must not keep redrawing a dirty patch of an empty window.
+pub fn set_fx_paused(paused: bool) {
+    FX_PAUSED.with(|p| p.set(paused));
+    if paused { stop_fx(); return; }
+    let need = with(|e| e.toast_t.is_some() || e.hint_t.is_some() || e.pdel.is_some() || e.song.is_some()).unwrap_or(false);
+    if need { arm_fx(); }
 }
 
 fn ui_of() -> Option<Panel> { with(|e| e.ui.upgrade()).flatten() }
 pub fn page() -> String { ui_of().map(|u| u.global::<IntroUi>().get_page().to_string()).unwrap_or_default() }
-pub fn set_page(p: &str) { if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); crate::tips_hide(&ui); g.set_pmenu(false); g.set_ctx_open(false); g.set_page(p.into()); crate::geom::regrow_panel(&ui); } refresh(); }
+pub fn set_page(p: &str) {
+    if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); crate::tips_hide(&ui); g.set_pmenu(false); g.set_ctx_open(false); g.set_page(p.into()); crate::geom::regrow_panel(&ui); }
+    refresh();
+    // Leaving the age page stops the glow timer. Coming back while a preview is still playing has to start it again.
+    if p == "age" && with(|e| e.song.is_some()).unwrap_or(false) { arm_fx(); }
+}
 fn close_dialog() { if let Some(ui) = ui_of() { ui.global::<IntroUi>().set_dialog("".into()); ui.invoke_refocus(); } }
-fn toast(m: &str) { with(|e| e.toast_t = Some(Instant::now())); if let Some(ui) = ui_of() { ui.global::<IntroUi>().set_toast(m.into()); } }
-fn hint(m: &str, x: f32, y: f32) { with(|e| e.hint_t = Some(Instant::now())); if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); g.set_hint(m.into()); g.set_hint_x(x); g.set_hint_y(y); } }
+fn toast(m: &str) { with(|e| e.toast_t = Some(Instant::now())); if let Some(ui) = ui_of() { ui.global::<IntroUi>().set_toast(m.into()); } arm_fx(); }
+fn hint(m: &str, x: f32, y: f32) { with(|e| e.hint_t = Some(Instant::now())); if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); g.set_hint(m.into()); g.set_hint_x(x); g.set_hint_y(y); } arm_fx(); }
 fn max_sc(e: &Ed) -> f32 {
     let Some(ui) = e.ui.upgrade() else { return 0.0 }; let n = state(&e.eng)["agedata"]["civs"].as_array().map_or(0, |a| a.len()) as f32;
     (n * STEP - 4.0 - (page_h(&ui) - 12.0 - LT)).max(0.0)
@@ -128,7 +158,7 @@ fn remove_at(cx: &Ctx, u: &mut Value, e: &Ed, i: usize, j: usize) -> bool {
 }
 fn del_preset(name: String) {
     let armed = with(|e| e.pdel.as_ref().is_some_and(|(n, _)| *n == name)).unwrap_or(false);
-    if !armed { with(|e| e.pdel = Some((name.clone(), Instant::now()))); if let Some(ui) = ui_of() { ui.global::<IntroUi>().set_pdel(name.into()); } return; }
+    if !armed { with(|e| e.pdel = Some((name.clone(), Instant::now()))); if let Some(ui) = ui_of() { ui.global::<IntroUi>().set_pdel(name.into()); } arm_fx(); return; }
     with(|e| { e.pdel = None; let mut u = ed_of(&state(&e.eng));
         let ps: Vec<Value> = u["intro_presets"].as_array().cloned().unwrap_or_default().into_iter().filter(|p| p["name"] != json!(name)).collect();
         u["intro_presets"] = json!(ps); presets::save_ed(&e.eng, u); });
@@ -221,7 +251,13 @@ fn preview(sg: Song, x: f32, y: f32) {
 /// A song click only changes which chip glows: no full state rebuild on the click path.
 /// The glow frame + fade for the (new) song's start time go in BEFORE the chip is marked playing, so its first frame
 /// never shows the previous song's full-opacity glow (one-frame flicker).
-fn show_playing() { with(|e| if let Some(ui) = e.ui.upgrade() { let g = ui.global::<IntroUi>(); if e.song.is_some() { glow_frame(e, &g); } g.set_playing(e.song.clone().unwrap_or_default().into()); }); }
+fn show_playing() {
+    let play = with(|e| {
+        if let Some(ui) = e.ui.upgrade() { let g = ui.global::<IntroUi>(); if e.song.is_some() { glow_frame(e, &g); } g.set_playing(e.song.clone().unwrap_or_default().into()); }
+        e.song.is_some()
+    }).unwrap_or(false);
+    if play { arm_fx(); }
+}
 /// Glow / equalizer frame (54 x 33 ms) and fade-in (330 ms) for the time since the song started.
 fn glow_frame(e: &Ed, g: &IntroUi) {
     let el = e.glow_t0.elapsed().as_secs_f32(); let f = ((el / 0.033) as usize) % 54;

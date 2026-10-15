@@ -19,6 +19,14 @@ pub enum Poll {
 impl Tail {
     pub fn new(path: PathBuf) -> Self { Tail { path, pos: 0, partial: String::new() } }
 
+    /// Jump to the current end and drop a partial line. False when the file is not there yet.
+    pub fn skip_to_end(&mut self) -> bool {
+        let Ok(f) = File::open(&self.path) else { return false };
+        self.pos = f.metadata().map(|m| m.len()).unwrap_or(0);
+        self.partial.clear();
+        true
+    }
+
     pub fn poll(&mut self) -> Poll {
         let mut f = match File::open(&self.path) { Ok(f) => f, Err(_) => return Poll::Missing };
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
@@ -36,5 +44,23 @@ impl Tail {
             lines.push(l.trim_end_matches(['\r', '\n']).to_string());
         }
         if restarted { Poll::Restarted(lines) } else { Poll::Lines(lines) }
+    }
+}
+
+#[cfg(test)]
+mod skip_tests {
+    use super::*;
+    #[test]
+    fn skip_to_end_ignores_what_is_already_there() {
+        let p = std::env::temp_dir().join(format!("aoe4s_tail_{}", std::process::id()));
+        std::fs::write(&p, "old\n").unwrap();
+        let mut t = Tail::new(p.clone());
+        assert!(t.skip_to_end());
+        assert!(matches!(t.poll(), Poll::Lines(ref v) if v.is_empty()));
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        use std::io::Write;
+        writeln!(f, "new").unwrap();
+        match t.poll() { Poll::Lines(v) => assert_eq!(v, vec!["new".to_string()]), Poll::Restarted(v) => panic!("restarted {v:?}"), Poll::Missing => panic!("missing") }
+        let _ = std::fs::remove_file(&p);
     }
 }

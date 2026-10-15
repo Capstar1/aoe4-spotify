@@ -42,10 +42,10 @@ fn editor_flow_like_age_js() {
     let z = h.step(&cx, &y, true).unwrap(); assert!(z["intro_pools"][&da].is_null());
     let z = h.step(&cx, &z, true).unwrap(); assert_eq!(cx.ages_on(&z)[&other], true);
     let z = h.step(&cx, &z, false).unwrap(); assert!(!cx.ages_on(&z)[&other]);
-    // presets: Default resets; switching back restores; unique names
-    let ps = cx.presets(&z); assert_eq!(ps[0]["name"], json!("Default")); assert!(ps.iter().any(|p| p["name"] == json!("Custom")));
+    // presets: Default resets; the auto "Custom" fork is removed once the edit matches Default again
+    let ps = cx.presets(&z); assert_eq!(ps.len(), 1); assert_eq!(ps[0]["name"], json!("Default"));
     let mut q = z.clone(); cx.apply_preset(&mut q, &ps[0]); assert_eq!(q["intro_preset"], json!("Default")); assert!(q.get("intro_pools").is_none());
-    assert_eq!(cx.unique_name(&z, "custom"), "custom (2)"); assert_eq!(cx.unique_name(&z, "  "), "Preset");
+    assert_eq!(cx.unique_name(&z, "custom"), "custom"); assert_eq!(cx.unique_name(&z, "  "), "Preset");
     // your songs: add (no duplicates, bad uris ignored), then remove everywhere
     let t = format!("spotify:track:{}", "a".repeat(22));
     let mut r = q.clone(); let fresh = cx.add_songs(&mut r, &[json!({ "uri": t, "name": "X" }), json!({ "uri": t }), json!({ "uri": "spotify:album:1" })]);

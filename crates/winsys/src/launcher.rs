@@ -17,10 +17,30 @@ pub fn log(m: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("aoe4_spotify.log")) {
         let _ = writeln!(f, "{:02}:{:02}:{:02} {m}", (t / 3600) % 24, (t / 60) % 60, t % 60); }
 }
+/// One Toolhelp process row. Layout matches PROCESSENTRY32W on 64-bit Windows.
+#[repr(C)]
+struct ProcessEntry {
+    size: u32, _cnt_usage: u32, _pid: u32, _heap: usize, _mid: u32, _threads: u32, _parent: u32, _pri: i32, _flags: u32,
+    exe: [u16; 260],
+}
+/// Image name of a running process, via a Toolhelp snapshot. No `tasklist.exe`.
 pub fn proc_running(name: &str) -> bool {
-    use std::os::windows::process::CommandExt;
-    std::process::Command::new("tasklist").args(["/fi", &format!("imagename eq {name}"), "/nh"]).creation_flags(NO_WINDOW).output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains(&name.to_lowercase())).unwrap_or(false)
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(0x2, 0);   // TH32CS_SNAPPROCESS
+        if snap == 0 || snap == -1 { return false; }
+        let mut e: ProcessEntry = std::mem::zeroed();
+        e.size = std::mem::size_of::<ProcessEntry>() as u32;
+        let mut found = false;
+        if Process32FirstW(snap, &mut e) != 0 {
+            loop {
+                let n = e.exe.iter().position(|&c| c == 0).unwrap_or(e.exe.len());
+                if String::from_utf16_lossy(&e.exe[..n]).eq_ignore_ascii_case(name) { found = true; break; }
+                if Process32NextW(snap, &mut e) == 0 { break; }
+            }
+        }
+        CloseHandle(snap);
+        found
+    }
 }
 pub fn game_proc() -> String { test_env("AOE4S_GAME_PROC").unwrap_or_else(|| "RelicCardinal.exe".into()) }
 pub fn aoe_running() -> bool { proc_running(&game_proc()) }
@@ -94,7 +114,15 @@ pub fn uninstall(yes: bool) {
     use std::os::windows::process::CommandExt;
     if !yes && msgbox("Removes the app, its shortcuts and settings, and puts the game's launch options and music volume back.\n\nSteam will be closed briefly if it is running.", "Uninstall AoE4 Spotify?", 0x4 | 0x20) != 6 { return; }
     if aoe_running() { msgbox("Close Age of Empires IV first, then uninstall again.", "Uninstall", 0x30); return; }
-    let t0 = Instant::now(); while !single_instance() && t0.elapsed().as_secs() < 15 { std::thread::sleep(Duration::from_millis(500)); }   // the panel is closing
+    // Hold both mutexes so a panel or a switcher cannot start mid-uninstall. Best-effort 15 s.
+    // CreateMutex in a process that already holds that mutex returns 183, so take each one only once.
+    let t0 = Instant::now(); let (mut got_p, mut got_s) = (false, false);
+    while !(got_p && got_s) && t0.elapsed().as_secs() < 15 {
+        if !got_p { got_p = panel_lock(); }
+        if !got_s { got_s = switcher_lock(); }
+        if got_p && got_s { break; }
+        std::thread::sleep(Duration::from_millis(500));
+    }
     log("Uninstall: removing launch option, restoring game music");
     with_steam_closed(remove_launch_option); music_sync(false);
     let lnk = desktop().join("AoE4 Spotify.lnk"); if lnk.exists() { let _ = std::fs::remove_file(&lnk); }
@@ -107,11 +135,32 @@ pub fn uninstall(yes: bool) {
     if !yes { msgbox("AoE4 Spotify was removed.", "Uninstall", 0x40); }
 }
 
-// ---- single instance: one switcher (panel or game-launched) per user, like 1.0.9's SwitcherMutex
-#[link(name = "kernel32")] extern "system" { fn CreateMutexW(a: *const u8, o: i32, n: *const u16) -> isize; fn GetLastError() -> u32; fn CloseHandle(h: isize) -> i32; }
-fn mutex_name() -> Vec<u16> { format!("AoE4Spotify11SwitcherMutex{}", std::env::var("AOE4S_MUTEX_SUFFIX").unwrap_or_default()).encode_utf16().chain(Some(0)).collect() }
-pub fn single_instance() -> bool {
-    unsafe { let h = CreateMutexW(std::ptr::null(), 0, mutex_name().as_ptr()); if GetLastError() != 183 { return h != 0; } if h != 0 { CloseHandle(h); } false }
+// ---- two instances: the panel (settings UI) and the switcher (Steam launch / --attach). Each holds its own mutex.
+#[link(name = "kernel32")] extern "system" {
+    fn CreateMutexW(a: *const u8, o: i32, n: *const u16) -> isize;
+    fn OpenMutexW(access: u32, inherit: i32, n: *const u16) -> isize;
+    fn GetLastError() -> u32;
+    fn CloseHandle(h: isize) -> i32;
+    fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> isize;
+    fn Process32FirstW(snap: isize, e: *mut ProcessEntry) -> i32;
+    fn Process32NextW(snap: isize, e: *mut ProcessEntry) -> i32;
+}
+fn wide(name: &str) -> Vec<u16> { name.encode_utf16().chain(Some(0)).collect() }
+fn suffix() -> String { std::env::var("AOE4S_MUTEX_SUFFIX").unwrap_or_default() }
+fn switcher_name() -> Vec<u16> { wide(&format!("AoE4Spotify11SwitcherMutex{}", suffix())) }
+fn panel_name() -> Vec<u16> { wide(&format!("AoE4Spotify11PanelMutex{}", suffix())) }
+fn lock_named(name: &[u16]) -> bool {
+    unsafe { let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr()); if GetLastError() != 183 { return h != 0; } if h != 0 { CloseHandle(h); } false }
+}
+/// Switcher mutex. The winning handle stays open for the life of this process.
+pub fn switcher_lock() -> bool { lock_named(&switcher_name()) }
+/// Panel mutex. A second panel asks the first to show itself and exits.
+pub fn panel_lock() -> bool { lock_named(&panel_name()) }
+/// Alias of `switcher_lock` (Steam launch and `--attach`).
+pub fn single_instance() -> bool { switcher_lock() }
+/// True while any process holds the switcher mutex.
+pub fn switcher_running() -> bool {
+    unsafe { let h = OpenMutexW(0x0010_0000, 0, switcher_name().as_ptr()); if h == 0 { return false; } CloseHandle(h); true }
 }
 /// Game restarted right after closing: the old switcher may still be finishing. Wait for it (20 s).
 pub fn wait_single_instance(secs: u64) -> bool { let t0 = Instant::now(); while !single_instance() { if t0.elapsed().as_secs() > secs { return false; } std::thread::sleep(Duration::from_secs(1)); } true }
@@ -152,7 +201,7 @@ pub fn follow_game(on_close: impl FnOnce()) {
     log("Age of Empires IV closed - exiting");
     std::thread::sleep(Duration::from_secs(2)); music_sync(enabled_now()); std::thread::sleep(Duration::from_secs(3)); on_close();
 }
-fn enabled_now() -> bool { std::fs::read_to_string(data_dir().join("config.json")).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v["enabled"].as_bool()).unwrap_or(true) }
+pub fn enabled_now() -> bool { std::fs::read_to_string(data_dir().join("config.json")).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v["enabled"].as_bool()).unwrap_or(true) }
 
 // ---- Steam launch option (aoe4_setup.py)
 fn steam_reg(v: &str) -> Option<String> {
@@ -304,5 +353,10 @@ mod lo_tests {
         ] { let n = compose(P, &inp); assert_eq!(n, want, "input {inp}"); assert_eq!(compose(P, &n), n, "idempotent {inp}"); }
         assert_eq!(user_args(&format!("{P}{o11} %command% -nomovies")), "-nomovies");
         assert_eq!(user_args("-nomovies"), "-nomovies");
+    }
+    #[test] fn toolhelp_sees_this_process() {
+        let name = std::env::current_exe().unwrap().file_name().unwrap().to_string_lossy().to_string();
+        assert!(proc_running(&name), "snapshot missed {name}");
+        assert!(!proc_running("aoe4s_no_such_process.exe"));
     }
 }

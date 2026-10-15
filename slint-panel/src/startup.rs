@@ -2,7 +2,7 @@
 //! --uninstall, --attach, --migrate-109, --updated, --panel; one switcher per user; 1.0.9 import on every start.
 use std::path::Path;
 
-pub struct Start { pub hidden: bool, pub login_first: bool }
+pub struct Start { pub hidden: bool, pub login_first: bool, pub attach: bool }
 
 /// None = this process is done (mode handled, or another instance took over).
 pub fn startup(dir: &Path) -> Option<Start> {
@@ -12,18 +12,19 @@ pub fn startup(dir: &Path) -> Option<Start> {
         use aoe4winsys::{launcher, signal};
         let settings = aoe4core::settings::load_own(dir);
         let mut hidden = false;
+        let mut attach = false;
         match launcher::mode(settings.enabled) {
             launcher::Mode::Done => return None,
             launcher::Mode::Migrate(inst, cleanup) => { std::process::exit(if aoe4engine::data::migrate_109(dir, inst, cleanup).is_ok() { 0 } else { 2 }); }
-            launcher::Mode::Attach => { if !launcher::aoe_running() || !settings.enabled || !launcher::single_instance() { return None; } hidden = true; }
+            launcher::Mode::Attach => { if !launcher::aoe_running() || !settings.enabled || !launcher::single_instance() { return None; } hidden = true; attach = true; }
             launcher::Mode::Game(args) => {
                 if !launcher::start_game(&args, settings.enabled) { return None; }
-                hidden = true;     // the switcher runs with its window hidden; opening the panel shows it
+                hidden = true;     // headless switcher: no window. The panel is a separate process.
                 for (k, _) in std::env::vars() { let l = k.to_lowercase(); if l.starts_with("steam") || l.starts_with("enable_vk_layer_valve") { std::env::remove_var(k); } }   // only the game gets Steam's variables
             }
-            launcher::Mode::Panel => { if !launcher::single_instance() { if !signal::ask_show() { signal::show_window_titled("AoE4 Spotify"); } return None; } launcher::register_uninstall(); }
+            launcher::Mode::Panel => { if !launcher::panel_lock() { if !signal::ask_show() { signal::show_window_titled("AoE4 Spotify"); } return None; } launcher::register_uninstall(); }
         }
-        Some(Start { hidden, login_first })
+        Some(Start { hidden, login_first, attach })
     }
-    #[cfg(not(windows))] { Some(Start { hidden: false, login_first }) }
+    #[cfg(not(windows))] { Some(Start { hidden: false, login_first, attach: false }) }
 }
