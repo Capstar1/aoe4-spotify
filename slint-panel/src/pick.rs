@@ -39,7 +39,7 @@ pub fn open(eng: &Arc<Engine>) {
     let info = picker::pick_info(eng);
     PICK.with(|a| *a.borrow_mut() = Some(Pick { w: w.clone_strong(), eng: eng.clone(), info, items: vec![], sel: None, err: String::new(), drag: false, tick, ver: 0, busy: false }));
     draw(); let _ = w.show();
-    crate::dnd::register(w.window(), crate::dnd::Target::Pick);
+    crate::dnd::register(&w, crate::dnd::Target::Pick);
     load();
 }
 pub fn close() { PICK.with(|a| if let Some(x) = a.borrow_mut().take() { x.tick.stop(); let _ = x.w.hide(); }); }

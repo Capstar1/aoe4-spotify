@@ -191,11 +191,8 @@ thread_local! { static PILL_RESULT: RefCell<Option<String>> = const { RefCell::n
 #[cfg(windows)] pub static ROUND_HR: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
 #[cfg(windows)]
 fn round_corners(ui: &Panel) {
-    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use slint::winit_030::WinitWindowAccessor;
     #[link(name = "dwmapi")] extern "system" { fn DwmSetWindowAttribute(h: isize, a: u32, v: *const u32, n: u32) -> i32; }
-    ui.window().with_winit_window(|w| { if let Ok(h) = w.window_handle() { if let RawWindowHandle::Win32(h) = h.as_raw() {
-        let pref: u32 = 2; let hr = unsafe { DwmSetWindowAttribute(h.hwnd.get(), 33, &pref, 4) }; ROUND_HR.store(hr, std::sync::atomic::Ordering::SeqCst); } } });
+    dnd::when_native(ui, |h| { let pref: u32 = 2; let hr = unsafe { DwmSetWindowAttribute(h, 33, &pref, 4) }; ROUND_HR.store(hr, std::sync::atomic::Ordering::SeqCst); });
 }
 
 /// AOE4S_SHOT=<file.png>: render once (software renderer snapshot), save, quit. AOE4S_SHOT_MENU=1 opens the cog menu first.
@@ -214,7 +211,7 @@ fn first_show(ui: &Panel) {
     thread_local! { static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
     if DONE.with(|d| d.replace(true)) { return; }
     #[cfg(windows)] round_corners(ui);
-    dnd::register(ui.window(), dnd::Target::Panel);
+    dnd::register(ui, dnd::Target::Panel);
 }
 /// Hide the tooltip (page switches, drags).
 pub fn tips_hide(ui: &Panel) { ui.global::<Tips>().invoke_hide(); }

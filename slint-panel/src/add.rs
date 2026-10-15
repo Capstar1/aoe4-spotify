@@ -40,7 +40,7 @@ pub fn open(eng: &Arc<Engine>) {
     tick.start(TimerMode::Repeated, Duration::from_millis(250), || { let v = netimg::VER.load(std::sync::atomic::Ordering::SeqCst); if with(|a| { let c = a.ver != v; a.ver = v; c }).unwrap_or(false) { paint(); } });
     ADD.with(|a| *a.borrow_mut() = Some(Add { w: w.clone_strong(), eng: eng.clone(), items: vec![], lists: None, cur: None, seq: 0, search: Timer::default(), _tick: tick, ver: 0 }));
     paint(); let _ = w.show();
-    crate::dnd::register(w.window(), crate::dnd::Target::Add);
+    crate::dnd::register(&w, crate::dnd::Target::Add);
 }
 pub fn close() { ADD.with(|a| if let Some(x) = a.borrow_mut().take() { let _ = x.w.hide(); }); }
 /// Bottom line of the window (also used by the editor: "Added ...", "Already added").
