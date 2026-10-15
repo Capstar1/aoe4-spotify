@@ -43,7 +43,8 @@ export component Panel inherits Window {
     in property <bool> am-open: true;
     in property <string> am-mode: "resume";   // resume | playlist | stop
     in property <bool> am-wl;
-    in property <string> am-playlist-name;
+    in property <string> am-playlist-name;   // 1.1 trunc 10 (row)
+    in property <string> am-header-name;     // 1.1 trunc 14 (header)
     in property <image> am-playlist-cover; in property <bool> am-playlist-has;
     in property <image> win-cover; in property <bool> win-has;
     in property <image> loss-cover; in property <bool> loss-has;
@@ -183,7 +184,7 @@ export component Panel inherits Window {
 
             // ---- After match
             property <length> ay: base + 56px;
-            property <string> mode-label: am-mode == "playlist" ? am-playlist-name : am-mode == "resume" ? "Resume" : am-mode == "playlist" ? "Playlist" : "Stop";
+            property <string> mode-label: am-mode == "playlist" ? am-header-name : am-mode == "resume" ? "Resume" : am-mode == "playlist" ? "Playlist" : "Stop";
             if am-open: Rectangle { x: M; y: ay; width: W - 2 * M; height: am-h; border-radius: 10px; background: Pal.card; }
             Rectangle { x: M; y: ay; width: W - 2 * M; height: 46px; border-radius: 10px; background: amh.has-hover ? #262626 : Pal.card;
                 amh := TouchArea { mouse-cursor: pointer; clicked => { root.toggle-am(); } }

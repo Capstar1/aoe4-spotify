@@ -84,14 +84,14 @@ fn fill(ui: &Panel, d: &backend::Data) {
     ui.set_boss_on(d.set.boss_on);
     let rows: Vec<AgeRow> = d.ages.iter().map(|(k, lab)| {
         let uri = d.set.playlists.get(k).cloned().unwrap_or_default(); let (cover, has) = load_img(d.cover(&uri));
-        let name = { let n = d.name(&uri); if n.is_empty() { "Not set".to_string() } else { n } };
+        let name = { let n = d.name(&uri); if n.is_empty() { "Not set".to_string() } else { backend::trunc(&n, 15) } };
         AgeRow { label: lab.replace(" Age", "").into(), name: name.into(), set: !uri.is_empty(), cover, has_cover: has, is_default: uri == d.set.default_playlists.get(k).cloned().unwrap_or_default() }
     }).collect();
     ui.set_ages(ModelRc::new(VecModel::from(rows)));
     let lit = d.intro_lit();
     ui.set_intros(ModelRc::new(VecModel::from(["I", "II", "III", "IV"].iter().zip(lit).map(|(r, l)| IntroAge { roman: (*r).into(), lit: l }).collect::<Vec<_>>())));
     let (mode, wl, pl, win, loss) = d.after();
-    ui.set_am_mode(mode.into()); ui.set_am_wl(wl); ui.set_am_playlist_name(d.name(&pl).into());
+    ui.set_am_mode(mode.into()); ui.set_am_wl(wl); ui.set_am_playlist_name(backend::trunc(&d.name(&pl), 10).into()); ui.set_am_header_name(backend::trunc(&d.name(&pl), 14).into());
     let (c, h) = load_img(d.cover(&pl)); ui.set_am_playlist_cover(c); ui.set_am_playlist_has(h);
     let (c, h) = load_img(d.cover(&win)); ui.set_win_cover(c); ui.set_win_has(h);
     let (c, h) = load_img(d.cover(&loss)); ui.set_loss_cover(c); ui.set_loss_has(h);

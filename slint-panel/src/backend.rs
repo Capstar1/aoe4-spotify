@@ -68,3 +68,8 @@ pub fn music_sync(_on: bool) {}
 pub fn login() {
     std::thread::spawn(|| { let d = load(); let mut sp = aoe4core::spotify::Spotify::new(d.set.client_id.clone(), d.dir.join("token.json")); let _ = sp.login(); });
 }
+
+/// 1.1 `trunc`: at most n characters, the last one an ellipsis (width fitting is done by the view's elide).
+pub fn trunc(t: &str, n: usize) -> String { if t.chars().count() <= n { t.to_string() } else { t.chars().take(n - 1).collect::<String>() + "\u{2026}" } }
+#[cfg(test)]
+mod tests { #[test] fn trunc_like_1_1() { assert_eq!(super::trunc("Chill Lofi Study", 15), "Chill Lofi Stu\u{2026}"); assert_eq!(super::trunc("Peaceful Piano", 15), "Peaceful Piano"); } }
