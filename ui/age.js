@@ -90,7 +90,7 @@ const tip = { el: null, job: 0, key: null, tHide: 0,
     const top = below ? y1 + 6 + 6 : y0 - 6 - 6 - h; e.style.left = left + "px"; e.style.top = (top + (slide ? (below ? 2 : -2) : 0)) + "px";
     requestAnimationFrame(() => { e.style.opacity = 1; e.style.top = top + "px"; }); this.el = e; },
   hide(keepKey) { clearTimeout(this.job); if (this.el) { const e = this.el; e.style.transition = "opacity 80ms"; e.style.opacity = 0; setTimeout(() => e.remove(), 90); this.el = null; this.tHide = Date.now(); } if (!keepKey) this.key = null; } };
-function tipOn(h, key, txt, r) { h.removeAttribute("title"); h.addEventListener("mouseenter", () => { if (!age.drag) tip.request(key, txt, r); }); h.addEventListener("mouseleave", () => tip.hide()); }
+function tipOn(h, key, txt, r) { h._tip = true; h.removeAttribute("title"); h.addEventListener("mouseenter", () => { if (!age.drag) tip.request(key, txt, r); }); h.addEventListener("mouseleave", () => tip.hide()); }
 document.addEventListener("pointerdown", () => tip.hide(), true); document.addEventListener("wheel", () => tip.hide(), true);
 // ---- drag (on_press / on_drag / on_release): tray chip -> civ row = add; row chip -> other row = move; dragged out of its row = remove
 function startDrag(e, song, src, cx, cy) { if (e.button !== 0) return; e.preventDefault(); age.press = { x: e.clientX, y: e.clientY, song, src, cx, cy }; }

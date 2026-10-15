@@ -52,19 +52,29 @@ function chip(key, col, cx, cy, r) {   // 1.0.9 Art.chip: ring-colour disc (2r+4
   const D = 2 * r + 4, e = el("div", "chip", { left: (cx - D / 2) + "px", top: (cy - D / 2) + "px", width: D + "px", height: D + "px", background: col });
   const i = document.createElement("img"); i.src = `img/portraits/${key}.jpg`; i.style.width = i.style.height = (D - 4) + "px"; e.appendChild(i); return e;
 }
-function hov(e, on, off) { e.addEventListener("mouseenter", on); e.addEventListener("mouseleave", off); return e; }
+function hov(e, on, off) { e._hov = true; e.addEventListener("mouseenter", on); e.addEventListener("mouseleave", off); return e; }
 function toggle(x, y, on, w = 44, h = 24, col, disabled) {
   const t = rr(x, y, x + w, y + h, h / 2, disabled ? "#2e2e2e" : on ? (col || C.acc) : C.off, null, true);
   const cx = on ? x + w - h / 2 : x + h / 2; oval(cx - h / 2 + 3, y + 3, cx + h / 2 - 3, y + h - 3, disabled ? "#6a6a6a" : "#fff");
   return t;
 }
 function hline(x0, y, x1, c) { el("div", "a", { left: x0 + "px", top: y + "px", width: (x1 - x0) + "px", height: "1px", background: c }); }
-function begin(id, w, h) { host = $(id); host.innerHTML = ""; host._w = w; host.style.width = w + "px"; host.style.height = h + "px"; }
+function begin(id, w, h) { host = $(id); if (!host._mo) { const hh = host; let q = 0; hh._mo = new MutationObserver(() => { if (!q) q = requestAnimationFrame(() => { q = 0; clickables(hh); }); }); hh._mo.observe(hh, { childList: true }); } host.innerHTML = ""; host._w = w; host.style.width = w + "px"; host.style.height = h + "px"; }
+// Every clickable gets the hand cursor AND a hover highlight (1.0.9 used hand2 on all tagged items):
+// decorations drawn on top of a clickable (labels, dots, icons, inner pills) let the pointer through to it, and
+// clickables without their own hover get a subtle light overlay.
+function clickables(h) {
+  const kids = [...h.children], hits = kids.filter((e) => e.classList.contains("hit")).map((e) => [e, e.getBoundingClientRect()]), hr = h.getBoundingClientRect();
+  for (const e of kids) { if (e.classList.contains("hit") || e._tip || e.title) continue; const r = e.getBoundingClientRect(); if (!r.width) continue;
+    if (hits.some(([, b]) => r.left >= b.left - 1 && r.right <= b.right + 1 && r.top >= b.top - 1 && r.bottom <= b.bottom + 1)) e.style.pointerEvents = "none"; }
+  for (const [e, b] of hits) { if (e._hov || e._hl || (e.style.cursor && e.style.cursor !== "pointer") || b.width * b.height > hr.width * hr.height * 0.4) continue;
+    e._hl = true; e.addEventListener("mouseenter", () => e.classList.add("hl")); e.addEventListener("mouseleave", () => e.classList.remove("hl")); }
+}
 function hit(e, fn) { e.classList.add("hit"); e.onclick = fn; return e; }
 
 function revert(rx, y, isDef, tag) {   // 1.0.9 undo button: outlined pill, greyed when already default
   const b = rr(rx, y, rx + 30, y + 24, 12, C.card, isDef ? C.dis : C.mu); sprite("undo_" + (isDef ? "dis" : "mu"), rx + 5, y + 2, rx + 25, y + 22).style.pointerEvents = "none";
-  b.title = isDef ? "Revert (already default)" : "Revert"; if (!isDef) { b.classList.add("hit"); hov(b, () => b.style.background = "#262626", () => b.style.background = C.card); }
+  b.title = isDef ? "Revert (already default)" : "Revert"; if (!isDef) { b.classList.add("hit"); hov(b, () => { b.style.background = "#2e2e2e"; b.style.borderColor = C.tx; }, () => { b.style.background = C.card; b.style.borderColor = C.mu; }); }
   return b;
 }
 // ---------- main panel (panel.py draw) ----------
@@ -100,7 +110,9 @@ function drawMain(s) {
   oval(x + 14, 141, x + 24, 151, sp.logged_in ? C.acc : (sp.busy ? C.idle : C.org)); text(x + 32, 146, "Spotify", 12, C.mu);
   if (sp.logged_in) { text(x + cw - 26, 146, "Connected", 12, C.acc, true, "e"); sprite("chevr12", x + cw - 22, 140, x + cw - 10, 152); }
   else if (sp.busy) text(x + cw - 14, 146, "...", 12, C.mu, true, "e");
-  else { rr(x + cw - 86, 136, x + cw - 8, 156, 10, "#4a3216", C.org); text(x + cw - 52, 146, "Log in", 11, C.org, true, "center"); }
+  else { const lp = rr(x + cw - 86, 136, x + cw - 8, 156, 10, "#4a3216", C.org); text(x + cw - 47, 146, "Log in", 11, C.org, true, "center"); sc._pill = lp; }
+  hov(sc, () => { sc.style.background = "#323232"; sc.style.borderColor = "#5a5a5a"; if (sc._pill) sc._pill.style.background = "#6e4a1c"; },
+          () => { sc.style.background = "#242424"; sc.style.borderColor = "#3a3a3a"; if (sc._pill) sc._pill.style.background = "#4a3216"; });
   x = M + cw + 10; const gv = st.in_match, gc = gv ? C.acc : C.idle;
   rr(x, 130, x + cw, 162, 16, C.card); oval(x + 14, 141, x + 24, 151, gc); text(x + 32, 146, "Game", 12, C.mu);
   text(x + cw - 14, 146, gv ? "Running" : "Not running", 12, gc, true, "e");
