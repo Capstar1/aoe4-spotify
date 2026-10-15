@@ -6,6 +6,7 @@
 //! engine calls. `fire.rs` animates the 1.0.9 glow-pool fire on the age row that is playing.
 //! Test switches: AOE4S_SHOT=<png> (render once and quit), AOE4S_NOWATCH (no game-log watcher), `--fire <row>`.
 mod fire;
+mod gtg;
 mod startup;
 mod view;
 use aoe4engine::{guides::{Shell, Win}, menu, updater, Engine};
@@ -25,19 +26,21 @@ impl Shell for UiShell {
     fn show(&self, w: Win) { let _ = slint::invoke_from_event_loop(move || windows::show(w)); }
     fn close(&self, w: Win) { let _ = slint::invoke_from_event_loop(move || windows::close(w)); }
 }
+thread_local! { static CTX: RefCell<Option<(Arc<Engine>, Arc<dyn Shell>)>> = const { RefCell::new(None) }; }
 thread_local! { static PANEL: RefCell<Option<slint::Weak<Panel>>> = const { RefCell::new(None) }; static PANEL_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 mod windows {
-    use super::{PANEL, PANEL_SHOWN};
+    use super::{CTX, PANEL, PANEL_SHOWN};
     use aoe4engine::guides::Win;
     use slint::ComponentHandle;
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn panel_visible() -> bool { PANEL_SHOWN.with(|v| v.get()) }
     /// Show a window. Not yet ported windows fall back to the panel (never leave an invisible process).
     pub fn show(w: Win) {
+        if w == Win::Gtg { if let Some((e, s)) = CTX.with(|c| c.borrow().clone()) { crate::gtg::open(&e, &s); } return; }
         if w != Win::Panel { aoe4engine::sys::log(&format!("window {w:?} requested (not ported yet: showing the panel)")); }
         PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); })
     }
-    pub fn close(_w: Win) {}
+    pub fn close(w: Win) { if w == Win::Gtg { crate::gtg::close(); } }
 }
 
 /// Transient pill message (Checking..., Up to date) and when the "Updated to" pill appeared.
@@ -57,6 +60,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let (eng, rx, log_path) = Engine::new(dir.clone());
     if std::env::var_os("AOE4S_NOWATCH").is_none() && !test { eng.start(rx, log_path); }
     let shell: Arc<dyn Shell> = Arc::new(UiShell);
+    CTX.with(|c| *c.borrow_mut() = Some((eng.clone(), shell.clone())));
+    if let Ok(k) = std::env::var("AOE4S_GTG") { return gtg_shot(&k); }
     let ui = Panel::new()?;
     PANEL.with(|p| *p.borrow_mut() = Some(ui.as_weak()));
     let pillm = Rc::new(RefCell::new(PillMsg::default()));
@@ -188,4 +193,17 @@ pub fn save_png(path: &str, rgba: &[u8], w: u32, h: u32) -> Result<(), Box<dyn s
     let f = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut e = png::Encoder::new(f, w, h); e.set_color(png::ColorType::Rgba); e.set_depth(png::BitDepth::Eight);
     e.write_header()?.write_image_data(rgba)?; Ok(())
+}
+
+/// Test render of the good-to-go window: AOE4S_GTG=ok|fix|nosteam|bad, AOE4S_SHOT=<png>.
+fn gtg_shot(kind: &str) -> Result<(), slint::PlatformError> {
+    let w = Gtg::new()?;
+    let st = serde_json::json!({ "ok": kind != "bad", "name": "Capstar", "steam": match kind { "fix" => serde_json::json!(false), "nosteam" => serde_json::Value::Null, _ => serde_json::json!(true) }, "spotify_app": true });
+    gtg::fill(&w, &st);
+    if let Some(f) = gtg::frames().into_iter().nth(12) { w.set_face(f); }
+    w.show()?;
+    let out = std::env::var("AOE4S_SHOT").unwrap_or_default();
+    let ww = w.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(400), move || { if let Some(w) = ww.upgrade() { if let Ok(b) = w.window().take_snapshot() { let _ = save_png(&out, b.as_bytes(), b.width(), b.height()); } } let _ = slint::quit_event_loop(); });
+    slint::run_event_loop()
 }

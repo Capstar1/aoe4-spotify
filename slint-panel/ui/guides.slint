@@ -1,0 +1,68 @@
+// Windows after login (1.0.9 gtg.py / access.py / byo.py as in Tauri 1.1 ui/gtg.html ...): native-framed small windows.
+import { Pal } from "kit.slint";
+
+// Filled circle with a check / cross / '!' (gtg.html mark()).
+export component Mark inherits Rectangle {
+    in property <string> kind: "ok";   // ok | bad | warn
+    in property <length> size: 18px;
+    width: size; height: size; border-radius: size / 2;
+    background: kind == "ok" ? #1DB954 : kind == "bad" ? #e5484d : #f5a524;
+    property <length> sw: max(2px, size * 0.11);
+    if kind == "ok": Path { width: size; height: size; viewbox-width: 100; viewbox-height: 100; stroke: #121212; stroke-width: sw; fill: transparent;
+        commands: "M 28 52 L 44 68 L 73 36"; }
+    if kind == "bad": Path { width: size; height: size; viewbox-width: 100; viewbox-height: 100; stroke: #121212; stroke-width: sw; fill: transparent;
+        commands: "M 32 32 L 68 68 M 68 32 L 32 68"; }
+    if kind == "warn": Path { width: size; height: size; viewbox-width: 100; viewbox-height: 100; stroke: #121212; stroke-width: sw; fill: transparent;
+        commands: "M 50 24 L 50 58"; }
+    if kind == "warn": Rectangle { x: size * 0.44; y: size * 0.68; width: size * 0.12; height: size * 0.12; border-radius: size * 0.06; background: #121212; }
+}
+
+// gtg.html .b buttons: primary green / secondary outlined pill.
+export component GButton inherits Rectangle {
+    in property <string> text; in property <bool> primary;
+    callback clicked();
+    border-radius: self.height / 2;
+    background: primary ? (ta.has-hover ? #1ed760 : #1DB954) : (ta.has-hover ? #2a2a2a : #1f1f1f);
+    border-width: primary ? 0 : 2px; border-color: ta.has-hover ? #f2f2f2 : #9a9a9a;
+    Text { text: root.text; font-size: 12px; font-weight: 700; color: primary ? #121212 : #f2f2f2; horizontal-alignment: center; vertical-alignment: center; }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+export struct GtgRow { kind: string, label: string, detail: string, fix: bool }
+
+// "You're good to go" (W = 400).
+export component Gtg inherits Window {
+    in property <bool> ok;
+    in property <[GtgRow]> rows;
+    in property <image> face;          // current animation frame (masked, 124 px logical)
+    in property <bool> fixing;
+    callback open-panel(); callback done(); callback retry(); callback fix(); callback close();
+    property <length> W: 400px;
+    property <length> R: 62px;
+    property <length> CY: 22px + R;
+    property <length> y0: ok ? CY + R + 30px : 112px;
+    property <length> rows-y: y0 + 28px;
+    property <length> btn-y: ok ? rows-y + rows.length * 48px + 6px : y0 + 28px + 30px;
+    title: "AoE4 Spotify";
+    default-font-family: "Segoe UI";
+    background: Pal.bg;
+    width: W; height: btn-y + 60px;
+    forward-focus: fs;
+    fs := FocusScope { key-pressed(e) => { if (e.text == Key.Escape) { root.close(); return accept; } return reject; } }
+    if ok: Image { x: W / 2 - R; y: CY - R; width: 2 * R; height: 2 * R; source: face; }
+    if ok: Rectangle { x: W / 2 - R - 3.75px; y: CY - R - 3.75px; width: 2 * R + 7.5px; height: self.width; border-radius: self.width / 2; border-width: 1.5px; border-color: #1DB954; }
+    if ok: Rectangle { x: W / 2 + R * 0.72 - 17px; y: CY + R * 0.72 - 17px; width: 34px; height: 34px; border-radius: 17px; background: Pal.bg;
+        Mark { x: 3px; y: 3px; kind: "ok"; size: 28px; } }
+    if !ok: Mark { x: W / 2 - 32px; y: 54px - 32px; kind: "bad"; size: 64px; }
+    Text { x: 0; width: W; y: y0 - 14px; height: 28px; text: ok ? "You're good to go" : "Spotify login didn't finish"; font-size: 19px; font-weight: 700; color: Pal.tx; horizontal-alignment: center; vertical-alignment: center; }
+    if ok: Rectangle { x: 0; y: 0; width: W; height: root.height;
+        for r[i] in rows: Rectangle { x: 20px; y: rows-y + i * 48px; width: W - 40px; height: 40px; border-radius: 10px; background: Pal.card;
+            Mark { x: 42px - 20px - 9px; y: 11px; kind: r.kind; size: 18px; }
+            Text { x: 40px; y: 0; height: 40px; text: r.label; font-size: 12px; font-weight: 700; color: Pal.tx; vertical-alignment: center; }
+            Text { x: 0; width: r.fix ? W - 92px - 20px : W - 32px - 20px; y: 0; height: 40px; text: r.detail; font-size: 11px; color: Pal.mu; horizontal-alignment: right; vertical-alignment: center; }
+            if r.fix: GButton { x: W - 84px - 20px; y: 8px; width: 54px; height: 24px; text: "Fix"; primary: true; clicked => { root.fix(); } } } }
+    if !ok: Text { x: 0; width: W; y: y0 + 28px + 4px - 12px; height: 24px; text: "Log in to Spotify and click Agree."; font-size: 12px; color: Pal.mu; horizontal-alignment: center; vertical-alignment: center; }
+    GButton { x: 20px; y: btn-y; width: W / 2 - 26px; height: 40px; text: ok ? "Open panel" : "Close"; primary: false; clicked => { if (ok) { root.open-panel(); } else { root.close(); } } }
+    GButton { x: W / 2 + 6px; y: btn-y; width: W / 2 - 26px; height: 40px; text: ok ? "Done" : "Try again"; primary: true; clicked => { if (ok) { root.done(); } else { root.retry(); } } }
+    if fixing: Text { x: 0; width: W; y: 8px; height: 24px; text: "Steam closes and reopens..."; font-size: 10px; color: Pal.mu; horizontal-alignment: center; vertical-alignment: center; }
+}

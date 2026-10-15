@@ -9,6 +9,7 @@ aoe4core = { path = "../crates/core" }
 aoe4engine = { path = "../crates/engine" }
 aoe4winsys = { path = "../crates/winsys" }
 png = "0.17"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 serde_json = "1"
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "software-renderer-systemfonts", "unstable-winit-030"] }
 
