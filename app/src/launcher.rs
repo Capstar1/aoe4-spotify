@@ -195,6 +195,27 @@ fn vdf_find(toks: &[Tok], path: &[&str]) -> Option<(usize, usize)> {
 }
 fn vesc(v: &str) -> String { v.replace('\\', "\\\\").replace('"', "\\\"") }
 fn vunesc(v: &str) -> String { let mut o = String::new(); let mut it = v.chars(); while let Some(c) = it.next() { if c == '\\' { if let Some(n) = it.next() { o.push(n); } } else { o.push(c); } } o }
+
+/// Remove every AoE4 Spotify exe path (any install folder, quoted or not, any number) from a launch option.
+pub fn strip_ours(v: &str) -> String {
+    let mut s = v.to_string();
+    loop {
+        let low = s.to_lowercase(); let Some(e) = low.find("spotify.exe") else { break }; let end = e + "spotify.exe".len();
+        let head = &low[..e]; let Some(a) = head.rfind("aoe4 ") else { break };
+        if !head[a..].trim_end().is_empty() && !head[a + 5..].chars().all(|c| c.is_ascii_alphanumeric() || " ._-".contains(c)) { break }
+        let (mut st, mut en) = (a, end);
+        if let Some(q) = s[..a].rfind('"') { if s[q + 1..a].chars().all(|c| c != '"') && s[end..].starts_with('"') { st = q; en = end + 1; } }
+        if st == a { // unquoted: back up to the drive / path start
+            let b = s[..a].rfind(|c: char| c == ' ' && false).unwrap_or(0); let _ = b;
+            st = s[..a].rfind(|c: char| c == '"' || c == '%').map(|i| i + 1).unwrap_or(0);
+            if let Some(d) = s[st..a].find(|c: char| c.is_ascii_alphabetic()).map(|i| st + i) { if s[d..].as_bytes().get(1) == Some(&b':') { st = d; } else if !s[st..a].trim().is_empty() && !s[st..a].contains('\\') && !s[st..a].contains('/') { st = a; } }
+        }
+        s = format!("{} {}", s[..st].trim_end(), s[en..].trim_start()).trim().to_string();
+    }
+    s
+}
+fn compose(pre: &str, old: &str) -> String { let c = strip_ours(old); format!("{pre}{}", if c.contains("%command%") { c } else { format!("%command% {c}").trim().to_string() }) }
+fn user_args(old: &str) -> String { let c = strip_ours(old); if c != old.trim() { c.strip_prefix("%command%").map(|r| r.trim().to_string()).unwrap_or(c) } else { old.to_string() } }
 pub fn set_launch_option() {
     let mut state = serde_json::Map::new();
     for f in localconfigs() {
@@ -208,8 +229,10 @@ pub fn set_launch_option() {
         let pre = our_prefix(); let fs = f.display().to_string(); let (t2, new);
         if let Some(k) = kv {
             let old = vunesc(&toks[k + 1].val);
-            if old.starts_with(&pre) { log(&format!("{fs}: already set")); continue; }
-            new = format!("{pre}{}", if old.contains("%command%") { old.clone() } else { format!("%command% {old}").trim().to_string() });
+            new = compose(&pre, &old);
+            if old == new { log(&format!("{fs}: already set")); continue; }
+            let prev = std::fs::read_to_string(state_path()).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v[&fs]["old"].as_str().map(|o| o.to_string()));
+            let old = prev.filter(|o| strip_ours(o) == *o).unwrap_or_else(|| user_args(&old));
             t2 = format!("{}\"{}\"{}", &t[..toks[k + 1].a], vesc(&new), &t[toks[k + 1].b..]);
             state.insert(fs.clone(), serde_json::json!({ "mode": "replace", "old": old, "new": new }));
         } else {
@@ -229,11 +252,11 @@ pub fn remove_launch_option() {
     for f in localconfigs() {
         let Ok(t) = std::fs::read_to_string(&f) else { continue }; let st = &state[f.display().to_string()]; let toks = vdf_tokens(&t); let mut t2 = None;
         for k in 0..toks.len() {
-            if toks[k].kind == 's' && toks[k].val.eq_ignore_ascii_case("launchoptions") && k + 1 < toks.len() && toks[k + 1].kind == 's' && vunesc(&toks[k + 1].val).starts_with(&pre) {
+            if toks[k].kind == 's' && toks[k].val.eq_ignore_ascii_case("launchoptions") && k + 1 < toks.len() && toks[k + 1].kind == 's' && strip_ours(&vunesc(&toks[k + 1].val)) != vunesc(&toks[k + 1].val).trim() {
                 let cur = vunesc(&toks[k + 1].val); let (a, b) = (toks[k + 1].a, toks[k + 1].b);
                 t2 = Some(if st["mode"] == "insert" && st["new"].as_str() == Some(&cur) && st["ins"].as_str().map_or(false, |i| t.contains(i)) { t.replacen(st["ins"].as_str().unwrap(), "", 1) }
                     else if st["mode"] == "replace" && st["new"].as_str() == Some(&cur) { format!("{}\"{}\"{}", &t[..a], vesc(st["old"].as_str().unwrap_or("")), &t[b..]) }
-                    else { format!("{}\"{}\"{}", &t[..a], vesc(&cur[pre.len()..]), &t[b..]) });
+                    else { format!("{}\"{}\"{}", &t[..a], vesc(&user_args(&cur)), &t[b..]) });
                 break;
             }
         }
@@ -255,7 +278,32 @@ pub fn with_steam_closed(f: impl FnOnce()) {
         if let Some(e) = &exe { let _ = std::process::Command::new(e).arg("-shutdown").spawn(); }
         let mut closed = false; for _ in 0..30 { std::thread::sleep(Duration::from_secs(1)); if !proc_running(&steam_proc()) { closed = true; break; } }
         if !closed { log("Steam did not close in 30s - force closing"); let _ = std::process::Command::new("taskkill").args(["/im", &steam_proc(), "/f"]).creation_flags(NO_WINDOW).output(); std::thread::sleep(Duration::from_secs(2)); }
+        // Steam flushes localconfig.vdf while shutting down: wait until all its processes are gone and the file is quiet.
+        for _ in 0..20 { if !proc_running(&steam_proc()) && !proc_running("steamwebhelper.exe") && !proc_running("steamservice.exe") { break; } std::thread::sleep(Duration::from_secs(1)); }
+        std::thread::sleep(Duration::from_secs(2));
     }
     f();
     if was { if let Some(e) = &exe { let _ = std::process::Command::new(e).arg("-silent").spawn(); log("Reopened Steam"); } }
+}
+
+#[cfg(test)]
+mod lo_tests {
+    use super::*;
+    const P: &str = "\"C:\\Users\\X\\AppData\\Local\\Programs\\AoE4 Spotify\\AoE4 Spotify.exe\" ";
+    #[test] fn strip_cases() {
+        let o11 = "\"C:\\Users\\X\\AppData\\Local\\Programs\\AoE4 Spotify 1.1\\AoE4 Spotify.exe\"";
+        let o109 = "\"C:\\Users\\X\\AppData\\Local\\Programs\\AoE4 Spotify\\AoE4 Spotify.exe\"";
+        let unq = "C:\\Tools\\AoE4 Spotify TEST\\AoE4 Spotify.exe";
+        for (inp, want) in [
+            (format!("{P}{o11} %command% -nomovies"), format!("{P}%command% -nomovies")),          // doubled (the real bug)
+            (format!("{o11} %command% -nomovies -dev"), format!("{P}%command% -nomovies -dev")),     // old 1.1 path
+            (format!("{o109} %command% +fps_max 144"), format!("{P}%command% +fps_max 144")),         // 1.0.9 path
+            (format!("{unq} {o11} {o109} %command% -a"), format!("{P}%command% -a")),               // unquoted + many
+            ("-nomovies -dev".to_string(), format!("{P}%command% -nomovies -dev")),                // plain user args
+            ("PROTON_LOG=1 %command% -x".to_string(), format!("{P}PROTON_LOG=1 %command% -x")),     // other wrappers kept
+            ("".to_string(), format!("{P}%command%")),
+        ] { let n = compose(P, &inp); assert_eq!(n, want, "input {inp}"); assert_eq!(compose(P, &n), n, "idempotent {inp}"); }
+        assert_eq!(user_args(&format!("{P}{o11} %command% -nomovies")), "-nomovies");
+        assert_eq!(user_args("-nomovies"), "-nomovies");
+    }
 }
