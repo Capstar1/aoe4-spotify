@@ -187,13 +187,15 @@ fn main() -> Result<(), slint::PlatformError> {
 }
 thread_local! { static PILL_RESULT: RefCell<Option<String>> = const { RefCell::new(None) }; }
 
+/// DwmSetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE) result for the panel (1 = not set yet).
+#[cfg(windows)] pub static ROUND_HR: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
 #[cfg(windows)]
 fn round_corners(ui: &Panel) {
     use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use slint::winit_030::WinitWindowAccessor;
     #[link(name = "dwmapi")] extern "system" { fn DwmSetWindowAttribute(h: isize, a: u32, v: *const u32, n: u32) -> i32; }
     ui.window().with_winit_window(|w| { if let Ok(h) = w.window_handle() { if let RawWindowHandle::Win32(h) = h.as_raw() {
-        let pref: u32 = 2; unsafe { DwmSetWindowAttribute(h.hwnd.get(), 33, &pref, 4); } } } });
+        let pref: u32 = 2; let hr = unsafe { DwmSetWindowAttribute(h.hwnd.get(), 33, &pref, 4) }; ROUND_HR.store(hr, std::sync::atomic::Ordering::SeqCst); } } });
 }
 
 /// AOE4S_SHOT=<file.png>: render once (software renderer snapshot), save, quit. AOE4S_SHOT_MENU=1 opens the cog menu first.

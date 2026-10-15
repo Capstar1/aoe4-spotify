@@ -17,6 +17,8 @@ fn hwnd(w: &slint::Window) -> isize {
     use slint::winit_030::WinitWindowAccessor;
     w.with_winit_window(|ww| match ww.window_handle().map(|h| h.as_raw()) { Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(), _ => 0 }).unwrap_or(0)
 }
+/// A window's handle once its native window exists.
+fn wait_hwnd(f: impl Fn() -> isize + Send + Sync + Clone + 'static) -> isize { let t0 = Instant::now(); loop { let g = f.clone(); let h = ui(move || g()); if h != 0 || t0.elapsed().as_secs() >= 5 { return h; } std::thread::sleep(Duration::from_millis(100)); } }
 fn wait(secs: f32, f: impl Fn() -> bool) -> bool { let t0 = Instant::now(); while t0.elapsed().as_secs_f32() < secs { if f() { return true; } std::thread::sleep(Duration::from_millis(100)); } f() }
 
 struct Rep { f: std::fs::File, fails: usize }
@@ -57,7 +59,9 @@ fn run(eng: &Arc<Engine>, sh: &Arc<dyn Shell>, r: &mut Rep) {
     let ph = ui(|| crate::panel_hwnd()); r.ok("panel window shown", ph != 0 && unsafe { IsWindowVisible(ph) } != 0, "");
     if ph != 0 {
         let (c, n, st, ex, same) = dwm(ph);
-        r.ok("rounded corners (DWMWA_WINDOW_CORNER_PREFERENCE = round)", c == 2, &format!("{c}"));
+        let hr = crate::ROUND_HR.load(std::sync::atomic::Ordering::SeqCst);
+        r.ok("rounded corners: DWMWA_WINDOW_CORNER_PREFERENCE = round accepted", hr == 0, &format!("hr {hr:#x}, readback {c}"));
+        r.ok("OLE: panel drop target registered", aoe4winsys::droptext::registered(ph) == Some(0), &format!("{:?}", aoe4winsys::droptext::registered(ph)));
         r.ok("shadow: DWM non-client rendering on", n == 1, &format!("{n}"));
         r.ok("borderless: no native frame / title bar (client = window)", no_nc(ph), &format!("style {st:#x}"));
         r.ok("panel takes clicks (not WS_EX_TRANSPARENT / LAYERED)", ex & 0x20 == 0 && ex & 0x80000 == 0, &format!("ex {ex:#x}"));
@@ -95,7 +99,8 @@ fn run(eng: &Arc<Engine>, sh: &Arc<dyn Shell>, r: &mut Rep) {
     }
     // ---- Add a song window: OLE drop + search list + drag a row onto the age page
     { let e = eng.clone(); ui(move || crate::add::open(&e)); }
-    let ah = ui(|| crate::add::win().map(|w| hwnd(w.window())).unwrap_or(0)); r.ok("Add window open", ah != 0, "");
+    let ah = wait_hwnd(|| crate::add::win().map(|w| hwnd(w.window())).unwrap_or(0)); r.ok("Add window open", ah != 0, "");
+    r.ok("OLE: Add window drop target registered", aoe4winsys::droptext::registered(ah) == Some(0), "");
     if let Some(t) = fresh.get(1).cloned() {
         let l = link(&t); ui(move || aoe4winsys::droptext::simulate(ah, &l, true));
         let t2 = t.clone(); r.ok("OLE: song dropped on Add a song is added to the age", wait(8.0, move || have().contains(&t2)), "");
@@ -124,7 +129,8 @@ fn run(eng: &Arc<Engine>, sh: &Arc<dyn Shell>, r: &mut Rep) {
         let cur = eng.settings.lock().unwrap().playlists.get("castle").cloned().unwrap_or_default();
         picker::open_pick(eng, "age:castle", "Castle Age playlist", false, &cur);
         { let e = eng.clone(); ui(move || crate::pick::open(&e)); }
-        let kh = ui(|| crate::pick::win().map(|w| hwnd(w.window())).unwrap_or(0)); r.ok("picker open", kh != 0, "");
+        let kh = wait_hwnd(|| crate::pick::win().map(|w| hwnd(w.window())).unwrap_or(0)); r.ok("picker open", kh != 0, &format!("window object: {}", ui(|| crate::pick::win().is_some())));
+        r.ok("OLE: picker drop target registered", aoe4winsys::droptext::registered(kh) == Some(0), "");
         let l = format!("https://open.spotify.com/playlist/{p}?si=x"); ui(move || aoe4winsys::droptext::simulate(kh, &l, true));
         let want = format!("spotify:playlist:{p}"); let e = eng.clone();
         r.ok("OLE: playlist link dropped on the picker sets the Castle playlist", wait(8.0, move || e.settings.lock().unwrap().playlists.get("castle") == Some(&want)), "");
@@ -136,12 +142,12 @@ fn run(eng: &Arc<Engine>, sh: &Arc<dyn Shell>, r: &mut Rep) {
     // ---- access guide: clipboard fill (AOE4S_CLIP), theme switch, Esc
     std::env::set_var("AOE4S_CLIP", "capstar.btrtest@example.com");
     sh.show(guides::Win::Access);
-    let gh = { let _ = wait(3.0, || ui(|| crate::access::acc().is_some())); ui(|| crate::access::acc().map(|w| hwnd(w.window())).unwrap_or(0)) };
+    let gh = wait_hwnd(|| crate::access::acc().map(|w| hwnd(w.window())).unwrap_or(0));
     r.ok("access guide open", gh != 0, "");
-    if gh != 0 { let (c, ..) = dwm(gh); r.note(&format!("access guide corner pref {c}")); }
-    let filled = wait(4.0, || ui(|| crate::access::acc().map(|w| w.get_email().to_string()).unwrap_or_default()) == "capstar.btrtest@example.com");
-    let focused = ui(|| crate::access::acc().map(|w| { use slint::winit_030::WinitWindowAccessor; w.window().with_winit_window(|ww| ww.has_focus()).unwrap_or(false) }).unwrap_or(false));
-    r.ok("clipboard: copied email fills the access box", filled, &format!("window focused: {focused}"));
+    let email = || ui(|| crate::access::acc().map(|w| w.get_email().to_string()).unwrap_or_default());
+    r.ok("clipboard: not read while the guide is unfocused (hidden desktop)", !wait(1.5, move || email() == "capstar.btrtest@example.com"), "");
+    std::env::set_var("AOE4S_FOCUSED", "1");
+    r.ok("clipboard: copied email fills the access box (focused)", wait(4.0, move || email() == "capstar.btrtest@example.com"), "");
     r.ok("access: send button enabled for a valid email", ui(|| crate::access::acc().map(|w| w.get_valid()).unwrap_or(false)), "");
     std::env::set_var("AOE4S_LIGHT", "1"); r.ok("theme: guide follows a switch to light (live, <= 2 s poll)", wait(4.0, || ui(|| crate::access::acc().map(|w| w.get_light()).unwrap_or(false))), "");
     std::env::set_var("AOE4S_LIGHT", "0"); r.ok("theme: and back to dark", wait(4.0, || !ui(|| crate::access::acc().map(|w| w.get_light()).unwrap_or(true))), "");
@@ -160,7 +166,7 @@ fn run(eng: &Arc<Engine>, sh: &Arc<dyn Shell>, r: &mut Rep) {
     r.ok("own app: settings unchanged", !eng.settings.lock().unwrap().own_app, "");
     r.ok("own app: engine refuses a bad id too", guides::own_save(sh, eng, "xyz") == "bad", "");
     ui(|| { if let Some(w) = crate::access::own() { w.invoke_dismiss(); } });
-    std::env::remove_var("AOE4S_CLIP");
+    std::env::remove_var("AOE4S_CLIP"); std::env::remove_var("AOE4S_FOCUSED");
     // ---- opening pages: logged (AOE4S_DRYOPEN), never opened
     for k in ["account", "dashboard", "github", "log"] { aoe4engine::menu::menu(eng, k); }
     let dry = std::env::var("AOE4S_DRYOPEN").ok().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();

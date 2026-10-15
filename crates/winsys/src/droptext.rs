@@ -56,17 +56,24 @@ unsafe fn text(d: *mut c_void) -> String {
     String::new()
 }
 
+/// Registered targets (hwnd, target, RegisterDragDrop HRESULT): lets tests reach the same object OLE calls.
+static TARGETS: std::sync::Mutex<Vec<(isize, usize, i32)>> = std::sync::Mutex::new(Vec::new());
+
 /// Replace the window's drop target (winit's file-drop one) with a text drop target calling `cb`.
 pub fn register(hwnd: isize, cb: impl Fn(Ev) + 'static) -> bool {
     unsafe {
         OleInitialize(std::ptr::null_mut());   // already done by winit (S_FALSE); harmless otherwise
         RevokeDragDrop(hwnd);
         let t = Box::into_raw(Box::new(Target { vtbl: &VTBL, refs: AtomicU32::new(1), cb: Box::new(cb) }));
-        let ok = RegisterDragDrop(hwnd, t as *mut c_void) == 0;
-        release(t);   // OLE holds its own reference while registered
-        ok
+        let hr = RegisterDragDrop(hwnd, t as *mut c_void);
+        let mut l = TARGETS.lock().unwrap();
+        if let Some(i) = l.iter().position(|x| x.0 == hwnd) { let (_, old, _) = l.remove(i); release(old as *mut Target); }
+        l.push((hwnd, t as usize, hr));   // keeps our reference (released when the window registers again)
+        hr == 0
     }
 }
+/// RegisterDragDrop result for `hwnd` (None = never registered).
+pub fn registered(hwnd: isize) -> Option<i32> { TARGETS.lock().unwrap().iter().find(|x| x.0 == hwnd).map(|x| x.2) }
 
 // ---- test: drive a window's registered OLE drop target the way DoDragDrop does (DragEnter / DragOver / Drop with an
 // IDataObject offering CF_UNICODETEXT), so the whole text path runs without moving the real mouse (hidden-desktop tests).
@@ -86,10 +93,8 @@ static FAKE_VTBL: FakeVtbl = FakeVtbl { qi: f_qi, add_ref: f_ref, release: f_ref
 
 /// Enter (+ Over) and then Drop (`drop`) or Leave on the target registered for `hwnd`. false = no drop target registered.
 pub fn simulate(hwnd: isize, text: &str, drop: bool) -> bool {
-    #[link(name = "user32")] extern "system" { fn GetPropW(h: isize, n: *const u16) -> *mut c_void; }
-    let n: Vec<u16> = "OleDropTargetInterface".encode_utf16().chain(Some(0)).collect();
+    let Some(t) = TARGETS.lock().unwrap().iter().find(|x| x.0 == hwnd && x.2 == 0).map(|x| x.1 as *mut Target) else { return false };
     unsafe {
-        let t = GetPropW(hwnd, n.as_ptr()) as *mut Target; if t.is_null() { return false; }
         let vt = &*(*(t as *const *const Vtbl));
         let mut fake = Fake { vtbl: &FAKE_VTBL, text: text.encode_utf16().chain(Some(0)).collect() };
         let d = &mut fake as *mut Fake as *mut c_void; let mut eff = 0u32;

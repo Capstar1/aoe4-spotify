@@ -103,7 +103,10 @@ pub fn open_own(eng: &Arc<Engine>, sh: &Arc<dyn Shell>) {
 pub fn close_own() { OWN.with(|a| if let Some((w, t)) = a.borrow_mut().take() { t.iter().for_each(|t| t.stop()); let _ = w.hide(); }); }
 
 /// The clipboard is read only while the guide has the focus (like document.hasFocus()).
-fn is_active(w: &slint::Window) -> bool { use slint::winit_030::WinitWindowAccessor; w.with_winit_window(|ww| ww.has_focus()).unwrap_or(false) }
+fn is_active(w: &slint::Window) -> bool {
+    // hidden-desktop tests: a window there can never take the focus; AOE4S_TEST=1 + AOE4S_FOCUSED=1 stands in for it
+    if std::env::var("AOE4S_TEST").ok().as_deref() == Some("1") && std::env::var_os("AOE4S_FOCUSED").is_some() { return true; }
+    use slint::winit_030::WinitWindowAccessor; w.with_winit_window(|ww| ww.has_focus()).unwrap_or(false) }
 
 /// Test switch AOE4S_GUIDE=access|access_done|access_note|own|own_note: fill a sample state.
 pub fn test(kind: &str) {
