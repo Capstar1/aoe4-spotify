@@ -248,7 +248,6 @@ pub fn set_launch_option() {
 }
 pub fn remove_launch_option() {
     let state: serde_json::Value = std::fs::read_to_string(state_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-    let pre = our_prefix();
     for f in localconfigs() {
         let Ok(t) = std::fs::read_to_string(&f) else { continue }; let st = &state[f.display().to_string()]; let toks = vdf_tokens(&t); let mut t2 = None;
         for k in 0..toks.len() {

@@ -414,9 +414,8 @@ async function menuTest() {   // AOE4S_MENUTEST: click every cog row like a user
   for (let k = 0; k < 40 && upd.msg.startsWith("Checking"); k++) await sleep(250); out.push("check result pill " + JSON.stringify(upd.msg));
   await sleep(2300); out.push("pill after 2.3s " + JSON.stringify(upd.msg));
   for (const [i, n] of [[2, "log"], [3, "github"], [5, "uninstall"]]) {
-    gear().click(); await sleep(150); const before = (await st()).real; row(i).click(); await sleep(300);
-    out.push(`${n}: clicked, menu open ${ui.menu}` + (n === "real" ? `, real ${before} -> ${(await st()).real}` : ""));
-    if (n === "real") { row(i).click(); await sleep(300); out.push("real back -> " + (await st()).real); if (ui.menu) gear().click(); await sleep(100); }
+    gear().click(); await sleep(150); row(i).click(); await sleep(300);
+    out.push(`${n}: clicked, menu open ${ui.menu}`);
   }
   await invoke("dbg", { s: out.join("\n") }); await sleep(200); W_.close();
 }

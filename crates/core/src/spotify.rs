@@ -15,8 +15,14 @@ const LIKED: &str = "aoe4s:list:liked";
 #[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
 struct Token { access_token: String, refresh_token: String, expires_at: u64 }
 
+/// Production endpoints; tests point a client at a local mock server (`Spotify::with_base`).
+pub const API: &str = "https://api.spotify.com/v1";
+pub const ACCOUNTS: &str = "https://accounts.spotify.com";
+
 pub struct Spotify {
     cid: String,
+    api_base: String,
+    accounts_base: String,
     path: PathBuf,
     tok: Option<Token>,
     agent: ureq::Agent,
@@ -24,6 +30,47 @@ pub struct Spotify {
     /// what was playing before the first switch of this match (null = nothing)
     saved: Option<Value>,
     saved_volume: Option<i64>,
+}
+
+/// One Web API request with the 1.1 retry rules: network errors and 5xx are retried with backoff (0.3 s, 0.9 s),
+/// 429 waits Retry-After (capped at 5 s) and tries again. `tries` = 1 means a single attempt (volume steps).
+/// Every call here is idempotent (GET / PUT on the player), so a retry never does anything twice.
+pub fn send(agent: &ureq::Agent, method: &str, url: &str, tok: &str, body: Option<&Value>, timeout: Duration, tries: u32) -> Result<(u16, Value), String> {
+    let parse = |r: ureq::Response| { let c = r.status(); let t = r.into_string().unwrap_or_default(); (c, serde_json::from_str(&t).unwrap_or(Value::Null)) };
+    let mut last = String::new();
+    for n in 0..tries.max(1) {
+        let req = agent.request(method, url).set("Authorization", &format!("Bearer {tok}")).timeout(timeout);
+        let r = match body { Some(b) => req.send_json(b.clone()), None if method != "GET" => req.set("Content-Length", "0").call(), None => req.call() };
+        let more = n + 1 < tries.max(1);
+        match r {
+            Ok(r) => return Ok(parse(r)),
+            Err(ureq::Error::Status(429, r)) if more => {
+                let wait = r.header("Retry-After").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(1.0).clamp(0.0, 5.0);
+                std::thread::sleep(Duration::from_secs_f64(wait)); last = "Spotify rate limit (429)".into();
+            }
+            Err(ureq::Error::Status(c, _)) if c >= 500 && more => { std::thread::sleep(backoff(n)); last = format!("Spotify error {c}"); }
+            Err(ureq::Error::Status(_, r)) => return Ok(parse(r)),
+            Err(e) => { last = format!("Spotify unreachable: {e}"); if more { std::thread::sleep(backoff(n)); } }
+        }
+    }
+    Err(last)
+}
+fn backoff(n: u32) -> Duration { Duration::from_millis(300 * 3u64.pow(n.min(3))) }
+const TRIES: u32 = 3;
+const CALL_T: Duration = Duration::from_secs(10);
+/// Fade steps: short, single try - a slow step is skipped instead of stretching the fade.
+const VOL_T: Duration = Duration::from_secs(2);
+
+/// A logged-in handle for reads WITHOUT the Spotify lock (picker, search, /me): the caller takes the lock only
+/// to get this (token refreshed if needed), then does its HTTP after releasing it.
+#[derive(Clone)]
+pub struct Web { agent: ureq::Agent, api_base: String, tok: String }
+impl Web {
+    pub fn get(&self, path: &str) -> Result<(u16, Value), String> { send(&self.agent, "GET", &format!("{}{path}", self.api_base), &self.tok, None, CALL_T, TRIES) }
+}
+/// Plain download (cover art); needs no login, so never the Spotify lock.
+pub fn fetch(url: &str) -> Result<Vec<u8>, String> {
+    let r = ureq::get(url).timeout(CALL_T).call().map_err(|e| e.to_string())?; let mut b = vec![]; std::io::Read::read_to_end(&mut r.into_reader(), &mut b).map_err(|e| e.to_string())?; Ok(b)
 }
 
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) }
@@ -37,11 +84,15 @@ fn query(q: &str, key: &str) -> Option<String> {
 }
 
 impl Spotify {
-    pub fn new(cid: String, path: PathBuf) -> Self {
+    pub fn new(cid: String, path: PathBuf) -> Self { Self::with_base(cid, path, API, ACCOUNTS) }
+    /// Same client against other endpoints (tests: a local mock server).
+    pub fn with_base(cid: String, path: PathBuf, api: &str, accounts: &str) -> Self {
         let tok = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok());
-        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).build();
-        Spotify { cid, path, tok, agent, device: None, saved: None, saved_volume: None }
+        let agent = ureq::AgentBuilder::new().timeout(CALL_T).build();
+        Spotify { cid, api_base: api.to_string(), accounts_base: accounts.to_string(), path, tok, agent, device: None, saved: None, saved_volume: None }
     }
+    /// Read handle for use outside the lock (see `Web`).
+    pub fn web(&mut self) -> Result<Web, String> { let tok = self.access()?; Ok(Web { agent: self.agent.clone(), api_base: self.api_base.clone(), tok }) }
     pub fn logged_in(&self) -> bool { self.tok.is_some() }
     pub fn has_client(&self) -> bool { !self.cid.is_empty() }
 
@@ -54,10 +105,16 @@ impl Spotify {
     }
 
     fn token_req(&mut self, form: &[(&str, &str)]) -> Result<(), String> {
-        let r = self.agent.post("https://accounts.spotify.com/api/token").send_form(form);
+        let r = self.agent.post(&format!("{}/api/token", self.accounts_base)).send_form(form);
         let v: Value = match r {
             Ok(r) => r.into_json().map_err(|e| e.to_string())?,
-            Err(ureq::Error::Status(c, _)) => { if c == 400 { self.tok = None; let _ = std::fs::remove_file(&self.path); } return Err(format!("Spotify login refused ({c}) - log in again")); }
+            Err(ureq::Error::Status(c, r)) => {
+                // Only a dead login (invalid_grant: refresh token revoked / expired) logs you out; any other refusal
+                // (a short Spotify-side problem) keeps the saved login so the next try can work.
+                let body: Value = r.into_json().unwrap_or(Value::Null);
+                if c == 400 && body["error"].as_str() == Some("invalid_grant") { self.tok = None; let _ = std::fs::remove_file(&self.path); return Err("Spotify login expired - log in again".into()); }
+                return Err(format!("Spotify login refused ({c}) - try again"));
+            }
             Err(e) => return Err(format!("Spotify unreachable: {e}")),
         };
         let old = self.tok.take().unwrap_or_default();
@@ -125,17 +182,9 @@ impl Spotify {
 
     fn api(&mut self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value), String> {
         let tok = self.access()?;
-        let req = self.agent.request(method, &format!("https://api.spotify.com/v1{path}")).set("Authorization", &format!("Bearer {tok}"));
-        let r = match body { Some(b) => req.send_json(b), None if method != "GET" => req.set("Content-Length", "0").call(), None => req.call() };
-        let parse = |r: ureq::Response| { let c = r.status(); let t = r.into_string().unwrap_or_default(); (c, serde_json::from_str(&t).unwrap_or(Value::Null)) };
-        match r { Ok(r) => Ok(parse(r)), Err(ureq::Error::Status(_, r)) => Ok(parse(r)), Err(e) => Err(format!("Spotify unreachable: {e}")) }
+        send(&self.agent, method, &format!("{}{path}", self.api_base), &tok, body.as_ref(), CALL_T, TRIES)
     }
 
-    /// GET with an error on non-2xx (Add a song: search, playlists, track lookup).
-    pub fn get(&mut self, path: &str) -> Result<(u16, Value), String> { self.api("GET", path, None) }
-    pub fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
-        let r = self.agent.get(url).call().map_err(|e| e.to_string())?; let mut b = vec![]; std::io::Read::read_to_end(&mut r.into_reader(), &mut b).map_err(|e| e.to_string())?; Ok(b)
-    }
 
     fn ensure_device(&mut self) -> Result<String, String> {
         let (_, d) = self.api("GET", "/me/player/devices", None)?;
@@ -150,7 +199,8 @@ impl Spotify {
     fn state(&mut self) -> Value { self.api("GET", "/me/player", None).map(|(_, v)| v).unwrap_or(Value::Null) }
     fn set_volume(&mut self, v: i64) {
         let q = self.device.as_ref().map(|d| format!("&device_id={d}")).unwrap_or_default();
-        let _ = self.api("PUT", &format!("/me/player/volume?volume_percent={}{q}", v.clamp(0, 100)), None);
+        let Ok(tok) = self.access() else { return };
+        let _ = send(&self.agent, "PUT", &format!("{}/me/player/volume?volume_percent={}{q}", self.api_base, v.clamp(0, 100)), &tok, None, VOL_T, 1);
     }
     /// Volume ramp in a few API steps (Spotify rate-limits fast volume changes).
     fn fade(&mut self, from: i64, to: i64, secs: f32) {

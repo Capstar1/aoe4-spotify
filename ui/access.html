@@ -81,8 +81,8 @@ em.onfocus = () => fb(true); em.onblur = () => fb(false);
 em.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") Wn.close(); });
 let tick = 0;
-setInterval(async () => {   // fills the box as soon as an email is copied; follows the Windows theme (~2 s)
-  if (!st.sent) { try { const c = (await invoke("clip_text")).trim(); if (c !== st.clip) { st.clip = c; if (EMAIL_RE.test(c)) { em.value = c; draw(); } } } catch (e) {} }
+setInterval(async () => {   // fills the box as soon as an email is copied (read only while this window has focus); follows the Windows theme (~2 s)
+  if (!st.sent && document.hasFocus()) { try { const c = (await invoke("clip_text")).trim(); if (c !== st.clip) { st.clip = c; if (EMAIL_RE.test(c)) { em.value = c; draw(); } } } catch (e) {} }
   if (++tick % 8 === 0) { try { const i = await invoke("access_info"); if (!!i.light !== st.light) { st.light = !!i.light; draw(); } } catch (e) {} }
 }, 250);
 setInterval(() => invoke("access_check").catch(() => {}), 60000);   // closes itself once access works (-> good to go)

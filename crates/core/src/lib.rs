@@ -6,3 +6,4 @@ pub mod settings;
 pub mod spotify;
 pub mod switcher;
 pub mod intros;
+pub mod aftermatch;

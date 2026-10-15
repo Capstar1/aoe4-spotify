@@ -41,12 +41,12 @@ unsafe extern "system" fn sub(h: isize, m: u32, wp: usize, lp: isize, _: usize, 
 pub fn init(main: isize) {
     unsafe {
         let cls = w("AoE4SpotifyShadow");
-        let wc = Wc { style: 0, proc_: DefWindowProcW as usize, cls: 0, wnd: 0, inst: GetModuleHandleW(std::ptr::null()), icon: 0, cur: 0, bg: 0, menu: std::ptr::null(), name: cls.as_ptr() };
+        let wc = Wc { style: 0, proc_: DefWindowProcW as *const () as usize, cls: 0, wnd: 0, inst: GetModuleHandleW(std::ptr::null()), icon: 0, cur: 0, bg: 0, menu: std::ptr::null(), name: cls.as_ptr() };
         RegisterClassW(&wc);
         // LAYERED|TRANSPARENT|TOOLWINDOW|NOACTIVATE, WS_POPUP
         let sh = CreateWindowExW(0x80000 | 0x20 | 0x80 | 0x0800_0000, cls.as_ptr(), w("").as_ptr(), 0x8000_0000, 0, 0, 1, 1, 0, 0, wc.inst, 0);
         MAIN.store(main, Ordering::SeqCst); SHADOW.store(sh, Ordering::SeqCst);
-        SetWindowSubclass(main, sub as usize, 1, 0);
+        SetWindowSubclass(main, sub as *const () as usize, 1, 0);
     }
 }
 

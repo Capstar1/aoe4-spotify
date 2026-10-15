@@ -59,8 +59,8 @@ cid.onfocus = () => fb(true); cid.onblur = () => fb(false);
 cid.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") Wn.close(); });
 let tick = 0;
-setInterval(async () => {   // copying the Client ID fills the box (only while it's empty, like 1.0.9); follows the Windows theme (~2 s)
-  try { const c = (await invoke("clip_text")).trim(); if (c !== st.clip) { st.clip = c; if (HEX.test(c) && !cid.value) { cid.value = c; draw(); } } } catch (e) {}
+setInterval(async () => {   // copying the Client ID fills the box (only while it's empty, like 1.0.9; clipboard read only while this window has focus); follows the Windows theme (~2 s)
+  if (document.hasFocus()) try { const c = (await invoke("clip_text")).trim(); if (c !== st.clip) { st.clip = c; if (HEX.test(c) && !cid.value) { cid.value = c; draw(); } } } catch (e) {}
   if (++tick % 8 === 0) { try { const i = await invoke("own_info"); if (!!i.light !== st.light) { st.light = !!i.light; draw(); } } catch (e) {} }
 }, 250);
 (async () => { let i = {}; try { i = await invoke("own_info"); } catch (e) {} st.light = !!i.light; draw(); await Wn.show(); await Wn.setFocus(); cid.focus(); })();
