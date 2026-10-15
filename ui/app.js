@@ -121,6 +121,8 @@ function amSet(fn) { const a = Object.assign({}, (S.settings.after_match && type
 function plName(set, uri) { if (!uri) return ""; if (uri.startsWith("aoe4s:list:")) { if (uri.endsWith(":liked")) return "Liked Songs"; const l = ((S.user || {}).custom_lists || {})[uri.split(":").pop()]; return (l && l.name) || "My list"; }
   return set.playlist_names[uri.split(":").pop()] || (uri.startsWith("spotify:track:") ? "Song" : "Playlist"); }
 const trunc = (t, n) => t.length <= n ? t : t.slice(0, n - 1) + "\u2026";
+// trunc, then also by width: never runs into what sits to its right (Segoe in WebView2 is wider than Tk at some sizes)
+function fitW(t, n, sz, b, maxW) { let s = trunc(t, n); while (s.length > 2 && measure(s, sz, b) > maxW) s = s.replace(/\u2026$/, "").slice(0, -1).trimEnd() + "\u2026"; return s; }
 function pick(target, title, tracks, current) { invoke("open_pick", { target, title, tracks, current: current || "" }); }
 function drawMain(s) {
   const set = s.settings, st = s.status, sp = s.spotify, n = s.ages.length, H = mainH(n); S.user = s.user || S.user;
@@ -189,9 +191,10 @@ function drawMain(s) {
     if (!coverImg(uri, X + 9, yy + 6, 30, 6)) { rr(X + 9, yy + 6, X + 39, yy + 36, 6, C.ib).style.pointerEvents = "none"; }
     const zone = rr(X + 38, yy + 7, rx - 76, yy + 35, 8, "transparent");            // name zone: open in Spotify (1.0.9 opn%d)
     text(X + 48, yy + 21, lab.replace(" Age", ""), 13, C.tx, true);
-    const nm = trunc(plName(set, uri) || (uri ? "Playlist" : "Not set"), 15);
+    const nm = fitW(plName(set, uri) || (uri ? "Playlist" : "Not set"), 15, 12, false, rx - 78 - (X + 132));
     oval(X + 118, yy + 17, X + 126, yy + 25, uri ? C.acc : C.idle).style.pointerEvents = "none"; text(X + 132, yy + 21, nm, 12, C.mu);
-    if (id && uri) { const custom = uri.startsWith("aoe4s:list:"); hit(zone, () => custom ? pick("age:" + k, lab, false, uri) : invoke("menu", { kind: "pl:" + id })); zone._hl = true; tipOn(zone, ["opn", i], custom ? "Edit list" : "Open in Spotify", [X + 38, yy + 7, rx - 76, yy + 35]); }
+    if (id && uri && !uri.startsWith("aoe4s:list:")) { const custom = false;   // saved lists: no builder for now (BUILDER off in pick.js), nothing to open
+    hit(zone, () => custom ? pick("age:" + k, lab, false, uri) : invoke("menu", { kind: "pl:" + id })); zone._hl = true; tipOn(zone, ["opn", i], custom ? "Edit list" : "Open in Spotify", [X + 38, yy + 7, rx - 76, yy + 35]); }
     const hb = en ? "#1ed760" : "#8a8a8a", hf = en ? "#1f3b29" : "#2a2a2a";
     const chg = hit(rr(rx - 70, yy + 9, rx - 8, yy + 33, 12, C.card, C.acc), () => pick("age:" + k, lab, false, uri)); const ct = text(rx - 39, yy + 21, "Change", 10, C.acc, true, "center");
     chg.style.visibility = ct.style.visibility = "hidden"; chg._hov = true;            // hover-only, its space always reserved
@@ -221,7 +224,7 @@ function drawMain(s) {
   sprite("am_flag", M + 13, y + 12, M + 35, y + 34, C.acc).style.pointerEvents = "none";
   text(M + 46, y + 23, "After match", 13, C.tx, true); sprite(aopen ? "chevup" : "chevdown", R_ - 28, y + 13, R_ - 8, y + 33).style.pointerEvents = "none";
   const suri = mode === "playlist" ? am.playlist : "";
-  const hl = suri ? trunc(plName(set, suri), 14) : Object.fromEntries(AM_ROWS)[mode];
+  const hl = suri ? fitW(plName(set, suri), 14, 12, true, 150) : Object.fromEntries(AM_ROWS)[mode];
   text(R_ - 36, y + 23, hl, 12, C.acc, true, "e");
   let hx = R_ - 36 - measure(hl, 12, true) - 8; if (suri) { if (coverImg(suri, hx - 22, y + 12, 22, 5)) hx -= 22 + 8; }
   if (am.wl) { sprite("am_then", hx - 19, y + 12, hx + 3, y + 34, C.mu); sprite("am_trophy", hx - 41, y + 12, hx - 19, y + 34, "#e0b040"); }
@@ -250,9 +253,11 @@ function drawMain(s) {
       text(XL + 54, ry, lab, 12, on ? C.tx : C.mu, on);
       if (k === "resume") text(XR2, ry, "Pre-match", 11, C.mu, false, "e");
       else if (k === "playlist") {
-        const pz = hit(rr(CC - 14, ry - 15, XR2 + 4, ry + 15, 8, "transparent"), (e) => { e.stopPropagation(); pick("am:playlist", "After match playlist", false, am.playlist); });
-        pz._hl = true; tipOn(pz, ["amp"], "Pick a playlist", [CC - 14, ry - 15, XR2 + 4, ry + 15]);
-        amSlotDraw(CC, ry, am.playlist); text(CC + 16, ry, am.playlist ? trunc(plName(set, am.playlist), 10) : "Pick", 11.5, on ? C.tx : C.mu, on);
+        // cover, name, chevron right-aligned: the name ends 6 px before the chevron (no overlap); short names keep 1.0.9's cover column
+        const nmx = am.playlist ? fitW(plName(set, am.playlist), 10, 11.5, on, 110) : "Pick", tx = Math.min(CC + 16, XR2 - 2 - 7 - 6 - measure(nmx, 11.5, on)), cc = tx - 16;
+        const pz = hit(rr(cc - 14, ry - 15, XR2 + 4, ry + 15, 8, "transparent"), (e) => { e.stopPropagation(); pick("am:playlist", "After match playlist", false, am.playlist); });
+        pz._hl = true; tipOn(pz, ["amp"], "Pick a playlist", [cc - 14, ry - 15, XR2 + 4, ry + 15]);
+        amSlotDraw(cc, ry, am.playlist); text(tx, ry, nmx, 11.5, on ? C.tx : C.mu, on);
         const cv_ = el("div", "a", { left: (XR2 - 2 - 7) + "px", top: (ry - 7) + "px", width: "14px", height: "14px", pointerEvents: "none" }); cv_.appendChild(chevSvg(C.mu, 14));
         pz.addEventListener("mouseenter", () => pz.style.background = "rgba(255,255,255,.06)"); pz.addEventListener("mouseleave", () => pz.style.background = "transparent"); pz._hov = true;
       }

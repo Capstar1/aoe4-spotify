@@ -5,6 +5,7 @@ const $ = (id) => document.getElementById(id), W = 420, GT = 79.5, GAP = 10, GP 
 const P = { info: {}, state: "load", items: [], sel: null, sc: 0, err: "", use: false };
 const RE_PL = /(?:open\.spotify\.com\/(?:intl-[a-z-]+\/)?playlist\/|spotify:playlist:)([A-Za-z0-9]{22})/;
 const RE_TR = /(?:open\.spotify\.com\/(?:intl-[a-z-]+\/)?track\/|spotify:track:)([A-Za-z0-9]{22})/;
+const BUILDER = false;   // "Make your own" list builder: switched off for now (code kept; saved lists can still be picked)
 const trunc = (t, n) => t.length <= n ? t : t.slice(0, n - 1) + "\u2026";
 function parseLink(t) { const m = RE_PL.exec(t || ""); if (m) return "spotify:playlist:" + m[1]; if (P.info.tracks) { const r = RE_TR.exec(t || ""); if (r) return "spotify:track:" + r[1]; } return null; }
 async function finish(uri, name, img) {
@@ -43,7 +44,7 @@ function draw() { if (B.on) return;
   // your app lists (1.0.9 'Your lists': up to 4, not the current one)
   let y = 313 + 184; const L = $("lists"); L.innerHTML = "";
   // make your own card: one button (tile, title, grey subline, chevron) -> builder
-  const cur = P.info.current || "", curL = cur.startsWith("aoe4s:list:") && !cur.endsWith(":liked") ? (P.info.custom_lists || {})[cur.split(":").pop()] : null, mk = $("mk"); mk.style.top = y + "px";
+  const cur = P.info.current || "", curL = cur.startsWith("aoe4s:list:") && !cur.endsWith(":liked") ? (P.info.custom_lists || {})[cur.split(":").pop()] : null, mk = $("mk"); mk.style.display = BUILDER ? "block" : "none"; mk.style.top = y + "px";
   mk.innerHTML = `<div class="a" id="mkt" style="left:11px;top:9px;width:36px;height:36px;border-radius:9px;background:#1f4630"></div>` +
     `<div class="t" style="left:61px;top:19px;font:700 12.5px 'Segoe UI'"></div><div class="t" style="left:61px;top:37px;font:400 10.5px 'Segoe UI';color:#9a9a9a">Saved in this app, not Spotify</div>` +
     `<svg class="a" id="mkc" style="left:367px;top:20px" width="10" height="14"><polyline points="2.5,2 7.5,7 2.5,12" fill="none" stroke="#9a9a9a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -53,7 +54,7 @@ function draw() { if (B.on) return;
   mk.onmouseenter = () => { $("mkc").style.left = "369px"; $("mkc").firstChild.setAttribute("stroke", "#1DB954"); const t = $("mkt"); if (t.tagName === "DIV") t.style.background = "#24553a"; };
   mk.onmouseleave = () => { $("mkc").style.left = "367px"; $("mkc").firstChild.setAttribute("stroke", "#9a9a9a"); const t = $("mkt"); if (t.tagName === "DIV") t.style.background = "#1f4630"; };
   mk.onclick = () => openBuilder(curL ? cur : null);
-  y += 68;
+  if (BUILDER) y += 68;
   const lists = Object.entries(P.info.custom_lists || {}).filter(([k, v]) => v && typeof v === "object" && "aoe4s:list:" + k !== P.info.current && k !== "liked").slice(-4);
   if (lists.length) { const h = document.createElement("div"); h.className = "t"; Object.assign(h.style, { left: "20px", top: (y + 8) + "px", font: "700 10.5px 'Segoe UI'", color: "#9a9a9a" }); h.textContent = "Your lists"; L.appendChild(h); y += 20;
     for (const [k, v] of lists) { const r = document.createElement("div"); r.className = "ls"; r.style.top = y + "px"; r.innerHTML = `<div class="ph"></div><div class="t" style="left:48px;top:20px;font:700 12px 'Segoe UI'"></div><div class="t" style="right:14px;top:20px;font:400 10.5px 'Segoe UI';color:#9a9a9a">${(v.tracks || []).length} songs</div>`;
@@ -85,5 +86,5 @@ document.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfe
 document.addEventListener("drop", (e) => { e.preventDefault(); if (B.on) return bDrop(e); dragN = 0; P.drag = false; const t = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain"); const u = parseLink(t);
   if (u) finish(u); else { P.err = `Not a Spotify ${P.info.tracks ? "playlist or song" : "playlist"} link`; draw(); } });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !B.on) Wn.close(); });
-(async () => { P.info = await invoke("pick_info"); const c = P.info.current || ""; if (c.startsWith("aoe4s:list:") && !c.endsWith(":liked") && (P.info.custom_lists || {})[c.split(":").pop()]) { draw(); openBuilder(c); } else { draw(); gdraw(); }
+(async () => { P.info = await invoke("pick_info"); const c = P.info.current || ""; if (BUILDER && c.startsWith("aoe4s:list:") && !c.endsWith(":liked") && (P.info.custom_lists || {})[c.split(":").pop()]) { draw(); openBuilder(c); } else { draw(); gdraw(); }
   await Wn.show(); await Wn.setFocus(); load(); })();
