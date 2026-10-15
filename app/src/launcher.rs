@@ -67,26 +67,12 @@ pub fn music_sync(enabled: bool) -> bool {
     if enabled {
         if v > 0.0 { let _ = std::fs::create_dir_all(data_dir()); let _ = std::fs::write(music_state(), serde_json::json!({ "level": v }).to_string()); music_write(0.0); log(&format!("Game music muted (your level {v:.2} saved)")); }
     } else {
-        // your saved level; none saved (the music was already 0 when we took over) -> AoE4's own default (sysconfig.lua)
+        // only put back what we muted (a saved level); music that was already 0 when we took over stays 0
         let lv = std::fs::read_to_string(music_state()).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|j| j["level"].as_f64()).filter(|l| *l > 0.0);
-        let (l, what) = match lv { Some(l) => (l, "your level"), None => (default_music(), "AoE4's default") };
-        if v == 0.0 { music_write(l); log(&format!("Game music restored to {l:.2} ({what})")); }
+        if let Some(l) = lv { if v == 0.0 { music_write(l); log(&format!("Game music restored to {l:.2}")); } }
         let _ = std::fs::remove_file(music_state());
     }
     true
-}
-
-/// AoE4's default music volume: `setting = "musicVolume", variantFloat = 1.0` in the game's sysconfig.lua (read only); 1.0 if not found.
-pub fn default_music() -> f64 {
-    if let Some(v) = test_env("AOE4S_MUSIC_DEFAULT").and_then(|s| s.parse().ok()) { return v; }
-    let libs = steam_path().map(|r| { let mut v = vec![PathBuf::from(&r)];
-        if let Ok(t) = std::fs::read_to_string(Path::new(&r).join(r"steamapps\libraryfolders.vdf")) { let toks = vdf_tokens(&t);
-            for k in 0..toks.len().saturating_sub(1) { if toks[k].kind == 's' && toks[k].val.eq_ignore_ascii_case("path") && toks[k + 1].kind == 's' { v.push(PathBuf::from(vunesc(&toks[k + 1].val))); } } } v }).unwrap_or_default();
-    for l in libs { if let Ok(t) = std::fs::read_to_string(l.join(r"steamapps\common\Age of Empires IV\sysconfig.lua")) {
-        let low = t.to_lowercase(); if let Some(i) = low.find("\"musicvolume\"") { if let Some(j) = low[i..].find("variantfloat") {
-            let r = &t[i + j + 12..]; let r = r.trim_start().trim_start_matches('=').trim_start(); let n: String = r.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-            if let Ok(v) = n.parse::<f64>() { if v > 0.0 && v <= 1.0 { return v; } } } } } }
-    1.0
 }
 
 // ---- uninstall (1.0.9 setup.iss: "Removes the app, its shortcuts and settings, and puts the game's launch options and music volume back.")
