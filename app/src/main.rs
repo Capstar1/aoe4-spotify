@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
-//! M1 shell: one fixed-size window; the core follows the game log. Real playback is OFF by default (dry run)
+//! M1 shell: one fixed-size window; the core follows the game log. Playback is always real, as in 1.0.9 (no dry-run switch)
 //! so 1.1 never fights the 1.0.9 app over Spotify; the toggle is saved in %APPDATA%\AoE4Spotify-1.1.
 mod shadow;
 mod launcher;
@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Default, serde::Serialize, Clone)]
 struct Status { result: Option<i32>, match_n: u64, game: String, log_path: String, watching: bool, in_match: bool, age: Option<String>, playing: Option<String>, log: Vec<String> }
 
-struct AppState { pick: Mutex<serde_json::Value>, gtg: Mutex<serde_json::Value>, settings: Mutex<Settings>, ver: std::sync::atomic::AtomicU64, upd: Mutex<serde_json::Value>, ages: Vec<(String, String)>, status: Mutex<Status>, real: AtomicBool, replays: AtomicBool, busy: AtomicBool, spotify: Mutex<Spotify>, tx: Mutex<Sender<Action>>, dir: PathBuf, ed: Mutex<serde_json::Value> }
+struct AppState { pick: Mutex<serde_json::Value>, gtg: Mutex<serde_json::Value>, settings: Mutex<Settings>, ver: std::sync::atomic::AtomicU64, upd: Mutex<serde_json::Value>, ages: Vec<(String, String)>, status: Mutex<Status>, replays: AtomicBool, busy: AtomicBool, spotify: Mutex<Spotify>, tx: Mutex<Sender<Action>>, dir: PathBuf, ed: Mutex<serde_json::Value> }
 
 const ED_KEYS: [&str; 6] = ["intro_pools", "intro_ages", "custom_songs", "intro_presets", "intro_preset", "intro_pack_open"];
 /// Age Intros edits made in 1.1 live in 1.1's own intros.json (seeded once from 1.0.9's settings), so the
@@ -68,7 +68,6 @@ fn migrate_109(dir: &std::path::Path, inst109: Option<PathBuf>, cleanup: bool) -
     // saved game-music level (only when 1.0.9 muted the music)
     let gm = inst.join("game_music.json"); let ok_music = if gm.is_file() && !dir.join("game_music.json").exists() { std::fs::copy(&gm, dir.join("game_music.json")).is_ok() } else { true };
     let mut pr: Value = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
-    if pr.get("real_playback").is_none() { pr["real_playback"] = json!(true); let _ = std::fs::write(dir.join("settings.json"), pr.to_string()); }   // 1.1 replaces 1.0.9: real playback on
     // verify: counts in the copies match the originals
     let k = |p: &std::path::Path, key: &str| count_json(p, |v| cnt(&v[key]));
     let src_cfg = ad.join("config.json");
@@ -145,7 +144,7 @@ fn decode_preset(app: tauri::State<Arc<AppState>>, code: String) -> Result<serde
 
 fn save_prefs(app: &AppState) {
     let _ = std::fs::create_dir_all(&app.dir);
-    let _ = std::fs::write(app.dir.join("settings.json"), serde_json::json!({ "real_playback": app.real.load(Ordering::SeqCst), "music_in_replays": app.replays.load(Ordering::SeqCst) }).to_string());
+    let _ = std::fs::write(app.dir.join("settings.json"), serde_json::json!({ "music_in_replays": app.replays.load(Ordering::SeqCst) }).to_string());
 }
 
 /// Spotify worker: actions run one after another so fades never overlap and the log watcher never blocks.
@@ -245,18 +244,15 @@ fn watch(app: Arc<AppState>, path: PathBuf) {
                     match a.clone() {
                         Action::Play { age, uri, fade_s } => {
                             app.status.lock().unwrap().playing = Some(uri.clone());
-                            if app.real.load(Ordering::SeqCst) { let _ = app.tx.lock().unwrap().send(Action::Play { age, uri, fade_s }); }
-                            else { push(&app.status, format!("would play {uri} for {age} (fade {fade_s}s) [dry run]")); }
+                            let _ = (age, fade_s); let _ = app.tx.lock().unwrap().send(a.clone());
                         }
                         Action::AfterMatch { .. } => {
                             app.status.lock().unwrap().playing = None;
-                            if app.real.load(Ordering::SeqCst) { let _ = app.tx.lock().unwrap().send(a.clone()); }
-                            else { push(&app.status, format!("would do after match {a:?} [dry run]")); }
+                            let _ = app.tx.lock().unwrap().send(a.clone());
                         }
                         Action::Restore | Action::Stop => {
                             app.status.lock().unwrap().playing = None;
-                            if app.real.load(Ordering::SeqCst) { let _ = app.tx.lock().unwrap().send(a.clone()); }
-                            else { push(&app.status, format!("would {} [dry run]", if a == Action::Restore { "restore your previous music" } else { "stop the music" })); }
+                            let _ = app.tx.lock().unwrap().send(a.clone());
                         }
                     }
                 }
@@ -322,7 +318,7 @@ fn get_state(app: tauri::State<Arc<AppState>>) -> serde_json::Value {
     let ed = app.ed.lock().unwrap().clone(); let set = app.settings.lock().unwrap().clone(); let es = with_ed(&set, &ed);
     let user = read_user(&app.dir);
     serde_json::json!({ "settings": set, "user": { "custom_lists": user["custom_lists"], "after_match": user["after_match"], "fade_seconds": user["fade_seconds"] }, "upd": app.upd.lock().unwrap().clone(), "ages": app.ages, "ages": app.ages, "status": st, "intros": aoe4core::intros::overview(&es, &keys), "agedata": aoe4core::intros::age_data(&es, &keys), "ed": ed,
-        "spotify": { "logged_in": logged_in, "real": app.real.load(Ordering::SeqCst), "replays": app.replays.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
+        "spotify": { "logged_in": logged_in, "replays": app.replays.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
 }
 
 mod win {
@@ -826,13 +822,8 @@ fn install_pending(app: &AppState) {
 fn cfg() -> serde_json::Value { serde_json::json!({ "order": std::env::var("AOE4S_ORDER").unwrap_or_default(), "pl_closed": std::env::var_os("AOE4S_PL_CLOSED").is_some(), "menutest": std::env::var_os("AOE4S_MENUTEST").is_some(), "open": std::env::var("AOE4S_OPEN").unwrap_or_default(), "edtest": std::env::var_os("AOE4S_EDTEST").is_some(), "addtest": std::env::var_os("AOE4S_ADDTEST").is_some() }) }
 
 #[tauri::command]
-fn logout(app: tauri::State<Arc<AppState>>) { app.real.store(false, Ordering::SeqCst); save_prefs(&app); app.spotify.lock().unwrap().logout(); push(&app.status, "Spotify: logged out, real playback off".into()); }
+fn logout(app: tauri::State<Arc<AppState>>) { app.spotify.lock().unwrap().logout(); push(&app.status, "Spotify: logged out".into()); }
 
-#[tauri::command]
-fn set_real(app: tauri::State<Arc<AppState>>, on: bool) {
-    app.real.store(on, Ordering::SeqCst); save_prefs(&app);
-    push(&app.status, if on { "Real playback ON".into() } else { "Real playback OFF (dry run)".into() });
-}
 
 fn main() {
     let dir = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify-1.1");
@@ -859,7 +850,7 @@ fn main() {
     let prefs: serde_json::Value = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     let spotify = Spotify::new(settings.client_id.clone(), dir.join("token.json"));
     let (tx, rx) = channel(); let replays0 = prefs["music_in_replays"].as_bool().unwrap_or(settings.music_in_replays);
-    let app = Arc::new(AppState { pick: Mutex::new(serde_json::Value::Null), gtg: Mutex::new(serde_json::Value::Null), settings: Mutex::new(settings), ver: Default::default(), upd: Mutex::new(serde_json::json!({ "phase": if std::env::args().any(|a| a == "--updated") { "done" } else { "idle" }, "msg": format!("Updated to {}", env!("CARGO_PKG_VERSION")) })), ages, status: Mutex::new(status), real: AtomicBool::new(prefs["real_playback"].as_bool() != Some(false)),
+    let app = Arc::new(AppState { pick: Mutex::new(serde_json::Value::Null), gtg: Mutex::new(serde_json::Value::Null), settings: Mutex::new(settings), ver: Default::default(), upd: Mutex::new(serde_json::json!({ "phase": if std::env::args().any(|a| a == "--updated") { "done" } else { "idle" }, "msg": format!("Updated to {}", env!("CARGO_PKG_VERSION")) })), ages, status: Mutex::new(status), 
         replays: AtomicBool::new(replays0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx), ed: Mutex::new(load_ed(&dir)), dir });
     let a2 = app.clone(); std::thread::spawn(move || watch(a2, path));
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));
@@ -879,7 +870,7 @@ fn main() {
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
         .on_window_event(|w, e| { use tauri::Manager; if (w.label() == "gtg" || w.label() == "access" || w.label() == "own") && matches!(e, tauri::WindowEvent::Destroyed) {
             let h = w.app_handle().clone(); if let Some(m) = h.get_webview_window("main") { if !m.is_visible().unwrap_or(true) && std::env::args().nth(1).is_none() { h.exit(0); } } } })
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, sp, cache_covers, open_add, dbg, menu, check_update, show_panel, set_user, set_enabled, start_update, open_pick, pick_done, pick_info, gtg_info, gtg_fix, save_list, delete_list, access_info, access_send, access_check, clip_text, open_own, own_info, own_save, own_shared])
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, sp, cache_covers, open_add, dbg, menu, check_update, show_panel, set_user, set_enabled, start_update, open_pick, pick_done, pick_info, gtg_info, gtg_fix, save_list, delete_list, access_info, access_send, access_check, clip_text, open_own, own_info, own_save, own_shared])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
 }
