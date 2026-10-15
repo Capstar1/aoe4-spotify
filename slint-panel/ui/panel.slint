@@ -83,6 +83,7 @@ export component Panel inherits Window {
     in property <bool> pill-click;            // pill starts the update
     in property <bool> badge;                 // green dot on the gear (update available)
     in-out property <bool> menu-open;
+    in-out property <bool> full-dirty: false;   // flip to dirty the whole window (winfx::force_full_repaint)
     in-out property <float> fade: 2.0;
     in property <float> default-fade: 2.0;
     in property <[AgeRow]> ages;
@@ -135,6 +136,10 @@ export component Panel inherits Window {
     width: PW + 2px;
     height: ch + 30px + 2px;
     background: Pal.bg;
+
+    // Behind the frame. One step off the page colour, so a flip dirties every pixel and a reused
+    // softbuffer cannot leave a dropped DWM surface transparent.
+    Rectangle { width: parent.width; height: parent.height; background: root.full-dirty ? #121213 : #121212; }
 
     forward-focus: keys;
     public function refocus() { keys.focus(); }

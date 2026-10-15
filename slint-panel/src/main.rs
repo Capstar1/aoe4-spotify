@@ -93,6 +93,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui = Panel::new()?;
     ui.on_power_spin({ let w = ui.as_weak(); move |on| { if let Some(u) = w.upgrade() { power::spin(&u, !on, windows::panel_visible()); } } });
     PANEL.with(|p| *p.borrow_mut() = Some(ui.as_weak()));
+    #[cfg(windows)] winfx::restore::set_flip(flip_full);
     let pillm = Rc::new(RefCell::new(PillMsg::default()));
     let forced_fire: Option<i32> = { let a: Vec<String> = std::env::args().collect(); a.iter().position(|x| x == "--fire").map(|i| a.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(1)) };
 
@@ -258,8 +259,23 @@ thread_local! { static FIRST: std::cell::Cell<bool> = const { std::cell::Cell::n
 /// Once the panel has a native window: DWM rounded corners, text drops (age page).
 fn first_show(ui: &Panel) {
     if FIRST.with(|d| d.replace(true)) { return; }
-    #[cfg(windows)] { round_corners(ui); dnd::when_native(ui, winfx::restore::arm); }
+    #[cfg(windows)] {
+        round_corners(ui);
+        // The software renderer returns Unsupported; presented() still runs after WM_PAINT.
+        let _ = ui.window().set_rendering_notifier(|state, _| {
+            if matches!(state, slint::RenderingState::AfterRendering) { winfx::restore::presented(); }
+        });
+        dnd::when_native(ui, winfx::restore::arm);
+    }
     dnd::register(ui, dnd::Target::Panel);
+}
+/// Whole-window damage: one step on the full-bleed rectangle, then a redraw.
+#[cfg(windows)]
+fn flip_full() {
+    PANEL.with(|p| if let Some(ui) = p.borrow().as_ref().and_then(|w| w.upgrade()) {
+        ui.set_full_dirty(!ui.get_full_dirty());
+        ui.window().request_redraw();
+    });
 }
 /// Hide the tooltip (page switches, drags).
 pub fn tips_hide(ui: &Panel) { ui.global::<Tips>().invoke_hide(); }

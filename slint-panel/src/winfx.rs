@@ -31,83 +31,125 @@ fn reveal() {
 }
 }
 
-/// Minimize / restore. Windows hands back an empty surface, and the software renderer then blits only the
-/// regions it thinks changed, so a transparent panel comes back mostly see-through. Cloak across the restore,
-/// force a full-size blit (a 1px size nudge makes softbuffer drop the old buffer), clear the stuck minimize
-/// hover, then uncloak. `cb(true)` while minimized, `cb(false)` after the restored frame is up.
+/// Minimize / restore. After a long minimize DWM drops the surface. The software renderer then
+/// reuses its buffer and blits only the damage it knows about, so the rest of the panel stays
+/// transparent. A full-window colour flip dirties every pixel. The window stays cloaked until
+/// that frame has been presented. `cb(true)` while minimized, `cb(false)` after the frame is up.
 #[cfg(windows)] pub mod restore {
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
     #[repr(C)] struct Cwp { lp: isize, wp: usize, msg: u32, h: isize }
-    #[repr(C)] struct Rc { l: i32, t: i32, r: i32, b: i32 }
+    #[repr(C)] struct Rt { l: i32, t: i32, r: i32, b: i32 }
     #[link(name = "user32")] extern "system" {
         fn SetWindowsHookExW(id: i32, f: unsafe extern "system" fn(i32, usize, isize) -> isize, m: isize, t: u32) -> isize;
         fn CallNextHookEx(h: isize, c: i32, w: usize, l: isize) -> isize;
-        fn RedrawWindow(h: isize, r: *const crate::geom::Rect, rgn: isize, f: u32) -> i32;
-        fn GetWindowRect(h: isize, r: *mut Rc) -> i32;
-        fn SetWindowPos(h: isize, after: isize, x: i32, y: i32, w: i32, hh: i32, f: u32) -> i32;
         fn SendMessageW(h: isize, m: u32, w: usize, l: isize) -> isize;
+        fn PostMessageW(h: isize, m: u32, w: usize, l: isize) -> i32;
+        fn GetUpdateRect(h: isize, r: *mut Rt, erase: i32) -> i32;
+        fn GetClientRect(h: isize, r: *mut Rt) -> i32;
     }
     #[link(name = "kernel32")] extern "system" { fn GetCurrentThreadId() -> u32; }
     #[link(name = "dwmapi")] extern "system" { fn DwmSetWindowAttribute(h: isize, a: u32, v: *const u32, n: u32) -> i32; fn DwmFlush() -> i32; }
+    #[link(name = "wtsapi32")] extern "system" { fn WTSRegisterSessionNotification(h: isize, flags: u32) -> i32; }
     thread_local! {
         static HOOK: Cell<isize> = const { Cell::new(0) };
-        static WIN: Cell<isize> = const { Cell::new(0) };
         static WAS: Cell<bool> = const { Cell::new(false) };
         static BUSY: Cell<bool> = const { Cell::new(false) };
         static CB: Cell<Option<fn(bool)>> = const { Cell::new(None) };
+        static FLIP: Cell<Option<fn()>> = const { Cell::new(None) };
+        static REG: Cell<bool> = const { Cell::new(false) };
     }
+    static HWND: AtomicIsize = AtomicIsize::new(0);
+    static TID: AtomicU32 = AtomicU32::new(0);
+    static WAIT: AtomicBool = AtomicBool::new(false);       // cloaked until the restored frame is presented
+    static SUPPRESS: AtomicBool = AtomicBool::new(false);   // the paint our flip asked for must not flip again
+    const FRAME: u32 = 0x8000 + 31;   // WM_APP+31, posted from WM_PAINT so it runs after that paint presents
     fn cloak(h: isize, on: bool) { let v: u32 = on as u32; unsafe { DwmSetWindowAttribute(h, 13, &v, 4) }; }
     fn fire(min: bool) { if let Some(cb) = CB.with(|c| c.get()) { cb(min); } }
     pub fn set_cb(cb: fn(bool)) { CB.with(|c| c.set(Some(cb))); }
-    /// Watch this window for minimize and restore. Safe to call again.
+    pub fn set_flip(f: fn()) { FLIP.with(|c| c.set(Some(f))); }
+    pub(super) fn repaint() { if let Some(f) = FLIP.with(|c| c.get()) { f(); } }
+    /// Watch this window. Safe to call again.
     pub fn arm(h: isize) {
         if h == 0 { return; }
-        WIN.with(|x| x.set(h));
+        HWND.store(h, Ordering::Release);
+        TID.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
+        if !REG.with(|r| r.replace(true)) { unsafe { WTSRegisterSessionNotification(h, 0); } }   // NOTIFY_FOR_THIS_SESSION
         if HOOK.with(|x| x.get()) != 0 { return; }
         let k = unsafe { SetWindowsHookExW(4, proc, 0, GetCurrentThreadId()) };   // WH_CALLWNDPROC
         HOOK.with(|x| x.set(k));
     }
+    /// Update-region bounds cover more than half the client. The bounds are a superset of the region.
+    fn large(h: isize) -> bool {
+        unsafe {
+            let mut u = Rt { l: 0, t: 0, r: 0, b: 0 };
+            let mut c = Rt { l: 0, t: 0, r: 0, b: 0 };
+            if GetUpdateRect(h, &mut u, 0) == 0 || GetClientRect(h, &mut c) == 0 { return false; }
+            let (uw, uh) = ((u.r - u.l) as i64, (u.b - u.t) as i64);
+            let (cw, ch) = ((c.r - c.l) as i64, (c.b - c.t) as i64);
+            cw > 0 && ch > 0 && uw > 0 && uh > 0 && uw * uh * 2 > cw * ch
+        }
+    }
+    fn begin() {
+        let h = HWND.load(Ordering::Acquire);
+        if h == 0 { BUSY.with(|b| b.set(false)); return; }
+        unsafe { SendMessageW(h, 0x02A3, 0, 0) };   // WM_MOUSELEAVE: drop the stuck minimize-button hover
+        WAIT.store(true, Ordering::Release);
+        SUPPRESS.store(true, Ordering::Release);
+        super::force_full_repaint();
+        slint::Timer::single_shot(std::time::Duration::from_millis(150), timeout);
+    }
+    fn timeout() { if WAIT.load(Ordering::Acquire) { presented(); } }
+    fn finish() {
+        let ui = TID.load(Ordering::Relaxed);
+        if ui != 0 && unsafe { GetCurrentThreadId() } == ui {
+            BUSY.with(|b| b.set(false));
+            fire(false);
+        } else {
+            let _ = slint::invoke_from_event_loop(|| { BUSY.with(|b| b.set(false)); fire(false); });
+        }
+    }
+    /// The restored frame is in the DWM surface. Uncloak once.
+    pub fn presented() {
+        if !WAIT.swap(false, Ordering::AcqRel) { return; }
+        let h = HWND.load(Ordering::Acquire);
+        if h != 0 { unsafe { DwmFlush() }; cloak(h, false); }
+        finish();
+    }
     unsafe extern "system" fn proc(c: i32, w: usize, l: isize) -> isize {
-        if c >= 0 && l != 0 && !BUSY.with(|b| b.get()) {
+        if c >= 0 && l != 0 {
             let m = &*(l as *const Cwp);
-            let me = WIN.with(|x| x.get());
-            if m.h == me && m.msg == 5 {   // WM_SIZE
-                if m.wp == 1 {   // SIZE_MINIMIZED
-                    WAS.with(|x| x.set(true));
-                    slint::Timer::single_shot(std::time::Duration::ZERO, || fire(true));
-                } else if (m.wp == 0 || m.wp == 2) && WAS.with(|x| x.replace(false)) {   // restored or maximized
-                    BUSY.with(|b| b.set(true));
-                    cloak(me, true);
-                    slint::Timer::single_shot(std::time::Duration::ZERO, reveal);
+            let me = HWND.load(Ordering::Relaxed);
+            if me != 0 && m.h == me {
+                match m.msg {
+                    0x0F => {   // WM_PAINT, before BeginPaint
+                        if !SUPPRESS.swap(false, Ordering::AcqRel) && large(me) {
+                            SUPPRESS.store(true, Ordering::Release);
+                            super::force_full_repaint();
+                        }
+                        // Software renderer presents inside this WM_PAINT and does not emit AfterRendering.
+                        if WAIT.load(Ordering::Acquire) { PostMessageW(me, FRAME, 0, 0); }
+                    }
+                    FRAME => { if WAIT.load(Ordering::Acquire) { presented(); } }
+                    5 if !BUSY.with(|b| b.get()) => {   // WM_SIZE
+                        if m.wp == 1 {   // SIZE_MINIMIZED
+                            WAS.with(|x| x.set(true));
+                            slint::Timer::single_shot(std::time::Duration::ZERO, || fire(true));
+                        } else if (m.wp == 0 || m.wp == 2) && WAS.with(|x| x.replace(false)) {
+                            BUSY.with(|b| b.set(true));
+                            cloak(me, true);
+                            slint::Timer::single_shot(std::time::Duration::ZERO, begin);
+                        }
+                    }
+                    0x18 if m.wp != 0 => super::force_full_repaint(),   // WM_SHOWWINDOW shown
+                    0x031E | 0x007E => super::force_full_repaint(),       // WM_DWMCOMPOSITIONCHANGED, WM_DISPLAYCHANGE
+                    0x02B1 if m.wp == 8 => super::force_full_repaint(),   // WM_WTSSESSION_CHANGE / WTS_SESSION_UNLOCK
+                    0x0218 if m.wp == 7 || m.wp == 0x12 => super::force_full_repaint(),   // resume suspend / automatic
+                    _ => {}
                 }
             }
         }
         CallNextHookEx(0, c, w, l)
-    }
-    fn paint(h: isize) { unsafe { RedrawWindow(h, std::ptr::null(), 0, 0x1 | 0x100 | 0x80 | 0x400); } }   // INVALIDATE|UPDATENOW|ALLCHILDREN|FRAME
-    fn reveal() {
-        let h = WIN.with(|x| x.get());
-        if h != 0 {
-            unsafe {
-                let mut r = Rc { l: 0, t: 0, r: 0, b: 0 };
-                if GetWindowRect(h, &mut r) != 0 {
-                    let (w, hh) = (r.r - r.l, r.b - r.t);
-                    if w > 50 && hh > 50 {
-                        // softbuffer keeps the old bitmap (age 1) and only blits dirty rects. A size change
-                        // allocates a new bitmap, so the next paint copies the whole window.
-                        SetWindowPos(h, 0, 0, 0, w - 1, hh, 0x2 | 0x4 | 0x10 | 0x100);   // NOMOVE|NOZORDER|NOACTIVATE|NOCOPYBITS
-                        paint(h);
-                        SendMessageW(h, 0x02A3, 0, 0);   // WM_MOUSELEAVE: drop the stuck minimize-button hover
-                        SetWindowPos(h, 0, 0, 0, w, hh, 0x2 | 0x4 | 0x10 | 0x100);
-                    }
-                }
-                paint(h);
-                DwmFlush();
-            }
-            cloak(h, false);
-        }
-        BUSY.with(|b| b.set(false));
-        fire(false);
     }
 }
 #[cfg(windows)] pub mod resize {
@@ -215,3 +257,5 @@ mod leave {
 }}
 #[cfg(windows)] pub use first_show::arm as arm_first_show;
 #[cfg(windows)] pub use resize::place;
+/// Flip the full-window damage bit and ask Slint for a new frame.
+#[cfg(windows)] pub fn force_full_repaint() { restore::repaint(); }

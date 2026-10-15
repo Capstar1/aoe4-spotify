@@ -25,7 +25,7 @@ pub fn reveal_hwnd(h: isize) {
 }
 /// Older switchers (Tauri 1.1) have a window titled "AoE4 Spotify": show it.
 pub fn show_window_titled(t: &str) {
-    #[link(name = "user32")] extern "system" { fn FindWindowW(c: *const u16, t: *const u16) -> isize; fn ShowWindow(h: isize, c: i32) -> i32; fn SetForegroundWindow(h: isize) -> i32; }
+    #[link(name = "user32")] extern "system" { fn FindWindowW(c: *const u16, t: *const u16) -> isize; fn IsIconic(h: isize) -> i32; fn ShowWindow(h: isize, c: i32) -> i32; fn SetForegroundWindow(h: isize) -> i32; }
     let t: Vec<u16> = t.encode_utf16().chain(Some(0)).collect();
-    unsafe { let h = FindWindowW(std::ptr::null(), t.as_ptr()); if h != 0 { ShowWindow(h, 5); ShowWindow(h, 9); SetForegroundWindow(h); } }
+    unsafe { let h = FindWindowW(std::ptr::null(), t.as_ptr()); if h != 0 { if IsIconic(h) != 0 { ShowWindow(h, 9); } else { ShowWindow(h, 5); } SetForegroundWindow(h); } }
 }
