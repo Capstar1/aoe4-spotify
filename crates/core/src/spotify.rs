@@ -150,7 +150,7 @@ impl Spotify {
         let listener = TcpListener::bind("127.0.0.1:8888").map_err(|_| "Port 8888 is busy (is a 1.0.9 login window open?)".to_string())?;
         let url = format!("https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&code_challenge_method=S256&code_challenge={}&scope={}&state={}",
             enc(cid), enc(REDIRECT), challenge(&verifier), enc(SCOPES), state);
-        { use std::os::windows::process::CommandExt; std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).creation_flags(0x0800_0000).spawn() }.map_err(|e| e.to_string())?;
+        crate::os::open(&url).map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).ok();
         let deadline = Instant::now() + Duration::from_secs(180);
         let code = loop {
