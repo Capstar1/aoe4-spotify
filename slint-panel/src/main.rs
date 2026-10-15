@@ -69,6 +69,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // Steam / --attach: headless switcher, no Slint. The panel is a different process and never calls eng.start().
     #[cfg(windows)]
     if st.hidden && !test { bg::run(&dir, st.attach); return Ok(()); }
+    aoe4core::appvol::restore_after_crash();
     #[cfg(not(windows))]
     let _attach = st.attach;
     slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into())

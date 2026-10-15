@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 /// Follow one game session, then hand Spotify back, restore the game-music mute, and install a pending update.
 /// The switcher mutex is already held (startup / start_game). Do not take it again.
 pub fn run(dir: &Path, attach: bool) {
+    aoe4core::appvol::restore_after_crash();
     let (eng, rx, log_path) = Engine::new(dir.to_path_buf());
     let logged = eng.spotify.lock().unwrap().logged_in();
     if attach {

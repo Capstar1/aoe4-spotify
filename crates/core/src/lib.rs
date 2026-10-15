@@ -10,4 +10,5 @@ pub mod boss;
 pub mod intros;
 pub mod aftermatch;
 pub mod os;
+pub mod appvol;
 pub mod userstore;

@@ -1,5 +1,6 @@
 //! Spotify Web API client for 1.1: PKCE login with its OWN token file (separate from 1.0.9), playback,
-//! volume fades through the API, and putting your previous music back after the match. Tokens are never logged.
+//! volume fades, and putting your previous music back after the match. On this PC the fade is the Windows
+//! per-app volume of Spotify.exe (60 fps). Anywhere else it is the Web API volume. Tokens are never logged.
 /// Self-contained pages shown in the browser after the Spotify redirect (approved mockups).
 const LOGIN_OK_HTML: &str = include_str!("../assets/login_ok.html");
 const LOGIN_FAIL_HTML: &str = include_str!("../assets/login_fail.html");
@@ -221,11 +222,88 @@ impl Spotify {
         let Ok(tok) = self.access() else { return };
         let _ = send(&self.agent, "PUT", &format!("{}/me/player/volume?volume_percent={pct}{q}", self.api_base), &tok, None, VOL_T, 1);
     }
-    /// Volume ramp in a few API steps (Spotify rate-limits fast volume changes).
+    /// Web API volume ramp. Cosine ease, and at most one request per 100 ms, so a slow reply skips ahead
+    /// on the curve instead of adding a stair and stretching the fade. Spotify rate-limits faster sends.
     fn fade(&mut self, from: i64, to: i64, secs: f32) {
         if secs <= 0.05 || from == to { self.set_volume(to); return; }
-        let steps = 5; let dt = Duration::from_secs_f32(secs / steps as f32);
-        for i in 1..=steps { self.set_volume(from + (to - from) * i / steps); std::thread::sleep(dt); }
+        let t0 = Instant::now();
+        let mut held = None;
+        let mut next = t0;
+        loop {
+            let t = (t0.elapsed().as_secs_f32() / secs).min(1.0);
+            let e = 0.5 - 0.5 * (std::f32::consts::PI * t).cos();
+            let v = (from as f32 + (to as f32 - from as f32) * e).round() as i64;
+            if Instant::now() >= next && held != Some(v) {
+                self.set_volume(v);
+                held = Some(v);
+                next = Instant::now() + Duration::from_millis(100);
+            }
+            if t >= 1.0 { break; }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if held != Some(to) { self.set_volume(to); }
+    }
+
+    /// This PC's Spotify desktop app is the device that is playing. Tests and the fake player never take this path.
+    fn local_session(&self, st: &Value) -> Option<crate::appvol::Session> {
+        if std::env::var("AOE4S_TEST").ok().as_deref() == Some("1") { return None; }
+        let dev = &st["device"];
+        if !dev["type"].as_str().unwrap_or("").eq_ignore_ascii_case("computer") { return None; }
+        let id = dev["id"].as_str().unwrap_or("");
+        let name = dev["name"].as_str().unwrap_or("");
+        let here = std::env::var("COMPUTERNAME").unwrap_or_default();
+        let ours = !id.is_empty() && self.device.as_deref() == Some(id);
+        if !ours && (here.is_empty() || !name.eq_ignore_ascii_case(&here)) { return None; }
+        let sess = crate::appvol::find()?;
+        sess.get()?;
+        Some(sess)
+    }
+
+    /// 60 fps dip or return on the Windows app volume. False: the listener moved the slider, or the session died.
+    fn ramp(sess: &crate::appvol::Session, orig: f32, secs: f32, down: bool) -> bool {
+        let level = |t: f32| (orig * crate::appvol::fade_gain(if down { t } else { 1.0 - t })).clamp(0.0, 1.0);
+        if secs <= 0.05 {
+            let v = level(1.0);
+            return sess.set(v).then(|| { crate::appvol::guard(Some(orig), Some(v)); }).is_some();
+        }
+        let t0 = Instant::now();
+        let frame = Duration::from_secs_f64(1.0 / 60.0);
+        let mut last: Option<f32> = None;
+        let mut wrote = t0 - Duration::from_secs(1);
+        loop {
+            if let Some(prev) = last {
+                match sess.get() {
+                    Some(cur) if (cur - prev).abs() <= 0.02 => {}
+                    _ => return false,
+                }
+            }
+            let t = (t0.elapsed().as_secs_f32() / secs).min(1.0);
+            let v = level(t);
+            if !sess.set(v) { return false; }
+            last = Some(sess.get().unwrap_or(v));
+            if t >= 1.0 || wrote.elapsed() >= Duration::from_millis(200) {
+                crate::appvol::guard(Some(orig), Some(v));
+                wrote = Instant::now();
+            }
+            if t >= 1.0 { return true; }
+            let step = (t0.elapsed().as_secs_f64() / frame.as_secs_f64()).floor() as u32 + 1;
+            let wake = t0 + frame * step;
+            let now = Instant::now();
+            if wake > now { std::thread::sleep(wake - now); }
+        }
+    }
+
+    /// Hold at the floor until the new music is really playing, so the fade-in is not a swell over silence.
+    fn wait_started(&mut self, old: Option<&str>) {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_millis(1600) {
+            let st = self.state();
+            let uri = st["item"]["uri"].as_str();
+            let playing = st["is_playing"].as_bool() == Some(true);
+            let pos = st["progress_ms"].as_i64().unwrap_or(0);
+            if playing && pos > 0 && uri.is_some() && uri != old { return; }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     fn payload(&mut self, uri: &str) -> Result<Value, String> {
@@ -290,10 +368,30 @@ impl Spotify {
         let cur = st["device"]["volume_percent"].as_i64().unwrap_or(base);
         let playing = st["is_playing"].as_bool() == Some(true);
         let low = base / 5;
-        if playing { self.fade(cur, low, fade_s / 2.0) } else { self.set_volume(low) }
+        let half = fade_s / 2.0;
+        let old = st["item"]["uri"].as_str().map(|s| s.to_string());
+        if playing && fade_s > 0.05 {
+            if let Some(sess) = self.local_session(st) {
+                let orig = sess.get().unwrap_or(1.0);
+                crate::appvol::note(&format!("Fade: Windows app volume, {half:.1}s each way"));
+                if Self::ramp(&sess, orig, half, true) {
+                    let body = self.payload(uri)?;
+                    let r = self.put_play(dev, body);
+                    self.wait_started(old.as_deref());
+                    let _ = Self::ramp(&sess, orig, half, false);
+                    crate::appvol::guard(None, None);
+                    return r;
+                }
+                crate::appvol::guard(None, None);
+                let body = self.payload(uri)?;
+                return self.put_play(dev, body);
+            }
+        }
+        if playing { self.fade(cur, low, half) } else { self.set_volume(low) }
         let body = self.payload(uri)?;
         let r = self.put_play(dev, body);
-        self.fade(low, base, fade_s / 2.0);
+        if playing && fade_s > 0.05 { self.wait_started(old.as_deref()); }
+        self.fade(low, base, half);
         r
     }
 
@@ -320,7 +418,19 @@ impl Spotify {
         let dev = self.ensure_device()?;
         let st = self.state(); let cur = st["device"]["volume_percent"].as_i64().unwrap_or(60);
         let vol = self.saved_volume.take().unwrap_or(cur); self.saved = None;
-        if st["is_playing"].as_bool() == Some(true) { self.fade(cur, vol / 5, fade_s); }
+        let playing = st["is_playing"].as_bool() == Some(true);
+        if playing && fade_s > 0.05 {
+            if let Some(sess) = self.local_session(&st) {
+                let orig = sess.get().unwrap_or(1.0);
+                crate::appvol::note(&format!("Fade: Windows app volume, {fade_s:.1}s out"));
+                let owned = Self::ramp(&sess, orig, fade_s, true);
+                let _ = self.api("PUT", &format!("/me/player/pause?device_id={dev}"), None);
+                if owned { let _ = sess.set(orig); }
+                crate::appvol::guard(None, None);
+                return Ok(());
+            }
+        }
+        if playing { self.fade(cur, vol / 5, fade_s); }
         let _ = self.api("PUT", &format!("/me/player/pause?device_id={dev}"), None);
         self.set_volume(vol); Ok(())
     }
@@ -330,24 +440,47 @@ impl Spotify {
         let Some(prev) = self.saved.take() else { return Ok("nothing to restore".into()) };
         let vol = self.saved_volume.take().unwrap_or(60);
         let dev = self.ensure_device()?;
-        let cur = self.state()["device"]["volume_percent"].as_i64().unwrap_or(vol);
-        self.fade(cur, vol / 5, fade_s / 2.0);
+        let st = self.state();
+        let cur = st["device"]["volume_percent"].as_i64().unwrap_or(vol);
+        let half = fade_s / 2.0;
+        let old = st["item"]["uri"].as_str().map(|s| s.to_string());
+        if st["is_playing"].as_bool() == Some(true) && fade_s > 0.05 {
+            if let Some(sess) = self.local_session(&st) {
+                let orig = sess.get().unwrap_or(1.0);
+                crate::appvol::note(&format!("Fade: Windows app volume, {half:.1}s each way"));
+                if Self::ramp(&sess, orig, half, true) {
+                    let msg = self.restore_body(&dev, &prev)?;
+                    if prev["is_playing"].as_bool() == Some(true) { self.wait_started(old.as_deref()); }
+                    let _ = Self::ramp(&sess, orig, half, false);
+                    crate::appvol::guard(None, None);
+                    return Ok(msg);
+                }
+                crate::appvol::guard(None, None);
+                return self.restore_body(&dev, &prev);
+            }
+        }
+        self.fade(cur, vol / 5, half);
+        let msg = self.restore_body(&dev, &prev)?;
+        if prev["is_playing"].as_bool() == Some(true) && fade_s > 0.05 { self.wait_started(old.as_deref()); }
+        self.fade(vol / 5, vol, half);
+        Ok(msg)
+    }
+
+    fn restore_body(&mut self, dev: &str, prev: &Value) -> Result<String, String> {
         let item = prev["item"]["uri"].as_str().map(|s| s.to_string());
-        let msg = if let Some(item) = item {
+        if let Some(item) = item {
             let pos = prev["progress_ms"].as_i64().unwrap_or(0);
             let body = match prev["context"]["uri"].as_str() {
                 Some(ctx) if ctx.starts_with("spotify:") && !ctx.contains(":collection") => json!({ "context_uri": ctx, "offset": { "uri": item }, "position_ms": pos }),
                 _ => json!({ "uris": [item], "position_ms": pos }),
             };
-            self.put_play(&dev, body)?;
+            self.put_play(dev, body)?;
             if prev["is_playing"].as_bool() != Some(true) { let _ = self.api("PUT", &format!("/me/player/pause?device_id={dev}"), None); }
-            "previous music restored".to_string()
+            Ok("previous music restored".into())
         } else {
             let _ = self.api("PUT", &format!("/me/player/pause?device_id={dev}"), None);
-            "nothing was playing before - paused".to_string()
-        };
-        self.fade(vol / 5, vol, fade_s / 2.0);
-        Ok(msg)
+            Ok("nothing was playing before - paused".into())
+        }
     }
 
     /// Local player for the sandbox sim. No network, and the token is never read.
