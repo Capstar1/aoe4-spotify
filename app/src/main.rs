@@ -394,12 +394,16 @@ fn cover(uri: String) -> Option<String> {
 /// Visible part of the (fixed, transparent, borderless) window: everything outside is clipped away and clicks pass through.
 #[tauri::command]
 fn region(window: tauri::WebviewWindow, x: f64, y: f64, w: f64, h: f64) {
-    #[link(name = "gdi32")] extern "system" { fn CreateRectRgn(a: i32, b: i32, c: i32, d: i32) -> isize; }
+    #[link(name = "gdi32")] extern "system" { fn CreateRoundRectRgn(a: i32, b: i32, c: i32, d: i32, w: i32, h: i32) -> isize; }
     #[link(name = "user32")] extern "system" { fn SetWindowRgn(h: isize, r: isize, redraw: i32) -> i32; }
     let hwnd = window.hwnd().map(|v| v.0 as isize).unwrap_or(0);
     let k = window.scale_factor().unwrap_or(1.0) * zoom();
     let r = |v: f64| (v * k).round() as i32;
-    unsafe { let rg = CreateRectRgn(r(x), r(y), r(x + w), r(y + h)); SetWindowRgn(hwnd, rg, 1); }
+    // Clip to #frame's 8px CSS radius (in device px) so nothing outside the rounded corners is ever shown: the
+    // transparent pixels there were left white/stale by WebView2 (the "notches"). GDI round-rect: right/bottom are
+    // exclusive and need +1; ellipse diameter = 2 * radius.
+    let d = (16.0 * k).round() as i32;
+    unsafe { let rg = CreateRoundRectRgn(r(x), r(y), r(x + w) + 1, r(y + h) + 1, d, d); SetWindowRgn(hwnd, rg, 1); }
 }
 
 #[tauri::command]
