@@ -18,7 +18,7 @@ struct Ed {
     song: Option<String>, busy: bool, glow_t0: Instant,
     pdel: Option<(String, Instant)>, imp: Option<Value>, ctx_idx: usize,
     toast_t: Option<Instant>, hint_t: Option<Instant>,
-    strips: Option<[Vec<Image>; 4]>,   // decoded on the first song preview (4 MB the idle panel never needs)
+    strips: [Vec<Image>; 4],   // decoded at start: a song click must light up instantly
 }
 thread_local! { static ED: RefCell<Option<Ed>> = const { RefCell::new(None) }; static TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) }; }
 
@@ -41,8 +41,9 @@ fn page_h(ui: &Panel) -> f32 { ui.get_intros_page_h() }
 
 pub fn init(ui: &Panel, eng: Arc<Engine>, shell: Arc<dyn Shell>) {
     assets::set_scale(ui.window().scale_factor());
-   ED.with(|e| *e.borrow_mut() = Some(Ed { eng, shell, ui: ui.as_weak(), h: History::default(), k: None, sc: 0.0, press: None, drag: false, drop: None,
-        song: None, busy: false, glow_t0: Instant::now(), pdel: None, imp: None, ctx_idx: 0, toast_t: None, hint_t: None, strips: None }));
+    let strips = [assets::strip("glow19"), assets::strip("glow14"), assets::strip("eq19"), assets::strip("eq14")];
+    ED.with(|e| *e.borrow_mut() = Some(Ed { eng, shell, ui: ui.as_weak(), h: History::default(), k: None, sc: 0.0, press: None, drag: false, drop: None,
+        song: None, busy: false, glow_t0: Instant::now(), pdel: None, imp: None, ctx_idx: 0, toast_t: None, hint_t: None, strips }));
     let g = ui.global::<IntroUi>();
     g.on_back(|| { let p = page(); if p == "age" { with(|e| e.k = None); set_page("intros"); } else { set_page("main"); } });
     g.on_open_age(|k| { with(|e| { e.k = Some(k.to_string()); e.sc = 0.0; }); set_page("age"); });
@@ -87,7 +88,7 @@ pub fn init(ui: &Panel, eng: Arc<Engine>, shell: Arc<dyn Shell>) {
         if e.song.is_none() || g.get_page() != "age" { return; }
         let el = e.glow_t0.elapsed().as_secs_f32(); let f = ((el / 0.033) as usize) % 54;
         let pick = |v: &Vec<Image>| v.get(f).cloned().unwrap_or_default();
-        let s = e.strips.get_or_insert_with(|| [assets::strip("glow19"), assets::strip("glow14"), assets::strip("eq19"), assets::strip("eq14")]); g.set_glow14(pick(&s[1])); g.set_eq19(pick(&s[2])); g.set_eq14(pick(&s[3]));
+        let s = &e.strips; g.set_glow19(pick(&s[0])); g.set_glow14(pick(&s[1])); g.set_eq19(pick(&s[2])); g.set_eq14(pick(&s[3]));
         g.set_glow_op((el / 0.33).min(1.0));
     }); });
     TIMER.with(|x| *x.borrow_mut() = Some(t));
@@ -202,7 +203,7 @@ fn preview(sg: Song, x: f32, y: f32) {
         e.busy = true; e.song = play.then(|| sg.key.clone()); if play && prev.as_deref() != Some(&sg.key) { e.glow_t0 = Instant::now(); }
         Some((e.eng.clone(), play, prev)) }).flatten();
     let Some((eng, play, prev)) = go else { return };
-    refresh();
+    show_playing();
     let uri = play.then(|| sg.uri.clone()); let key = sg.key.clone();
     std::thread::spawn(move || {
         let r = picker::preview(&eng, uri).unwrap_or_else(|_| "err".into());
@@ -210,10 +211,12 @@ fn preview(sg: Song, x: f32, y: f32) {
             with(|e| e.busy = false);
             if r == "login" { with(|e| e.song = prev); hint("Log in to Spotify in AoE4 Spotify to preview", x, y); }
             else if r != "ok" { with(|e| e.song = if play { if prev.as_deref() != Some(&key) { prev } else { None } } else { prev }); hint("Couldn't play - is Spotify (Premium) running?", x, y); }
-            refresh();
+            show_playing();
         });
     });
 }
+/// A song click only changes which chip glows: no full state rebuild on the click path.
+fn show_playing() { with(|e| if let Some(ui) = e.ui.upgrade() { ui.global::<IntroUi>().set_playing(e.song.clone().unwrap_or_default().into()); }); }
 
 /// Push the whole intros state to the UI (overview, preset menu, the open age page).
 pub fn refresh() {
@@ -276,6 +279,12 @@ pub fn tick(changed: bool) { if changed && page() != "main" && !with(|e| e.drag)
 
 /// AOE4S_PAGE test renders: intros | pmenu | name | import | age:<key>[:drag|:tip|:menu]
 pub fn test_state(spec: &str) {
+    test_state_page(spec);
+    // AOE4S_PLAY=<tray index>: that chip previews (glow + equalizer), for test renders
+    if let Some(i) = std::env::var("AOE4S_PLAY").ok().and_then(|v| v.parse::<usize>().ok()) { if let Some(ui) = ui_of() { if let Some(c) = slint::Model::row_data(&ui.global::<IntroUi>().get_tray(), i) {
+        with(|e| { e.song = Some(c.key.to_string()); e.glow_t0 = Instant::now() - std::time::Duration::from_millis(700); }); show_playing(); } } }
+}
+fn test_state_page(spec: &str) {
     let mut it = spec.split(':'); let p = it.next().unwrap_or("");
     match p {
         "intros" | "pmenu" | "name" | "import" => { set_page("intros"); let Some(ui) = ui_of() else { return }; let g = ui.global::<IntroUi>();

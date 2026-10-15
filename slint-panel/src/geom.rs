@@ -27,6 +27,7 @@ mod win {
         fn GetCursorPos(p: *mut Pt) -> i32; fn MonitorFromPoint(p: Pt, f: u32) -> isize; fn MonitorFromWindow(h: isize, f: u32) -> isize;
         fn GetMonitorInfoW(m: isize, i: *mut Mi) -> i32; fn GetWindowRect(h: isize, r: *mut Rect) -> i32;
         fn SetWindowPos(h: isize, after: isize, x: i32, y: i32, w: i32, h2: i32, f: u32) -> i32;
+        fn RedrawWindow(h: isize, r: *const Rect, rgn: isize, f: u32) -> i32;
     }
     #[link(name = "shcore")] extern "system" { fn GetDpiForMonitor(m: isize, t: u32, x: *mut u32, y: *mut u32) -> i32; }
     fn info(m: isize) -> Option<(Rect, f32)> {
@@ -47,7 +48,11 @@ mod win {
         Some((r, info(unsafe { MonitorFromWindow(h, 2) })?.0))   // MONITOR_DEFAULTTONEAREST
     }
     /// Move and size in one step (no frame at the old place with the new size).
-    pub fn place(h: isize, x: i32, y: i32, w: i32, hh: i32) { unsafe { SetWindowPos(h, 0, x, y, w, hh, 0x4 | 0x10) }; }   // NOZORDER | NOACTIVATE
+    /// NOCOPYBITS: Windows would otherwise blit the old page into the moved window top-left aligned (a visible jump);
+    /// then paint the new page at the new size right away (WM_PAINT now), before DWM shows a frame of the old one.
+    pub fn place(h: isize, x: i32, y: i32, w: i32, hh: i32) {
+        unsafe { SetWindowPos(h, 0, x, y, w, hh, 0x4 | 0x10 | 0x100); RedrawWindow(h, std::ptr::null(), 0, 0x1 | 0x100); }   // NOZORDER|NOACTIVATE|NOCOPYBITS; RDW_INVALIDATE|RDW_UPDATENOW
+    }
 }
 
 /// Before the panel's first show: centre it on the cursor's (or the primary) monitor at that monitor's DPI.

@@ -231,9 +231,15 @@ impl Spotify {
     }
 
     /// Age-page chip click (1.0.9 preview): play that one track now / pause it.
-    pub fn preview(&mut self, uri: &str) -> Result<(), String> { let dev = self.ensure_device()?; self.put_play(&dev, json!({ "uris": [uri] })) }
+    pub fn preview(&mut self, uri: &str) -> Result<(), String> { let dev = self.device_fast()?; self.put_play_or_retry(&dev, json!({ "uris": [uri] })) }
+    /// Last known device, without the /me/player/devices round trip (one request per click instead of two).
+    fn device_fast(&mut self) -> Result<String, String> { match self.device.clone() { Some(d) => Ok(d), None => self.ensure_device() } }
+    /// Play on a cached device; if Spotify refuses it (device gone / switched), look the device up again once.
+    fn put_play_or_retry(&mut self, dev: &str, body: Value) -> Result<(), String> {
+        match self.put_play(dev, body.clone()) { Ok(()) => Ok(()), Err(_) => { let d = self.ensure_device()?; self.put_play(&d, body) } }
+    }
     pub fn pause(&mut self) -> Result<(), String> {
-        let dev = self.ensure_device()?; let (c, _) = self.api("PUT", &format!("/me/player/pause?device_id={dev}"), None)?;
+        let dev = self.device_fast()?; let (c, _) = self.api("PUT", &format!("/me/player/pause?device_id={dev}"), None)?;
         if (200..300).contains(&c) { Ok(()) } else { Err(format!("pause failed ({c})")) }
     }
 
