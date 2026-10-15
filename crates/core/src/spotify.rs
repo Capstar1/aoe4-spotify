@@ -161,6 +161,7 @@ impl Spotify {
             if uris.is_empty() { return Err("Liked Songs is empty".into()); }
             return Ok(json!({ "uris": uris }));
         }
+        if let Some(l) = uri.strip_prefix("uris:") { return Ok(json!({ "uris": l.split(',').collect::<Vec<_>>() })); }   // app-only list
         if uri.starts_with("spotify:track:") { return Ok(json!({ "uris": [uri] })); }
         if uri.starts_with("spotify:") { return Ok(json!({ "context_uri": uri })); }
         Err(format!("{uri}: app-only lists come in M3"))
@@ -194,6 +195,19 @@ impl Spotify {
         r
     }
 
+    /// Player state now (After match: waits for the Win / Loss song to end).
+    pub fn player_state(&mut self) -> Value { self.state() }
+    /// After match picked something else: the pre-match music is not put back.
+    pub fn forget_saved(&mut self) { self.saved = None; self.saved_volume = None; }
+    /// After match Stop (1.0.9 fade_pause): fade out, pause, put your volume back while paused.
+    pub fn fade_pause(&mut self, fade_s: f32) -> Result<(), String> {
+        let dev = self.ensure_device()?;
+        let st = self.state(); let cur = st["device"]["volume_percent"].as_i64().unwrap_or(60);
+        let vol = self.saved_volume.take().unwrap_or(cur); self.saved = None;
+        if st["is_playing"].as_bool() == Some(true) { self.fade(cur, vol / 5, fade_s); }
+        let _ = self.api("PUT", &format!("/me/player/pause?device_id={dev}"), None);
+        self.set_volume(vol); Ok(())
+    }
     /// Match over: fade out, put back what was playing before (or pause), and your volume.
     pub fn restore(&mut self, fade_s: f32) -> Result<String, String> {
         let Some(prev) = self.saved.take() else { return Ok("nothing to restore".into()) };

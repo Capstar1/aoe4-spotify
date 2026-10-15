@@ -260,10 +260,22 @@ function drawPresetMenu(s) {
     presetSongs(p).slice(0, 3).forEach((x, j) => { const sg = by[x]; if (sg) songChip(sg, 48 + j * 16, yy + 21, 10); });
     text(100, yy + 21, p.name, 13, isCur ? C.acc : C.tx, true); const cnt = presetCounts(p);
     text(250, yy + 21, S.ages.map(([a], k) => cnt[a] && ((p.ages || {})[a] ?? a === s.agedata.default_age) ? ROMAN[k] : null).filter(Boolean).join(" "), 10, C.mu, true);
-    if (isCur) text(307, yy + 20.5, "\u2713", 14, C.acc, true, "center"); });
+    if (isCur) text(307, yy + 20.5, "\u2713", 14, C.acc, true, "center");
+    else if (!p.builtin) {   // delete: hover the row, click the x, click again to confirm (1.0.9 list delete: armed for 3 s)
+      const armed = ui.pdel === p.name, dx = hit(rr(armed ? 262 : 294, yy + 9, 318, yy + 33, 12, armed ? "#3d1a1a" : "transparent", armed ? "#e5484d" : null), (e) => { e.stopPropagation(); delPreset(p.name); });
+      const lab = armed ? text(290, yy + 21, "Delete", 10, "#e5484d", true, "center") : text(306, yy + 20.5, "\u2715", 11, C.mu, false, "center");
+      tipOn(dx, ["pdel", p.name], armed ? "Click again to delete" : "Delete preset", [armed ? 262 : 294, yy + 9, 318, yy + 33]);
+      if (!armed) { const show = (v) => { dx.style.opacity = lab.style.opacity = v ? "1" : "0"; }; show(false);
+        row.addEventListener("mouseenter", () => show(true)); row.addEventListener("mouseleave", (e) => { if (e.relatedTarget !== dx) show(false); });
+        dx.addEventListener("mouseenter", () => { show(true); dx.style.background = "#3a2222"; lab.style.color = "#e5484d"; });
+        dx.addEventListener("mouseleave", (e) => { dx.style.background = "transparent"; lab.style.color = C.mu; if (e.relatedTarget !== row) show(false); }); dx._hov = true; }
+    } });
   hline(32, yb + 1, 318, "#3e3e3e"); const nw = hit(rr(26, yb + 4, 324, yb + 32, 8, "transparent"), () => { ui.pmenu = false; nameDialog("New preset", "My preset", savePreset); });
   hov(nw, () => nw.style.background = "#2e2e2e", () => nw.style.background = "transparent"); text(48, yb + 18, "+", 16, C.acc, false, "center"); text(62, yb + 18, "New preset", 12, C.acc, true);
 }
+function delPreset(name) {
+  if (ui.pdel !== name) { ui.pdel = name; redraw(); clearTimeout(ui.pdelT); ui.pdelT = setTimeout(() => { if (ui.pdel === name) { ui.pdel = null; redraw(); } }, 3000); return; }
+  ui.pdel = null; const u = clone(S.ed); u.intro_presets = (u.intro_presets || []).filter((q) => !(q && q.name === name)); saveEd(u); }
 function switchPreset(name) { const u = clone(S.ed), p = userPresets(u).find((q) => q.name === name); ui.pmenu = false; if (!p) return redraw(); applyPreset(u, p); record(u); }
 function savePreset(name) { const u = clone(S.ed), ps = (u.intro_presets || []).filter((p) => p && typeof p === "object"); name = uniqueName(u, name);
   ps.push(presetFromUser(u, name)); u.intro_presets = ps; u.intro_preset = name; ED.cur = snap(u); saveEd(u); }

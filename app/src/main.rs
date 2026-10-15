@@ -16,9 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Default, serde::Serialize, Clone)]
-struct Status { game: String, log_path: String, watching: bool, in_match: bool, age: Option<String>, playing: Option<String>, log: Vec<String> }
+struct Status { result: Option<i32>, match_n: u64, game: String, log_path: String, watching: bool, in_match: bool, age: Option<String>, playing: Option<String>, log: Vec<String> }
 
-struct AppState { settings: Settings, ages: Vec<(String, String)>, status: Mutex<Status>, real: AtomicBool, replays: AtomicBool, busy: AtomicBool, spotify: Mutex<Spotify>, tx: Mutex<Sender<Action>>, dir: PathBuf, ed: Mutex<serde_json::Value> }
+struct AppState { pick: Mutex<serde_json::Value>, gtg: Mutex<serde_json::Value>, settings: Mutex<Settings>, ver: std::sync::atomic::AtomicU64, upd: Mutex<serde_json::Value>, ages: Vec<(String, String)>, status: Mutex<Status>, real: AtomicBool, replays: AtomicBool, busy: AtomicBool, spotify: Mutex<Spotify>, tx: Mutex<Sender<Action>>, dir: PathBuf, ed: Mutex<serde_json::Value> }
 
 const ED_KEYS: [&str; 6] = ["intro_pools", "intro_ages", "custom_songs", "intro_presets", "intro_preset", "intro_pack_open"];
 /// Age Intros edits made in 1.1 live in 1.1's own intros.json (seeded once from 1.0.9's settings), so the
@@ -151,11 +151,53 @@ fn save_prefs(app: &AppState) {
 /// Spotify worker: actions run one after another so fades never overlap and the log watcher never blocks.
 fn player(app: Arc<AppState>, rx: std::sync::mpsc::Receiver<Action>) {
     for a in rx {
+        if let Action::AfterMatch { mode, playlist, wl, win, loss, fade_s } = &a {
+            let r = after_match(&app, mode, playlist, *wl, win, loss, *fade_s);
+            push(&app.status, match r { Ok(m) => format!("After match: {m}"), Err(e) => format!("After match failed: {e}") }); continue;
+        }
         let r = { let mut sp = app.spotify.lock().unwrap(); match &a {
+            Action::AfterMatch { .. } => Ok(String::new()),
             Action::Play { age, uri, fade_s } => sp.play_age(uri, *fade_s).map(|_| format!("playing {uri} for {age}")),
-            Action::Restore => sp.restore(app.settings.fade_seconds),
+            Action::Restore => sp.restore(app.settings.lock().unwrap().fade_seconds),
+            Action::Stop => sp.fade_pause(app.settings.lock().unwrap().fade_seconds).map(|_| "stopped (faded out and paused)".to_string()),
         } };
         push(&app.status, match r { Ok(m) => format!("Spotify: {m}"), Err(e) => format!("Spotify error: {e}") });
+    }
+}
+
+/// 1.0.9 install_after_match: wait (max 6 s) for the result, play the Win / Loss pick to its end, then Resume / Playlist / Stop.
+fn after_match(app: &AppState, mode: &str, playlist: &str, wl: bool, win: &str, loss: &str, fade_s: f32) -> Result<String, String> {
+    let n = app.status.lock().unwrap().match_n; let same = || app.status.lock().unwrap().match_n == n;
+    let mut fade = fade_s;
+    if wl {
+        let t0 = std::time::Instant::now();
+        while app.status.lock().unwrap().result.is_none() && t0.elapsed() < Duration::from_secs(6) && same() { std::thread::sleep(Duration::from_millis(200)); }
+        if !same() { return Ok("a new match already started".into()); }
+        let r = app.status.lock().unwrap().result; let pick = match r { Some(1) => win, Some(0) => loss, _ => "" };
+        push(&app.status, format!("After match: {}", match r { Some(1) => "victory", Some(0) => "defeat", _ => "no final result" }));
+        if !pick.is_empty() {
+            push(&app.status, format!("After match: play {} first", pick.split(',').next().unwrap_or(pick)));
+            app.spotify.lock().unwrap().play_age(pick, fade)?;
+            // until that song / list item ends, you skip, or you pause (then: nothing more)
+            let t0 = std::time::Instant::now(); let mut first: Option<String> = None;
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                if !same() { return Ok("a new match started".into()); }
+                let st = app.spotify.lock().unwrap().player_state();
+                let item = st["item"]["uri"].as_str().map(String::from); let dur = st["item"]["duration_ms"].as_i64().unwrap_or(0); let pos = st["progress_ms"].as_i64().unwrap_or(0);
+                if first.is_none() { first = item.clone(); }
+                if st["is_playing"].as_bool() != Some(true) { if pos == 0 { break; } app.spotify.lock().unwrap().forget_saved(); return Ok("Spotify paused by you - doing nothing".into()); }
+                if item != first || (dur > 0 && pos >= dur - 1500) { if dur > 0 && pos >= dur - 1500 { std::thread::sleep(Duration::from_millis(1500)); } break; }
+                if t0.elapsed() > Duration::from_secs(15 * 60) { break; }
+            }
+            fade = fade.min(1.0);
+        }
+    }
+    let mut sp = app.spotify.lock().unwrap();
+    match mode {
+        "playlist" if !playlist.is_empty() => { sp.play_age(playlist, fade)?; sp.forget_saved(); Ok(format!("play {}", playlist.split(',').next().unwrap_or(""))) }
+        "resume" => sp.restore(fade),
+        _ => sp.fade_pause(fade).map(|_| "stop (fade out and pause)".into()),
     }
 }
 
@@ -165,6 +207,7 @@ fn now() -> String {
 }
 
 fn push(st: &Mutex<Status>, line: String) {
+    launcher::log(&line);
     let mut s = st.lock().unwrap(); s.log.push(format!("{} {}", now(), line));
     let n = s.log.len(); if n > 200 { s.log.drain(..n - 200); }
 }
@@ -173,8 +216,8 @@ fn watch(app: Arc<AppState>, path: PathBuf) {
     let la = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default();
     let crc = la.join(r"Documents\My Games\Age of Empires IV\LogFiles");
     let mut game = Aoe4::new(Aoe4::datacrc_resolver(crc));
-    let s = &app.settings;
-    let mut sw = Switcher::new(s.enabled, s.fade_seconds, s.playlists.clone());
+    let mut sw = { let s = app.settings.lock().unwrap(); let mut w = Switcher::new(s.enabled, s.fade_seconds, resolve(&s)); w.after = after_cfg(&s); w };
+    let mut seen = app.ver.load(Ordering::SeqCst);
     let mut tail = Tail::new(path.clone());
     // catch-up: read what is already there silently (learn who you are), act only on new lines
     let mut catching = true;
@@ -185,28 +228,35 @@ fn watch(app: Arc<AppState>, path: PathBuf) {
         };
         if restarted { game.reset_session(); push(&app.status, "Game log recreated (new game session)".into()); }
         app.status.lock().unwrap().watching = true;
+        let v = app.ver.load(Ordering::SeqCst);
+        if v != seen { seen = v; let s = app.settings.lock().unwrap(); sw.enabled = s.enabled; sw.fade_s = s.fade_seconds; sw.playlists = resolve(&s); sw.after = after_cfg(&s); }
         for l in lines {
             for ev in game.feed(&l) {
                 if catching { continue; }
                 push(&app.status, format!("event: {}", serde_json::to_string(&ev).unwrap_or_default()));
                 match &ev {
-                    GameEvent::MatchStart { .. } => app.status.lock().unwrap().in_match = true,
-                    GameEvent::MatchResult { result } => push(&app.status, (if *result == 1 { "Result: victory" } else { "Result: defeat" }).into()),
+                    GameEvent::MatchStart { .. } => { let mut s = app.status.lock().unwrap(); s.in_match = true; s.result = None; s.match_n += 1; }
+                    GameEvent::MatchResult { result } => { app.status.lock().unwrap().result = Some(*result); push(&app.status, (if *result == 1 { "Result: victory" } else { "Result: defeat" }).into()) }
                     GameEvent::MatchEnd { .. } | GameEvent::Replay => { let mut s = app.status.lock().unwrap(); s.in_match = false; s.age = None; }
                     GameEvent::Age { key, .. } => app.status.lock().unwrap().age = Some(key.clone()),
                     _ => {}
                 }
                 for a in sw.on_event(&ev) {
-                    match a {
+                    match a.clone() {
                         Action::Play { age, uri, fade_s } => {
                             app.status.lock().unwrap().playing = Some(uri.clone());
                             if app.real.load(Ordering::SeqCst) { let _ = app.tx.lock().unwrap().send(Action::Play { age, uri, fade_s }); }
                             else { push(&app.status, format!("would play {uri} for {age} (fade {fade_s}s) [dry run]")); }
                         }
-                        Action::Restore => {
+                        Action::AfterMatch { .. } => {
                             app.status.lock().unwrap().playing = None;
-                            if app.real.load(Ordering::SeqCst) { let _ = app.tx.lock().unwrap().send(Action::Restore); }
-                            else { push(&app.status, "would restore your previous music [dry run]".into()); }
+                            if app.real.load(Ordering::SeqCst) { let _ = app.tx.lock().unwrap().send(a.clone()); }
+                            else { push(&app.status, format!("would do after match {a:?} [dry run]")); }
+                        }
+                        Action::Restore | Action::Stop => {
+                            app.status.lock().unwrap().playing = None;
+                            if app.real.load(Ordering::SeqCst) { let _ = app.tx.lock().unwrap().send(a.clone()); }
+                            else { push(&app.status, format!("would {} [dry run]", if a == Action::Restore { "restore your previous music" } else { "stop the music" })); }
                         }
                     }
                 }
@@ -217,13 +267,61 @@ fn watch(app: Arc<AppState>, path: PathBuf) {
     }
 }
 
+
+fn read_user(dir: &std::path::Path) -> serde_json::Value { std::fs::read_to_string(dir.join("config.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).filter(|v: &serde_json::Value| v.is_object()).unwrap_or_else(|| serde_json::json!({})) }
+const LIST_PREFIX: &str = "aoe4s:list:";
+/// Age playlists with app-only lists (1.0.9 custom_lists) expanded to "uris:" + their tracks.
+fn resolve(s: &Settings) -> std::collections::HashMap<String, String> {
+    let u = read_user(&launcher::data_dir());
+    s.playlists.iter().map(|(k, v)| (k.clone(), expand(&u, v))).collect()
+}
+fn expand(u: &serde_json::Value, v: &str) -> String {
+    match v.strip_prefix(LIST_PREFIX) { Some(id) if id != "liked" => {
+        let t: Vec<String> = u["custom_lists"][id]["tracks"].as_array().cloned().unwrap_or_default().iter().filter_map(|t| t["uri"].as_str().map(String::from)).collect();
+        if t.is_empty() { String::new() } else { format!("uris:{}", t.join(",")) } }
+        _ => v.to_string() }
+}
+/// 1.0.9 after_match_cfg: mode resume|playlist|stop, Win / Loss switch, its picks.
+fn after_cfg(s: &Settings) -> aoe4core::switcher::AfterMatch {
+    let a = &s.after_match; let u = read_user(&launcher::data_dir());
+    let g = |k: &str| a[k].as_str().filter(|v| v.starts_with("spotify:playlist:") || v.starts_with("spotify:track:") || v.starts_with(LIST_PREFIX)).map(|v| expand(&u, v)).unwrap_or_default();
+    let old_wl = a["mode"] == "winloss";
+    let mode = match a["mode"].as_str() { Some(m @ ("resume" | "playlist" | "stop")) => m.to_string(), None => "resume".into(), _ => "stop".into() };
+    let pl = g("playlist"); let pl = if pl.starts_with("spotify:track:") { String::new() } else { pl };
+    aoe4core::switcher::AfterMatch { mode, wl: a["winloss_on"].as_bool().unwrap_or(old_wl), playlist: pl, win: g("win"), loss: g("loss") }
+}
+/// 1.0.9 set_user: one key of %APPDATA%\AoE4Spotify-1.1\config.json (null removes it), then live everywhere.
+fn set_user_(app: &AppState, k: &str, v: serde_json::Value) {
+    let mut u = read_user(&app.dir);
+    if v.is_null() { u.as_object_mut().map(|o| o.remove(k)); } else { u[k] = v; }
+    let _ = std::fs::create_dir_all(&app.dir);
+    let tmp = app.dir.join("config.json.tmp");
+    if std::fs::write(&tmp, serde_json::to_string_pretty(&u).unwrap_or_default()).is_ok() { let _ = std::fs::rename(&tmp, app.dir.join("config.json")); }
+    let mut s = app.settings.lock().unwrap(); let names = s.playlist_names.clone(); *s = settings::load_own(&app.dir);
+    for (k2, v2) in names { s.playlist_names.entry(k2).or_insert(v2); }
+    drop(s); app.ver.fetch_add(1, Ordering::SeqCst);
+}
+#[tauri::command]
+fn set_user(app: tauri::State<Arc<AppState>>, k: String, v: serde_json::Value) {
+    const OK: [&str; 6] = ["enabled", "fade_seconds", "playlists", "boss_intro_enabled", "after_match", "custom_lists"];
+    if OK.contains(&k.as_str()) { set_user_(&app, &k, v); }
+}
+/// Enabled switch (1.0.9): save, then mute / give back the game music in the background.
+#[tauri::command]
+fn set_enabled(app: tauri::State<Arc<AppState>>, on: bool) {
+    set_user_(&app, "enabled", serde_json::json!(on));
+    push(&app.status, if on { "Enabled".into() } else { "Disabled".into() });
+    std::thread::spawn(move || { launcher::music_sync(on); });
+}
+
 #[tauri::command]
 fn get_state(app: tauri::State<Arc<AppState>>) -> serde_json::Value {
     let st = app.status.lock().unwrap().clone();
     let logged_in = app.spotify.lock().map(|s| s.logged_in()).ok();
     let keys: Vec<String> = app.ages.iter().map(|(k, _)| k.clone()).collect();
-    let ed = app.ed.lock().unwrap().clone(); let es = with_ed(&app.settings, &ed);
-    serde_json::json!({ "settings": app.settings, "ages": app.ages, "status": st, "intros": aoe4core::intros::overview(&es, &keys), "agedata": aoe4core::intros::age_data(&es, &keys), "ed": ed,
+    let ed = app.ed.lock().unwrap().clone(); let set = app.settings.lock().unwrap().clone(); let es = with_ed(&set, &ed);
+    let user = read_user(&app.dir);
+    serde_json::json!({ "settings": set, "user": { "custom_lists": user["custom_lists"], "after_match": user["after_match"], "fade_seconds": user["fade_seconds"] }, "upd": app.upd.lock().unwrap().clone(), "ages": app.ages, "ages": app.ages, "status": st, "intros": aoe4core::intros::overview(&es, &keys), "agedata": aoe4core::intros::age_data(&es, &keys), "ed": ed,
         "spotify": { "logged_in": logged_in, "real": app.real.load(Ordering::SeqCst), "replays": app.replays.load(Ordering::SeqCst), "busy": app.busy.load(Ordering::SeqCst) } })
 }
 
@@ -333,8 +431,8 @@ async fn sp(app: tauri::State<'_, Arc<AppState>>, kind: String, arg: String) -> 
         let list = |v: &Value| -> Value { Value::Array(v.as_array().cloned().unwrap_or_default().iter().filter_map(|i| norm(if i["track"].is_object() { &i["track"] } else if i["item"].is_object() { &i["item"] } else { i })).collect()) };
         match kind.as_str() {
             "search" => { let v = ok(s.get(&format!("/search?type=track&limit=10&q={}", aoe4core::spotify::enc(&arg))))?; Ok(list(&v["tracks"]["items"])) }
-            "playlists" => { let v = ok(s.get("/me/playlists?limit=50"))?; let mut o = vec![json!({ "id": "liked", "name": "Liked Songs", "n": Value::Null })];
-                for p in v["items"].as_array().cloned().unwrap_or_default() { if let Some(id) = p["id"].as_str() { o.push(json!({ "id": id, "name": p["name"], "n": if p["tracks"]["total"].is_null() { p["items"]["total"].clone() } else { p["tracks"]["total"].clone() } })); } }
+            "playlists" => { let v = ok(s.get("/me/playlists?limit=50"))?; let ln = ok(s.get("/me/tracks?limit=1")).ok().map(|v| v["total"].clone()).unwrap_or(Value::Null); let mut o = vec![json!({ "id": "liked", "name": "Liked Songs", "n": ln })];
+                for p in v["items"].as_array().cloned().unwrap_or_default() { if let Some(id) = p["id"].as_str() { o.push(json!({ "id": id, "name": p["name"], "img": p["images"][0]["url"], "n": if p["tracks"]["total"].is_null() { p["items"]["total"].clone() } else { p["tracks"]["total"].clone() } })); } }
                 Ok(Value::Array(o)) }
             "plist" => { if arg == "liked" { let v = ok(s.get("/me/tracks?limit=50"))?; return Ok(list(&v["items"])); }
                 let id: String = arg.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
@@ -342,6 +440,8 @@ async fn sp(app: tauri::State<'_, Arc<AppState>>, kind: String, arg: String) -> 
             "tracks" => { let ids: Vec<String> = arg.split(',').map(|i| i.chars().filter(|c| c.is_ascii_alphanumeric()).collect()).filter(|i: &String| i.len() == 22).take(50).collect();
                 if let Ok(v) = ok(s.get(&format!("/tracks?ids={}", ids.join(",")))) { return Ok(list(&v["tracks"])); }
                 let mut o = vec![]; for i in ids { if let Ok(v) = ok(s.get(&format!("/tracks/{i}"))) { if let Some(t) = norm(&v) { o.push(t); } } } Ok(Value::Array(o)) }
+            "plmeta" => { let id: String = arg.chars().filter(|c| c.is_ascii_alphanumeric()).collect(); let v = ok(s.get(&format!("/playlists/{id}?fields=name,images")))?;
+                Ok(json!([{ "name": v["name"], "img": v["images"][0]["url"] }])) }
             "playing" => { let v = ok(s.get("/me/player/currently-playing"))?; Ok(Value::Array(norm(&v["item"]).into_iter().collect())) }
             _ => Err("unknown".into()),
         }
@@ -367,18 +467,81 @@ async fn open_add(app: tauri::AppHandle) {
     if let Ok(w) = b.build() { if z != 1.0 { let _ = w.set_zoom(z); } let _ = w.show(); let _ = w.set_focus(); }
 }
 
+
+/// 1.0.9 list_picker as its own window: target "age:<key>" | "am:playlist" | "am:win" | "am:loss".
+fn small_window(app: &tauri::AppHandle, label: &str, page: &str, w: f64, h: f64) {
+    use tauri::Manager;
+    if let Some(x) = app.get_webview_window(label) { let _ = x.close(); }
+    let main = app.get_webview_window("main"); let z = zoom();
+    let mut b = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(page.into())).title("AoE4 Spotify").inner_size(w * z, h * z)
+        .resizable(false).maximizable(false).minimizable(false).theme(Some(tauri::Theme::Dark)).background_color(tauri::window::Color(18, 18, 18, 255)).disable_drag_drop_handler().visible(false).center();
+    if let Some(m) = &main { if m.is_visible().unwrap_or(false) { b = b.parent(m).unwrap_or_else(|e| panic!("{e}")); } }
+    if let Ok(w) = b.build() { if z != 1.0 { let _ = w.set_zoom(z); } }
+}
 #[tauri::command]
-fn login(app: tauri::State<Arc<AppState>>) {
-    if app.busy.swap(true, Ordering::SeqCst) { return; }
+async fn open_pick(app: tauri::AppHandle, st: tauri::State<'_, Arc<AppState>>, target: String, title: String, tracks: bool, current: String) -> Result<(), String> {
+    *st.pick.lock().unwrap() = serde_json::json!({ "target": target, "title": title, "tracks": tracks, "current": current });
+    small_window(&app, "pick", "pick.html", 420.0, 640.0); Ok(())
+}
+#[tauri::command]
+fn pick_info(app: tauri::State<Arc<AppState>>) -> serde_json::Value { let mut v = app.pick.lock().unwrap().clone(); v["custom_lists"] = read_user(&app.dir)["custom_lists"].clone(); v }
+#[tauri::command]
+fn pick_done(app: tauri::State<Arc<AppState>>, uri: String, name: String, img: String) {
+    let p = app.pick.lock().unwrap().clone(); let t = p["target"].as_str().unwrap_or("").to_string();
+    let ok = uri.starts_with("spotify:playlist:") || uri.starts_with(LIST_PREFIX) || (p["tracks"] == true && uri.starts_with("spotify:track:"));
+    if !ok { return; }
+    let id = uri.rsplit(':').next().unwrap_or("").to_string();
+    if !name.is_empty() && !uri.starts_with(LIST_PREFIX) {           // name + cover for the panel rows (1.0.9 playlist_names.json / covers)
+        let np = app.dir.join("playlist_names.json"); let mut n = read_json(&np); n[&id] = serde_json::json!(name);
+        let _ = std::fs::write(&np, serde_json::to_string_pretty(&n).unwrap_or_default()); app.settings.lock().unwrap().playlist_names.insert(id.clone(), name);
+        if img.starts_with("https://") { let a = app.inner().clone(); let tr = uri.starts_with("spotify:track:"); std::thread::spawn(move || {
+            let dir = a.dir.join("covers"); let _ = std::fs::create_dir_all(&dir); let f = dir.join(if tr { format!("track_{id}.jpg") } else { format!("{id}_pick.jpg") });
+            if let Ok(b) = a.spotify.lock().unwrap().fetch(&img) { let _ = std::fs::write(f, b); } }); }
+    }
+    let u = read_user(&app.dir);
+    if let Some(k) = t.strip_prefix("age:") { let mut pl = u["playlists"].clone(); if !pl.is_object() { pl = serde_json::json!({}); } pl[k] = serde_json::json!(uri); set_user_(&app, "playlists", pl); }
+    else if let Some(w) = t.strip_prefix("am:") { let mut a = u["after_match"].clone(); if !a.is_object() { a = serde_json::json!({}); } a[w] = serde_json::json!(uri);
+        if w == "playlist" { a["mode"] = serde_json::json!("playlist"); } else { a["winloss_on"] = serde_json::json!(true); if a["mode"] == "winloss" { a["mode"] = serde_json::json!("stop"); } }
+        set_user_(&app, "after_match", a); }
+}
+fn read_json(p: &std::path::Path) -> serde_json::Value { std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok()).filter(|v: &serde_json::Value| v.is_object()).unwrap_or_else(|| serde_json::json!({})) }
+/// 1.0.9 setup_status for the "You're good to go" window.
+fn spotify_installed() -> bool {
+    let ad = std::env::var("APPDATA").unwrap_or_default(); let la = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    std::path::Path::new(&ad).join(r"Spotify\Spotify.exe").is_file() || std::path::Path::new(&la).join(r"Packages\SpotifyAB.SpotifyMusic_zpdnekdrzrea0").is_dir()
+        || std::process::Command::new("reg").args(["query", r"HKCU\Software\Classes\spotify"]).output().map(|o| o.status.success()).unwrap_or(false)
+}
+fn show_gtg(app: &tauri::AppHandle, a: &Arc<AppState>) {
+    let ok = a.spotify.lock().unwrap().logged_in();
+    let name = if ok { a.spotify.lock().unwrap().get("/me").ok().filter(|(c, _)| *c == 200).and_then(|(_, v)| v["display_name"].as_str().or(v["id"].as_str()).map(String::from)) } else { None };
+    *a.gtg.lock().unwrap() = serde_json::json!({ "ok": ok, "name": name, "steam": launcher::launch_option_is_set(), "spotify_app": spotify_installed() });
+    let h = app.clone(); let _ = app.run_on_main_thread(move || small_window(&h, "gtg", "gtg.html", 400.0, 470.0));
+}
+#[tauri::command]
+fn gtg_info(app: tauri::State<Arc<AppState>>) -> serde_json::Value { app.gtg.lock().unwrap().clone() }
+/// Fix: put the Steam launch option back (Steam closes and reopens), then re-check.
+#[tauri::command]
+async fn gtg_fix(app: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let a = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || { launcher::with_steam_closed(launcher::set_launch_option); let st = launcher::launch_option_is_set(); a.gtg.lock().unwrap()["steam"] = serde_json::json!(st); a.gtg.lock().unwrap().clone() }).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn login(h: tauri::AppHandle, app: tauri::State<Arc<AppState>>) { do_login(h, app.inner().clone()); }
+/// 1.0.9 login(): browser login, then the "You're good to go" window.
+fn do_login(h: tauri::AppHandle, a: Arc<AppState>) {
+    if a.busy.swap(true, Ordering::SeqCst) { return; }
     std::thread::spawn(move || {
         push(&a.status, "Spotify: opening login in your browser...".into());
         let cid = a.spotify.lock().unwrap().client_id();   // lock released before the browser wait
         let r = Spotify::login_code(&cid).and_then(|(c, v)| a.spotify.lock().unwrap().login_finish(&c, &v));
-        push(&a.status, match r { Ok(_) => "Spotify: logged in (1.1 has its own login)".into(), Err(e) => format!("Spotify login: {e}") });
+        push(&a.status, match r { Ok(_) => "Spotify: logged in".into(), Err(e) => format!("Spotify login: {e}") });
         a.busy.store(false, Ordering::SeqCst);
+        show_gtg(&h, &a);
     });
 }
+#[tauri::command]
+fn show_panel(app: tauri::AppHandle) { use tauri::Manager; if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.unminimize(); let _ = w.set_focus(); } }
 
 /// Cached 1.0.9 cover (playlist <id>_<snapshot>.jpg newest, or track_<id>.jpg) as a data URL; None if missing.
 #[tauri::command]
@@ -430,9 +593,10 @@ fn open_path(p: &str) {
 #[tauri::command]
 fn menu(app: tauri::State<Arc<AppState>>, kind: String) -> String {
     match kind.as_str() {
+        k if k.starts_with("pl:") => { let id: String = k[3..].chars().filter(|c| c.is_ascii_alphanumeric()).collect(); if id.len() == 22 { open_path(&format!("spotify:playlist:{id}")); } String::new() }
         "github" => { open_path("https://github.com/Capstar1/aoe4-spotify"); String::new() }
-        "log" => { let p = app.dir.join("aoe4_spotify_1.1.log"); let _ = std::fs::create_dir_all(&app.dir);
-                   let _ = std::fs::write(&p, app.status.lock().unwrap().log.join("\r\n")); open_path(&p.display().to_string()); String::new() }
+        "log" => { let p = app.dir.join("aoe4_spotify.log"); let _ = std::fs::create_dir_all(&app.dir);   // 1.0.9: the app's own log file
+                   if !p.exists() { let _ = std::fs::write(&p, ""); } open_path(&p.display().to_string()); String::new() }
         "replays" => { let v = !app.replays.load(Ordering::SeqCst); app.replays.store(v, Ordering::SeqCst); save_prefs(&app); String::new() }
         "uninstall" => {   // installed copy: hand over to "<exe> --uninstall" (asks, then removes everything) and close the panel
             let unins = launcher::install_dir().join("unins000.exe");
@@ -457,15 +621,84 @@ fn menu(app: tauri::State<Arc<AppState>>, kind: String) -> String {
     }
 }
 
-/// "Check for updates": latest GitHub release vs this version (same endpoint 1.0.9 uses).
+
+// ---- updates (1.0.9 updater.py): GitHub release Setup .exe, size + SHA-256 checked, silent in-place install
+fn ver_t(v: &str) -> Vec<u32> { let mut n: Vec<u32> = v.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).take(3).map(|x| x.parse().unwrap_or(0)).collect(); n.resize(3, 0); n }
+fn latest() -> Result<Option<serde_json::Value>, String> {
+    let api = launcher::test_env("AOE4S_UPDATE_API").unwrap_or_else(|| "https://api.github.com/repos/Capstar1/aoe4-spotify/releases/latest".into());
+    let v: serde_json::Value = ureq::get(&api).set("User-Agent", "aoe4-spotify").set("Accept", "application/vnd.github+json").timeout(Duration::from_secs(8)).call().map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())?;
+    let tag = v["tag_name"].as_str().unwrap_or("");
+    if ver_t(tag) <= ver_t(env!("CARGO_PKG_VERSION")) { return Ok(None); }
+    let Some(a) = v["assets"].as_array().and_then(|a| a.iter().find(|a| a["name"].as_str().unwrap_or("").to_lowercase().ends_with(".exe"))) else { return Ok(None) };
+    let dg = a["digest"].as_str().unwrap_or("");
+    Ok(Some(serde_json::json!({ "version": tag.trim_start_matches(['v', 'V']), "url": a["browser_download_url"], "size": a["size"], "sha256": dg.split("sha256:").nth(1).unwrap_or("") })))
+}
+fn download(info: &serde_json::Value, dest: &std::path::Path, mut progress: impl FnMut(f64)) -> Result<(), String> {
+    use sha2::Digest; use std::io::{Read, Write};
+    let part = dest.with_extension("part");
+    let r = (|| -> Result<(), String> {
+        let resp = ureq::get(info["url"].as_str().unwrap_or("")).set("User-Agent", "aoe4-spotify").timeout(Duration::from_secs(120)).call().map_err(|e| e.to_string())?;
+        let total = info["size"].as_u64().filter(|n| *n > 0).or_else(|| resp.header("Content-Length").and_then(|s| s.parse().ok())).unwrap_or(0);
+        let mut rd = resp.into_reader(); let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+        let mut h = sha2::Sha256::new(); let mut got = 0u64; let mut buf = vec![0u8; 65536];
+        loop { let n = rd.read(&mut buf).map_err(|e| e.to_string())?; if n == 0 { break; } f.write_all(&buf[..n]).map_err(|e| e.to_string())?; h.update(&buf[..n]); got += n as u64; if total > 0 { progress((got as f64 / total as f64).min(1.0)); } }
+        drop(f);
+        if let Some(sz) = info["size"].as_u64().filter(|n| *n > 0) { if got != sz { return Err(format!("size mismatch ({got} of {sz} bytes)")); } }
+        let want = info["sha256"].as_str().unwrap_or(""); let hx: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if !want.is_empty() && !hx.eq_ignore_ascii_case(want) { return Err("checksum mismatch".into()); }
+        std::fs::rename(&part, dest).map_err(|e| e.to_string())
+    })();
+    let _ = std::fs::remove_file(&part); r
+}
+fn run_setup(setup: &std::path::Path, relaunch: bool) {
+    let lg = format!("/LOG={}", launcher::data_dir().join("update_setup.log").display());
+    let mut a = vec!["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]; a.push(if relaunch { "/RELAUNCH=1" } else { "/FROMSWITCHER=1" });
+    let mut c = std::process::Command::new(setup); c.args(&a).arg(&lg);
+    for (k, _) in std::env::vars() { let l = k.to_lowercase(); if l.starts_with("steam") || l.starts_with("steam_") { c.env_remove(k); } }
+    if !relaunch { use std::os::windows::process::CommandExt; c.creation_flags(0x0800_0000); }
+    match c.spawn() { Ok(_) => launcher::log(&format!("Update: running {}", setup.display())), Err(e) => launcher::log(&format!("Update: could not start setup: {e}")) }
+}
+/// Update pill (panel): check at start; "↓ Update x" downloads with progress and installs (relaunches the panel).
 #[tauri::command]
-async fn check_update() -> String {
-    let r = ureq::get("https://api.github.com/repos/Capstar1/aoe4-spotify/releases/latest").set("User-Agent", "aoe4-spotify-1.1").timeout(Duration::from_secs(8)).call();
-    let Ok(r) = r else { return "Couldn't check".into() };
-    let v: serde_json::Value = r.into_json().unwrap_or_default();
-    let tag = v["tag_name"].as_str().unwrap_or("").trim_start_matches(['v', 'V']).to_string();
-    let num = |s: &str| s.split('.').map(|x| x.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
-    if !tag.is_empty() && num(&tag) > num(env!("CARGO_PKG_VERSION")) { format!("\u{2193} Update {tag}") } else { "Up to date".into() }
+async fn check_update(app: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
+    let a = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || match latest() {
+        Ok(Some(i)) => { let v = i["version"].as_str().unwrap_or("").to_string(); *a.upd.lock().unwrap() = serde_json::json!({ "phase": "avail", "info": i }); format!("\u{2193} Update {v}") }
+        Ok(None) => "Up to date".into(), Err(_) => "Couldn't check".into() }).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn start_update(app: tauri::State<Arc<AppState>>) {
+    let a = app.inner().clone(); let u = a.upd.lock().unwrap().clone();
+    if !matches!(u["phase"].as_str(), Some("avail" | "error")) || u["info"].is_null() { return; }
+    if launcher::aoe_running() { *a.upd.lock().unwrap() = serde_json::json!({ "phase": "error", "msg": "Close Age of Empires IV to update", "info": u["info"] }); return; }   // setup won't install mid-game
+    *a.upd.lock().unwrap() = serde_json::json!({ "phase": "dl", "pct": 0, "info": u["info"] });
+    std::thread::spawn(move || {
+        let info = u["info"].clone(); let dest = std::env::temp_dir().join(format!("AoE4 Spotify Setup {}.exe", info["version"].as_str().unwrap_or("")));
+        let a2 = a.clone();
+        match download(&info, &dest, |f| { a2.upd.lock().unwrap()["pct"] = serde_json::json!((f * 100.0) as i64); }) {
+            Ok(_) => { *a.upd.lock().unwrap() = serde_json::json!({ "phase": "run", "info": info }); run_setup(&dest, true); std::thread::sleep(Duration::from_millis(400)); std::process::exit(0); }
+            Err(e) => { launcher::log(&format!("Update failed: {e}")); *a.upd.lock().unwrap() = serde_json::json!({ "phase": "error", "msg": "Update failed \u{2013} retry", "info": info }); }
+        }
+    });
+}
+static PENDING_SETUP: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// Switcher (started with the game): newer release -> download in the background; install silently once no match
+/// is on and the game is closed (setup refuses while AoE4 runs). Same 6 h no-retry mark as 1.0.9.
+fn auto_update(app: Arc<AppState>) {
+    let Ok(Some(info)) = latest() else { return };
+    let v = info["version"].as_str().unwrap_or("").to_string(); let mark = app.dir.join("auto_update.json");
+    let last: serde_json::Value = std::fs::read_to_string(&mark).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    if last["v"] == serde_json::json!(v) && wall() - last["t"].as_f64().unwrap_or(0.0) < 6.0 * 3600.0 { launcher::log(&format!("Auto-update: {v} was already installed recently but this is still {} - not retrying for now", env!("CARGO_PKG_VERSION"))); return; }
+    launcher::log(&format!("Auto-update: {v} available - downloading in the background"));
+    let dest = std::env::temp_dir().join(format!("AoE4.Spotify.Setup-{v}.exe"));
+    if let Err(e) = download(&info, &dest, |_| {}) { launcher::log(&format!("Auto-update: download failed ({e}) - trying again next launch")); return; }
+    let _ = std::fs::write(&mark, serde_json::json!({ "v": v, "t": wall() }).to_string());
+    launcher::log(&format!("Auto-update: {v} ready - installing between matches, after the game closes"));
+    *PENDING_SETUP.lock().unwrap() = Some(dest);
+}
+fn install_pending(app: &AppState) {
+    if app.status.lock().unwrap().in_match { return; }     // never mid-match
+    if let Some(p) = PENDING_SETUP.lock().unwrap().take() { run_setup(&p, false); }
 }
 
 #[tauri::command]
@@ -486,6 +719,7 @@ fn main() {
     let settings = settings::load_own(&dir);
     // 1.0.9 start-up modes: Steam launch (%command%), --set/--remove-launch-option, panel (one instance)
     let mut hidden = false;
+    let login_first = std::env::args().nth(1).is_none();   // started by hand / installer Finish: log in first, then "You're good to go"
     match launcher::mode(settings.enabled) {
         launcher::Mode::Done => return,
         launcher::Mode::Migrate(inst, cleanup) => { std::process::exit(if migrate_109(&dir, inst, cleanup).is_ok() { 0 } else { 2 }); }
@@ -504,7 +738,7 @@ fn main() {
     let prefs: serde_json::Value = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     let spotify = Spotify::new(settings.client_id.clone(), dir.join("token.json"));
     let (tx, rx) = channel(); let replays0 = prefs["music_in_replays"].as_bool().unwrap_or(settings.music_in_replays);
-    let app = Arc::new(AppState { settings, ages, status: Mutex::new(status), real: AtomicBool::new(prefs["real_playback"].as_bool() != Some(false)),
+    let app = Arc::new(AppState { pick: Mutex::new(serde_json::Value::Null), gtg: Mutex::new(serde_json::Value::Null), settings: Mutex::new(settings), ver: Default::default(), upd: Mutex::new(serde_json::json!({ "phase": if std::env::args().any(|a| a == "--updated") { "done" } else { "idle" }, "msg": format!("Updated to {}", env!("CARGO_PKG_VERSION")) })), ages, status: Mutex::new(status), real: AtomicBool::new(prefs["real_playback"].as_bool() != Some(false)),
         replays: AtomicBool::new(replays0), busy: AtomicBool::new(false), spotify: Mutex::new(spotify), tx: Mutex::new(tx), ed: Mutex::new(load_ed(&dir)), dir });
     let a2 = app.clone(); std::thread::spawn(move || watch(a2, path));
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));
@@ -513,10 +747,17 @@ fn main() {
         .setup(move |a| { use tauri::Manager; if let Some(h) = a.get_webview_window("main").and_then(|w| w.hwnd().ok()) { shadow::init(h.0 as isize); } if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
             { let w = a.get_webview_window("main").unwrap();
               if hidden { let h = w.hwnd().map(|h| h.0 as isize).unwrap_or(0); let ah = a.handle().clone();
-                  std::thread::spawn(move || launcher::follow_game(move || if !win::visible(h) { ah.exit(0) })); }
-              else { let _ = w.show(); let _ = w.set_focus(); } }
+                  let a5 = a.state::<Arc<AppState>>().inner().clone(); let a6 = a5.clone();
+                  std::thread::spawn(move || auto_update(a6));
+                  std::thread::spawn(move || launcher::follow_game(move || { install_pending(&a5); if !win::visible(h) { ah.exit(0) } })); }
+              else { let a5 = a.state::<Arc<AppState>>().inner().clone(); std::thread::spawn(move || { if let Ok(Some(i)) = latest() { let mut u = a5.upd.lock().unwrap(); if u["phase"] == "idle" || u["phase"] == "done" { *u = serde_json::json!({ "phase": "avail", "info": i }); } } }); }
+              if login_first { let a7 = a.state::<Arc<AppState>>().inner().clone(); let h7 = a.handle().clone();
+                  if a7.spotify.lock().unwrap().logged_in() { std::thread::spawn(move || show_gtg(&h7, &a7)); } else { do_login(h7, a7); } }
+              else if !hidden { let _ = w.show(); let _ = w.set_focus(); } }
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, sp, cache_covers, open_add, dbg, menu, check_update])
+        .on_window_event(|w, e| { use tauri::Manager; if w.label() == "gtg" && matches!(e, tauri::WindowEvent::Destroyed) {
+            let h = w.app_handle().clone(); if let Some(m) = h.get_webview_window("main") { if !m.is_visible().unwrap_or(true) && std::env::args().nth(1).is_none() { h.exit(0); } } } })
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, sp, cache_covers, open_add, dbg, menu, check_update, show_panel, set_user, set_enabled, start_update, open_pick, pick_done, pick_info, gtg_info, gtg_fix])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
-}
+}

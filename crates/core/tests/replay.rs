@@ -110,3 +110,17 @@ fn real_log_replays_without_panic() {
     for l in text.lines() { for e in a.feed(l) { n += 1; let acts = s.on_event(&e); println!("  {:?} -> {:?}", e, acts); } }
     println!("real log: {} lines, {} events", text.lines().count(), n);
 }
+fn run_am(am: aoe4core::switcher::AfterMatch) -> Vec<Action> {
+    let mut a = adapter(); let mut s = Switcher::new(true, 2.0, lists()); s.after = am; let mut acts = vec![];
+    for l in MATCH { for e in a.feed(l) { acts.extend(s.on_event(&e)); } }
+    acts
+}
+#[test]
+fn after_match_stop_and_winloss() {
+    use aoe4core::switcher::AfterMatch;
+    assert_eq!(run_am(AfterMatch { mode: "stop".into(), ..Default::default() }).last(), Some(&Action::Stop));
+    let wl = run_am(AfterMatch { mode: "resume".into(), wl: true, win: "spotify:track:w".into(), ..Default::default() });
+    assert!(matches!(wl.last(), Some(Action::AfterMatch { wl: true, win, mode, .. }) if win == "spotify:track:w" && mode == "resume"));
+    let pl = run_am(AfterMatch { mode: "playlist".into(), playlist: "spotify:playlist:x".into(), ..Default::default() });
+    assert!(matches!(pl.last(), Some(Action::AfterMatch { mode, playlist, .. }) if mode == "playlist" && playlist == "spotify:playlist:x"));
+}
