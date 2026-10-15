@@ -6,6 +6,7 @@ pub mod data;
 pub mod run;
 pub mod updater;
 pub mod presets;
+pub mod editor;
 pub mod picker;
 pub mod guides;
 pub mod menu;
