@@ -6,6 +6,7 @@
 //! engine calls. `fire.rs` animates the 1.0.9 glow-pool fire on the age row that is playing.
 //! Test switches: AOE4S_SHOT=<png> (render once and quit), AOE4S_NOWATCH (no game-log watcher), `--fire <row>`.
 mod fire;
+mod startup;
 mod view;
 use aoe4engine::{guides::{Shell, Win}, menu, updater, Engine};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
@@ -24,10 +25,18 @@ impl Shell for UiShell {
     fn show(&self, w: Win) { let _ = slint::invoke_from_event_loop(move || windows::show(w)); }
     fn close(&self, w: Win) { let _ = slint::invoke_from_event_loop(move || windows::close(w)); }
 }
+thread_local! { static PANEL: RefCell<Option<slint::Weak<Panel>>> = const { RefCell::new(None) }; static PANEL_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 mod windows {
+    use super::{PANEL, PANEL_SHOWN};
     use aoe4engine::guides::Win;
-    /// Small windows: added in later steps; until then the request is logged.
-    pub fn show(w: Win) { aoe4engine::sys::log(&format!("window {w:?} requested")); }
+    use slint::ComponentHandle;
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn panel_visible() -> bool { PANEL_SHOWN.with(|v| v.get()) }
+    /// Show a window. Not yet ported windows fall back to the panel (never leave an invisible process).
+    pub fn show(w: Win) {
+        if w != Win::Panel { aoe4engine::sys::log(&format!("window {w:?} requested (not ported yet: showing the panel)")); }
+        PANEL.with(|p| if let Some(u) = p.borrow().as_ref().and_then(|w| w.upgrade()) { let _ = u.show(); PANEL_SHOWN.with(|v| v.set(true)); })
+    }
     pub fn close(_w: Win) {}
 }
 
@@ -43,10 +52,13 @@ fn main() -> Result<(), slint::PlatformError> {
         })
         .select()?;
     let dir = aoe4core::userstore::data_dir();
+    let test = std::env::var_os("AOE4S_SHOT").is_some();
+    let Some(st) = (if test { Some(startup::Start { hidden: false, login_first: false }) } else { startup::startup(&dir) }) else { return Ok(()) };
     let (eng, rx, log_path) = Engine::new(dir.clone());
-    if std::env::var_os("AOE4S_NOWATCH").is_none() && std::env::var_os("AOE4S_SHOT").is_none() { eng.start(rx, log_path); updater::check_at_start(eng.clone()); }
+    if std::env::var_os("AOE4S_NOWATCH").is_none() && !test { eng.start(rx, log_path); }
     let shell: Arc<dyn Shell> = Arc::new(UiShell);
     let ui = Panel::new()?;
+    PANEL.with(|p| *p.borrow_mut() = Some(ui.as_weak()));
     let pillm = Rc::new(RefCell::new(PillMsg::default()));
     let forced_fire: Option<i32> = { let a: Vec<String> = std::env::args().collect(); a.iter().position(|x| x == "--fire").map(|i| a.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(1)) };
 
@@ -121,7 +133,8 @@ fn main() -> Result<(), slint::PlatformError> {
         other => { menu::menu(&e, other); n(); }
     } });
     ui.on_open_intros(|| windows::show(Win::Panel));
-    ui.on_close_app({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { let _ = u.hide(); } let _ = slint::quit_event_loop(); } });
+    // close: a game-launched switcher keeps running hidden (its window just hides); a panel quits
+    ui.on_close_app({ let w = w.clone(); let hidden = st.hidden; move || { if let Some(u) = w.upgrade() { let _ = u.hide(); } PANEL_SHOWN.with(|v| v.set(false)); if !hidden { let _ = slint::quit_event_loop(); } } });
     ui.on_minimize({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { use slint::winit_030::WinitWindowAccessor; u.window().with_winit_window(|ww| ww.set_minimized(true)); } } });
     ui.on_drag({ let w = w.clone(); move || { if let Some(u) = w.upgrade() { use slint::winit_030::WinitWindowAccessor; u.window().with_winit_window(|ww| { let _ = ww.drag_window(); }); } } });
     ui.on_gear(|| {});
@@ -132,9 +145,22 @@ fn main() -> Result<(), slint::PlatformError> {
             pm.borrow_mut().msg = if r.starts_with('\u{2193}') { None } else { let err = r.starts_with("Couldn"); Some((r, err, Some(Instant::now()))) }; n(); } }); }
 
     if let Ok(p) = std::env::var("AOE4S_SHOT") { shot(&ui, p); }
-    ui.show()?;
-    #[cfg(windows)] round_corners(&ui);
-    slint::run_event_loop()?;
+    // ---- start-up (Tauri 1.1 setup): hidden switcher follows the game and auto-updates between matches;
+    // a panel checks for an update; started without arguments: log in first, then good to go
+    if st.hidden {
+        let e = eng.clone(); std::thread::spawn(move || updater::auto_update(e));
+        #[cfg(windows)] {
+            std::thread::spawn(|| aoe4winsys::signal::serve(|| { let _ = slint::invoke_from_event_loop(|| windows::show(Win::Panel)); }));
+            let e = eng.clone(); std::thread::spawn(move || aoe4winsys::launcher::follow_game(move || {
+                updater::install_pending(&e); let _ = slint::invoke_from_event_loop(|| { if !windows::panel_visible() { let _ = slint::quit_event_loop(); } }); }));
+        }
+    } else if !test { updater::check_at_start(eng.clone()); }
+    if st.login_first && !test {
+        let (e, sh) = (eng.clone(), shell.clone());
+        if e.spotify.lock().unwrap().logged_in() { std::thread::spawn(move || aoe4engine::guides::after_login(&sh, &e)); } else { aoe4engine::guides::do_login(sh, e); }
+    } else if !st.hidden { windows::show(Win::Panel); }
+    #[cfg(windows)] if !st.hidden { round_corners(&ui); }
+    slint::run_event_loop_until_quit()?;
     drop((poll, pr, fire_timer));
     Ok(())
 }

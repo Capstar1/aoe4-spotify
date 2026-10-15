@@ -3,3 +3,4 @@
 #![deny(warnings)]
 #[cfg(windows)] pub mod launcher;
 #[cfg(windows)] pub mod shadow;
+#[cfg(windows)] pub mod signal;
