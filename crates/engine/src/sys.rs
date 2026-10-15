@@ -15,7 +15,6 @@ pub fn music_sync(_on: bool) { #[cfg(windows)] { aoe4winsys::launcher::music_syn
 pub fn installed() -> bool { #[cfg(windows)] { aoe4winsys::launcher::installed() } #[cfg(not(windows))] { false } }
 /// Open a URL / file / spotify: URI (AOE4S_DRYOPEN=<file>: only note it there - tests).
 pub fn open_path(p: &str) {
-    if let Some(f) = std::env::var_os("AOE4S_DRYOPEN") { use std::io::Write; if let Ok(mut h) = std::fs::OpenOptions::new().create(true).append(true).open(f) { let _ = writeln!(h, "{p}"); } return; }
     let _ = aoe4core::os::open(p);
 }
 /// Message box (Windows), stderr elsewhere.
