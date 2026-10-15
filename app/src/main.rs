@@ -371,7 +371,8 @@ fn login(app: tauri::State<Arc<AppState>>) {
     let a = app.inner().clone();
     std::thread::spawn(move || {
         push(&a.status, "Spotify: opening login in your browser...".into());
-        let r = a.spotify.lock().unwrap().login();
+        let cid = a.spotify.lock().unwrap().client_id();   // lock released before the browser wait
+        let r = Spotify::login_code(&cid).and_then(|(c, v)| a.spotify.lock().unwrap().login_finish(&c, &v));
         push(&a.status, match r { Ok(_) => "Spotify: logged in (1.1 has its own login)".into(), Err(e) => format!("Spotify login: {e}") });
         a.busy.store(false, Ordering::SeqCst);
     });

@@ -70,6 +70,9 @@ function clickables(h) {
   for (const [e, b] of hits) { if (e._hov || e._hl || (e.style.cursor && e.style.cursor !== "pointer") || b.width * b.height > hr.width * hr.height * 0.4) continue;
     e._hl = true; e.addEventListener("mouseenter", () => e.classList.add("hl")); e.addEventListener("mouseleave", () => e.classList.remove("hl")); }
 }
+// 1.0.9 chev_right: open ">" of two 1.6px strokes, ~sz/2.4 tall, centred at (cx, cy)
+function chevR(cx, cy, col, sz) { const s = sz / 2.6; const e = el("div", "a", { left: (cx - s * 0.75) + "px", top: (cy - s / 2) + "px", width: s + "px", height: s + "px",
+  borderTop: "1.6px solid " + col, borderRight: "1.6px solid " + col, transform: "rotate(45deg)", pointerEvents: "none" }); return e; }
 function hit(e, fn) { e.classList.add("hit"); e.onclick = fn; return e; }
 
 function revert(rx, y, isDef, tag) {   // 1.0.9 undo button: outlined pill, greyed when already default
@@ -105,12 +108,12 @@ function drawMain(s) {
   text(M + 50, 96, set.enabled ? "Enabled" : "Disabled", 16, set.enabled ? C.tx : CORAL_TX, true); toggle(R_ - 12 - 52, 96 - 14, set.enabled, 52, 28);
   // Spotify / Game chips
   const cw = (W - 2 * M - 10) / 2; let x = M;
-  const sc = hit(rr(x, 130, x + cw, 162, 16, "#242424", "#3a3a3a"), () => invoke(sp.logged_in ? "logout" : "login"));
+  const sc = hit(rr(x, 130, x + cw, 162, 16, "#242424", "#3a3a3a"), () => invoke("login"));   // 1.0.9: click always (re)logs in
   sc.title = sp.logged_in ? "Log in again" : "Log in to Spotify";
   oval(x + 14, 141, x + 24, 151, sp.logged_in ? C.acc : (sp.busy ? C.idle : C.org)); text(x + 32, 146, "Spotify", 12, C.mu);
   if (sp.logged_in) { text(x + cw - 26, 146, "Connected", 12, C.acc, true, "e"); sprite("chevr12", x + cw - 22, 140, x + cw - 10, 152); }
   else if (sp.busy) text(x + cw - 14, 146, "...", 12, C.mu, true, "e");
-  else { const lp = rr(x + cw - 86, 136, x + cw - 8, 156, 10, "#4a3216", C.org); text(x + cw - 47, 146, "Log in", 11, C.org, true, "center"); sc._pill = lp; }
+  else { const lp = rr(x + cw - 86, 136, x + cw - 8, 156, 10, "#4a3216", C.org); text(x + cw - 52, 146, "Log in", 11, C.org, true, "center"); chevR(x + cw - 22, 146, C.org, 11); sc._pill = lp; }
   hov(sc, () => { sc.style.background = "#323232"; sc.style.borderColor = "#5a5a5a"; if (sc._pill) sc._pill.style.background = "#6e4a1c"; },
           () => { sc.style.background = "#242424"; sc.style.borderColor = "#3a3a3a"; if (sc._pill) sc._pill.style.background = "#4a3216"; });
   x = M + cw + 10; const gv = st.in_match, gc = gv ? C.acc : C.idle;

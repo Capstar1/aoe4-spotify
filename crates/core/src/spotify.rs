@@ -78,12 +78,16 @@ impl Spotify {
     }
 
     /// Browser login (PKCE). Blocks until Spotify redirects back or 3 minutes pass.
-    pub fn login(&mut self) -> Result<(), String> {
-        if self.cid.is_empty() { return Err("No Spotify client id in the 1.0.9 install config".into()); }
+    pub fn login(&mut self) -> Result<(), String> { let (c, v) = Self::login_code(&self.cid.clone())?; self.login_finish(&c, &v) }
+    pub fn client_id(&self) -> String { self.cid.clone() }
+    /// Browser part of the login: needs no &self, so callers can wait for it WITHOUT holding the Spotify lock
+    /// (holding it froze the panel for up to 3 minutes while the auth tab was open). Returns (code, verifier).
+    pub fn login_code(cid: &str) -> Result<(String, String), String> {
+        if cid.is_empty() { return Err("No Spotify client id in the 1.0.9 install config".into()); }
         let verifier = rand_str(48); let state = rand_str(12);
         let listener = TcpListener::bind("127.0.0.1:8888").map_err(|_| "Port 8888 is busy (is a 1.0.9 login window open?)".to_string())?;
         let url = format!("https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&code_challenge_method=S256&code_challenge={}&scope={}&state={}",
-            enc(&self.cid), enc(REDIRECT), challenge(&verifier), enc(SCOPES), state);
+            enc(cid), enc(REDIRECT), challenge(&verifier), enc(SCOPES), state);
         { use std::os::windows::process::CommandExt; std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).creation_flags(0x0800_0000).spawn() }.map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).ok();
         let deadline = Instant::now() + Duration::from_secs(180);
@@ -105,8 +109,11 @@ impl Spotify {
                 Err(_) => std::thread::sleep(Duration::from_millis(100)),
             }
         };
+        Ok((code, verifier))
+    }
+    pub fn login_finish(&mut self, code: &str, verifier: &str) -> Result<(), String> {
         let cid = self.cid.clone();
-        self.token_req(&[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", REDIRECT), ("client_id", &cid), ("code_verifier", &verifier)])
+        self.token_req(&[("grant_type", "authorization_code"), ("code", code), ("redirect_uri", REDIRECT), ("client_id", &cid), ("code_verifier", verifier)])
     }
 
     pub fn logout(&mut self) { self.tok = None; let _ = std::fs::remove_file(&self.path); }
