@@ -66,9 +66,14 @@ function begin(id, w, h) { host = $(id); if (!host._mo) { const hh = host; let q
 function clickables(h) {
   const kids = [...h.children], hits = kids.filter((e) => e.classList.contains("hit")).map((e) => [e, e.getBoundingClientRect()]), hr = h.getBoundingClientRect();
   for (const e of kids) { if (e.classList.contains("hit") || e._tip || e.title) continue; const r = e.getBoundingClientRect(); if (!r.width) continue;
-    if (hits.some(([, b]) => r.left >= b.left - 1 && r.right <= b.right + 1 && r.top >= b.top - 1 && r.bottom <= b.bottom + 1)) e.style.pointerEvents = "none"; }
+    const own = hits.filter(([, b]) => r.left >= b.left - 1 && r.right <= b.right + 1 && r.top >= b.top - 1 && r.bottom <= b.bottom + 1);
+    if (own.length) { e.style.pointerEvents = "none"; own.forEach(([he]) => (he._deco = he._deco || []).push(e)); } }
   for (const [e, b] of hits) { if (e._hov || e._hl || (e.style.cursor && e.style.cursor !== "pointer") || b.width * b.height > hr.width * hr.height * 0.4) continue;
-    e._hl = true; e.addEventListener("mouseenter", () => e.classList.add("hl")); e.addEventListener("mouseleave", () => e.classList.remove("hl")); }
+    // never cover the glyph: the hit's own fill gets a light tint only when it is an opaque plate (it sits beneath its
+    // content); icons/labels inside are brightened, whether drawn above or below a transparent hit overlay.
+    e._hl = true; const plate = getComputedStyle(e).backgroundColor !== "rgba(0, 0, 0, 0)";
+    const on = (v) => { if (plate) e.classList.toggle("hl", v); (e._deco || []).forEach((d) => d.classList.toggle("hld", v)); };
+    e.addEventListener("mouseenter", () => on(true)); e.addEventListener("mouseleave", () => on(false)); }
 }
 // 1.0.9 chev_right: open ">" of two 1.6px strokes, ~sz/2.4 tall, centred at (cx, cy)
 function chevR(cx, cy, col, sz) { const s = sz / 2.6; const e = el("div", "a", { left: (cx - s * 0.75) + "px", top: (cy - s / 2) + "px", width: s + "px", height: s + "px",
@@ -110,10 +115,10 @@ function drawMain(s) {
   const cw = (W - 2 * M - 10) / 2; let x = M;
   const sc = hit(rr(x, 130, x + cw, 162, 16, "#242424", "#3a3a3a"), () => invoke("login"));   // 1.0.9: click always (re)logs in
   sc.title = sp.logged_in ? "Log in again" : "Log in to Spotify";
-  oval(x + 14, 141, x + 24, 151, sp.logged_in ? C.acc : (sp.busy ? C.idle : C.org)); text(x + 32, 146, "Spotify", 12, C.mu);
+  oval(x + 14, 141, x + 24, 151, sp.logged_in ? C.acc : (sp.busy ? C.idle : C.org)); text(x + 32, 145, "Spotify", 12, C.mu);   // 145: caps optically on the row centre (approved)
   if (sp.logged_in) { text(x + cw - 26, 146, "Connected", 12, C.acc, true, "e"); sprite("chevr12", x + cw - 22, 140, x + cw - 10, 152); }
   else if (sp.busy) text(x + cw - 14, 146, "...", 12, C.mu, true, "e");
-  else { const lp = rr(x + cw - 86, 136, x + cw - 8, 156, 10, "#4a3216", C.org); text(x + cw - 52, 146, "Log in", 11, C.org, true, "center"); chevR(x + cw - 22, 146, C.org, 11); sc._pill = lp; }
+  else { const lp = rr(x + cw - 86, 136, x + cw - 8, 156, 10, "#4a3216", C.org); text(x + cw - 52, 145, "Log in", 11, C.org, true, "center"); chevR(x + cw - 22, 146, C.org, 18.6); sc._pill = lp; }   // chevron ~9px tall like 1.0.9
   hov(sc, () => { sc.style.background = "#323232"; sc.style.borderColor = "#5a5a5a"; if (sc._pill) sc._pill.style.background = "#6e4a1c"; },
           () => { sc.style.background = "#242424"; sc.style.borderColor = "#3a3a3a"; if (sc._pill) sc._pill.style.background = "#4a3216"; });
   x = M + cw + 10; const gv = st.in_match, gc = gv ? C.acc : C.idle;
@@ -196,8 +201,11 @@ const IW = 520, OV_TOP = 124, OV_STEP = 106, OV_CARD = 96, OV_FOOT = 48, HY = 40
 function introsH(n, mainh) { return Math.max(OV_TOP + n * OV_STEP - (OV_STEP - OV_CARD) + OV_FOOT, mainh); }
 function drawIntros(s) {
   const n = s.ages.length, H = introsH(n, mainH(n)); begin("intros", IW, H);
-  const bk = hit(oval(18, 24, 50, 56, C.card), () => go("main")); sprite("back", 18, 24, 50, 56).style.pointerEvents = "none";
-  hov(bk, () => { bk.style.background = "#2a2a2a"; bk.nextSibling.style.opacity = 0; }, () => { bk.style.background = C.card; bk.nextSibling.style.opacity = 1; });
+  // 1.0.9: the back chevron stays and only its disc goes #1f1f1f -> #2a2a2a on hover. The sprite has the disc baked in
+  // (opaque), so swap to the hover render (back_h) instead of hiding the sprite (which made the arrow vanish).
+  const bk = hit(oval(18, 24, 50, 56, C.card), () => go("main")); const bs = sprite("back", 18, 24, 50, 56); bs.style.pointerEvents = "none";
+  const bsrc = (n) => { bs.srcset = `img/${n}@1.png 1x, img/${n}@1.5.png 1.5x`; bs.src = `img/${n}@1.png`; };
+  hov(bk, () => { bk.style.background = "#2a2a2a"; bsrc("back_h"); }, () => { bk.style.background = C.card; bsrc("back"); });
   sprite("icrown", 64, 28, 92, 52, S && S.settings.enabled && S.settings.boss_on ? G0 : GREY_ACC); text(102, HY, "Age Intros", 18, C.tx, true);
   // preset bar (intros.py draw_bar): current preset, menu, share, import
   const y = 84, u = s.ed || {}, menuOpen = ui.pmenu, pb = hit(rr(20, y - 18, IW - 140, y + 18, 18, menuOpen ? "#2a2a2a" : C.card, menuOpen ? C.acc : "#3e3e3e"), () => { ui.pmenu = !ui.pmenu; redraw(); });
