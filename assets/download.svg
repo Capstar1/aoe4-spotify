@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="170" height="38" viewBox="0 0 170 38">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22C55E"/><stop offset="1" stop-color="#1DB954"/></linearGradient></defs>
+  <rect width="170" height="38" rx="19" fill="url(#g)"/>
+  <g fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M43 11v12M37.5 18l5.5 5.5 5.5-5.5M35 28h16"/>
+  </g>
+  <text x="60" y="24.5" font-family="'Segoe UI',-apple-system,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#fff">Download</text>
+</svg>
