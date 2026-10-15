@@ -8,3 +8,4 @@ pub mod switcher;
 pub mod intros;
 pub mod aftermatch;
 pub mod os;
+pub mod userstore;

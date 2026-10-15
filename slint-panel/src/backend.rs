@@ -1,11 +1,11 @@
-//! Read-only view of the 1.1 data for the prototype panel (never writes: settings changes stay in memory).
+//! The 1.1 data as the panel shows it; writes go through aoe4core::userstore (same files and keys as Tauri 1.1).
 use aoe4core::aoe4::Aoe4;
 use aoe4core::game::GameAdapter;
 use aoe4core::settings::{self, Settings};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-pub fn data_dir() -> PathBuf { PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify-1.1") }
+pub use aoe4core::userstore::data_dir;
 
 pub struct Data { pub set: Settings, pub ages: Vec<(String, String)>, pub user: Value, pub ed: Value, pub logged_in: bool, pub dir: PathBuf }
 
@@ -49,4 +49,22 @@ impl Data {
         let mode = match a["mode"].as_str() { Some(m @ ("resume" | "playlist" | "stop")) => m.to_string(), None => "resume".into(), _ => "stop".into() };
         (mode, a["winloss_on"].as_bool().unwrap_or(a["mode"] == "winloss"), g("playlist"), g("win"), g("loss"))
     }
+    /// 1.1 playlist revert: your playlists without age i and without entries equal to the default.
+    pub fn playlists_without(&self, i: usize) -> Option<Value> {
+        let k = &self.ages.get(i)?.0; let s = &self.set;
+        Some(Value::Object(s.playlists.iter().filter(|(a, v)| *a != k && v.as_str() != s.default_playlists.get(*a).map(|x| x.as_str()).unwrap_or(""))
+            .map(|(a, v)| (a.clone(), Value::String(v.clone()))).collect()))
+    }
+    /// 1.1 amSet: copy of after_match (object or {}), changed by f.
+    pub fn after_with(&self, f: impl FnOnce(&mut Value)) -> Value {
+        let mut a = if self.set.after_match.is_object() { self.set.after_match.clone() } else { serde_json::json!({}) }; f(&mut a); a
+    }
+}
+
+/// Enabled switch side effect (1.0.9): mute / give back the game music. Windows-only (game registry / config);
+/// lives in the launcher crate on BTR, a no-op elsewhere.
+pub fn music_sync(_on: bool) {}
+/// Login: the browser PKCE flow from aoe4core (runs off the UI thread).
+pub fn login() {
+    std::thread::spawn(|| { let d = load(); let mut sp = aoe4core::spotify::Spotify::new(d.set.client_id.clone(), d.dir.join("token.json")); let _ = sp.login(); });
 }

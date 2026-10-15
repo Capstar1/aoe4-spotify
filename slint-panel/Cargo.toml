@@ -6,6 +6,7 @@ description = "Slint prototype of the AoE4 Spotify main panel (no WebView2)"
 
 [dependencies]
 aoe4core = { path = "../crates/core" }
+png = "0.17"
 serde_json = "1"
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "software-renderer-systemfonts", "unstable-winit-030"] }
 
