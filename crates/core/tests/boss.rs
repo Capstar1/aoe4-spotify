@@ -145,3 +145,14 @@ fn missed_handover_natural_end_releases() {
     assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 0, 10_000, false))), IntroPoll::Hold);
     assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000 - INTRO_LEAD_MS, 10_000, false))), IntroPoll::Hold);
 }
+
+#[test]
+fn resume_then_missed_handover_releases() {
+    let mut lat = Latch::playing("spotify:track:intro");
+    assert!(lat.seen);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 5_000, 10_000, false))), IntroPoll::Stay { paused: true });
+    assert!(lat.user_paused);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 6_000, 10_000, true))), IntroPoll::Stay { paused: false });
+    assert!(!lat.user_paused);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 0, 10_000, false))), IntroPoll::Release);
+}

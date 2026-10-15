@@ -18,8 +18,8 @@ pub struct Latch {
     /// False until Spotify reports this uri. Used right after an intro starts, while the player
     /// may still be showing the previous track.
     pub seen: bool,
-    /// Intro only: a pause at a position past 0 was already seen. A later stop at position 0
-    /// then holds for resume. The finish-song gate does not read this.
+    /// Intro only: a pause at a position past 0 is in effect. A later stop at position 0
+    /// then holds for resume. Cleared when this intro is reported playing. The finish-song gate does not read this.
     pub user_paused: bool,
 }
 

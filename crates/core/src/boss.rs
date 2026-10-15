@@ -129,8 +129,8 @@ pub enum IntroPoll {
 
 /// Pause does not release. A skip does, once this intro has been seen. The handoff is `INTRO_LEAD_MS`
 /// before the track's duration. Once the intro has been seen, a stop at position 0 (repeat off, the
-/// track ended) or inside that handoff releases, unless a pause at a position past 0 was already
-/// seen for this intro: that one holds until playback resumes (1.0.9 `progress_ms == 0` break).
+/// track ended) or inside that handoff releases, unless a pause at a position past 0 is still in
+/// effect: that one holds until playback resumes. Playing this intro clears it (1.0.9 `progress_ms == 0` break).
 pub fn intro_poll(latch: &mut Latch, now: Option<&Heard>) -> IntroPoll {
     let Some(now) = now else { return IntroPoll::Stay { paused: false }; };
     if now.uri != latch.uri {
@@ -140,12 +140,13 @@ pub fn intro_poll(latch: &mut Latch, now: Option<&Heard>) -> IntroPoll {
     let ending = now.dur_ms > 0 && now.pos_ms >= now.dur_ms - INTRO_LEAD_MS;
     if !now.playing {
         // Position 0 is Spotify after a track ends with repeat off. The handoff window is the
-        // same end. Either one releases, unless this intro was already paused past 0.
+        // same end. Either one releases, unless a pause past 0 is still in effect.
         if (now.pos_ms == 0 || ending) && !latch.user_paused { return IntroPoll::Release; }
         if now.pos_ms > 0 { latch.user_paused = true; }
         if now.pos_ms == 0 || ending { return IntroPoll::Hold; }
         return IntroPoll::Stay { paused: true };
     }
+    latch.user_paused = false;
     if ending { IntroPoll::Release } else { IntroPoll::Stay { paused: false } }
 }
 
