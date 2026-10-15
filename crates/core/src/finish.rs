@@ -18,11 +18,14 @@ pub struct Latch {
     /// False until Spotify reports this uri. Used right after an intro starts, while the player
     /// may still be showing the previous track.
     pub seen: bool,
+    /// Intro only: a pause at a position past 0 was already seen. A later stop at position 0
+    /// then holds for resume. The finish-song gate does not read this.
+    pub user_paused: bool,
 }
 
 impl Latch {
-    pub fn playing(uri: impl Into<String>) -> Self { Self { uri: uri.into(), seen: true } }
-    pub fn expect(uri: impl Into<String>) -> Self { Self { uri: uri.into(), seen: false } }
+    pub fn playing(uri: impl Into<String>) -> Self { Self { uri: uri.into(), seen: true, user_paused: false } }
+    pub fn expect(uri: impl Into<String>) -> Self { Self { uri: uri.into(), seen: false, user_paused: false } }
 }
 
 /// The track already playing has 60 seconds or less left.

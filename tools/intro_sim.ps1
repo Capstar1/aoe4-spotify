@@ -42,7 +42,6 @@ Write-Utf8 (Join-Path $app 'config.json') $cfg
 $env:APPDATA = $sand
 $env:LOCALAPPDATA = Join-Path $sand 'Local'
 $env:AOE4S_TEST = '1'
-$env:AOE4S_FAKESP = '1'
 $env:AOE4S_GAME_PROC = 'aoe4s_intro_dummy.exe'
 $env:AOE4S_LOGFILES = $logs
 $env:AOE4S_MUTEX_SUFFIX = '_intro'
@@ -55,92 +54,110 @@ $dummyExe = Join-Path $sand 'aoe4s_intro_dummy.exe'
 Copy-Item "$env:SystemRoot\System32\ping.exe" $dummyExe -Force
 Add-Type -Path "$env:TEMP\hd.cs"
 
-$dummy = 0
-$sw = 0
-$fail = ''
-try {
-    $dummy = [HD]::Start($dummyExe, '-n 180 127.0.0.1')
-    if ($dummy -le 0) { $fail = 'dummy did not start'; throw $fail }
-    Start-Sleep -Milliseconds 400
-    $sw = [HD]::Start($exe, '--attach')
-    if ($sw -le 0) { $fail = 'switcher did not start'; throw $fail }
-
-    $appLog = Join-Path $app 'aoe4_spotify.log'
-    $fake = Join-Path $app 'fake_spotify.log'
-    $deadline = (Get-Date).AddSeconds(20)
-    $watching = $false
-    while ((Get-Date) -lt $deadline) {
-        if (-not (Get-Process -Id $sw -ErrorAction SilentlyContinue)) { $fail = 'switcher exited before Watching'; throw $fail }
-        if (Test-Path $appLog) {
-            try { $t = [System.IO.File]::ReadAllText($appLog) } catch { $t = '' }
-            if ($t.Contains('Watching') -and $t.Contains($warn)) { $watching = $true; break }
+function Wait-Plays([string]$path, [int]$n, [int]$sec, [int]$procId) {
+    $until = (Get-Date).AddSeconds($sec)
+    while ((Get-Date) -lt $until) {
+        if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { return 'dead' }
+        if (Test-Path $path) {
+            try { $lines = [System.IO.File]::ReadAllLines($path) } catch { $lines = @() }
+            $plays = @($lines | Where-Object { $_ -like 'play *' })
+            if ($plays.Count -ge $n) { return 'ok' }
         }
         Start-Sleep -Milliseconds 200
     }
-    if (-not $watching) { $fail = 'timed out waiting for Watching'; throw $fail }
+    return 'timeout'
+}
 
-    $open = @(
-        'GAME -- Current Steam name is [Capstar]',
-        '[Match Flow] GameApp::RequestGameBegin()',
-        'GAME -- Human Player: 0 Capstar 111 0 japanese',
-        'GAME -- Starting mission'
-    ) -join "`r`n"
-    [System.IO.File]::AppendAllText($warn, $open + "`r`n", $utf8)
+function Run-One([string]$mode) {
+    $env:AOE4S_FAKESP = $mode
+    $appLog = Join-Path $app 'aoe4_spotify.log'
+    $fake = Join-Path $app 'fake_spotify.log'
+    Write-Utf8 $warn ''
+    foreach ($p in @($appLog, $fake, (Join-Path $app 'intro_last.json'))) { if (Test-Path $p) { Remove-Item $p -Force } }
+    $dummy = 0
+    $sw = 0
+    $fail = ''
+    try {
+        $dummy = [HD]::Start($dummyExe, '-n 180 127.0.0.1')
+        if ($dummy -le 0) { $fail = 'dummy did not start'; throw $fail }
+        Start-Sleep -Milliseconds 400
+        $sw = [HD]::Start($exe, '--attach')
+        if ($sw -le 0) { $fail = 'switcher did not start'; throw $fail }
 
-    function Wait-Plays([string]$path, [int]$n, [int]$sec, [int]$procId) {
-        $until = (Get-Date).AddSeconds($sec)
-        while ((Get-Date) -lt $until) {
-            if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { return 'dead' }
-            if (Test-Path $path) {
-                try { $lines = [System.IO.File]::ReadAllLines($path) } catch { $lines = @() }
-                $plays = @($lines | Where-Object { $_ -like 'play *' })
-                if ($plays.Count -ge $n) { return 'ok' }
+        $deadline = (Get-Date).AddSeconds(20)
+        $watching = $false
+        while ((Get-Date) -lt $deadline) {
+            if (-not (Get-Process -Id $sw -ErrorAction SilentlyContinue)) { $fail = 'switcher exited before Watching'; throw $fail }
+            if (Test-Path $appLog) {
+                try { $t = [System.IO.File]::ReadAllText($appLog) } catch { $t = '' }
+                if ($t.Contains('Watching') -and $t.Contains($warn)) { $watching = $true; break }
             }
             Start-Sleep -Milliseconds 200
         }
-        return 'timeout'
-    }
+        if (-not $watching) { $fail = 'timed out waiting for Watching'; throw $fail }
 
-    $dark = Wait-Plays $fake 2 25 $sw
-    if ($dark -ne 'ok') { $fail = "dark intro then playlist: $dark"; throw $fail }
-    [System.IO.File]::AppendAllText($warn, "Age up started from dark_age to feudal_age for player id 6`r`n", $utf8)
-    $feu = Wait-Plays $fake 4 20 $sw
-    if ($feu -ne 'ok') { $fail = "feudal intro then playlist: $feu"; throw $fail }
+        $open = @(
+            'GAME -- Current Steam name is [Capstar]',
+            '[Match Flow] GameApp::RequestGameBegin()',
+            'GAME -- Human Player: 0 Capstar 111 0 japanese',
+            'GAME -- Starting mission'
+        ) -join "`r`n"
+        [System.IO.File]::AppendAllText($warn, $open + "`r`n", $utf8)
 
-    $got = @([System.IO.File]::ReadAllLines($fake) | Where-Object { $_.Trim() -ne '' })
-    $want = @(
-        'repeat off',
-        'play spotify:track:jpdark',
-        'repeat context',
-        'play spotify:playlist:dark',
-        'repeat off',
-        'play spotify:track:jpfeud',
-        'repeat context',
-        'play spotify:playlist:feudal'
-    )
-    if (($got -join "`n") -ne ($want -join "`n")) {
-        $fail = "spotify order mismatch`nGOT:`n$($got -join "`n")`nWANT:`n$($want -join "`n")"
-        throw $fail
+        $darkWait = if ($mode -eq 'slow') { 40 } else { 25 }
+        $feuWait = if ($mode -eq 'slow') { 30 } else { 20 }
+        $dark = Wait-Plays $fake 2 $darkWait $sw
+        if ($dark -ne 'ok') { $fail = "dark intro then playlist: $dark"; throw $fail }
+        [System.IO.File]::AppendAllText($warn, "Age up started from dark_age to feudal_age for player id 6`r`n", $utf8)
+        $feu = Wait-Plays $fake 4 $feuWait $sw
+        if ($feu -ne 'ok') { $fail = "feudal intro then playlist: $feu"; throw $fail }
+
+        $got = @([System.IO.File]::ReadAllLines($fake) | Where-Object { $_.Trim() -ne '' })
+        $want = @(
+            'repeat off',
+            'play spotify:track:jpdark',
+            'repeat context',
+            'play spotify:playlist:dark',
+            'repeat off',
+            'play spotify:track:jpfeud',
+            'repeat context',
+            'play spotify:playlist:feudal'
+        )
+        if (($got -join "`n") -ne ($want -join "`n")) {
+            $fail = "spotify order mismatch`nGOT:`n$($got -join "`n")`nWANT:`n$($want -join "`n")"
+            throw $fail
+        }
+        Write-Output "PASS FAKESP=$mode intro -> playlist -> intro -> playlist"
+        Write-Output ($got -join "`n")
+        $script:oneOk = $true
+        return
     }
-    Write-Output 'PASS intro -> playlist -> intro -> playlist'
-    Write-Output ($got -join "`n")
-}
-catch {
-    if (-not $fail) { $fail = $_.Exception.Message }
-    Write-Output "FAIL $fail"
-    $appLog = Join-Path $app 'aoe4_spotify.log'
-    $fake = Join-Path $app 'fake_spotify.log'
-    if (Test-Path $fake) { Write-Output '--- fake_spotify.log ---'; Write-Output ([System.IO.File]::ReadAllText($fake)) }
-    if (Test-Path $appLog) {
-        $tail = @(Get-Content $appLog -Tail 40 -ErrorAction SilentlyContinue)
-        Write-Output '--- aoe4_spotify.log ---'
-        Write-Output ($tail -join "`n")
+    catch {
+        if (-not $fail) { $fail = $_.Exception.Message }
+        Write-Output "FAIL FAKESP=$mode $fail"
+        if (Test-Path $fake) { Write-Output '--- fake_spotify.log ---'; Write-Output ([System.IO.File]::ReadAllText($fake)) }
+        if (Test-Path $appLog) {
+            $tail = @(Get-Content $appLog -Tail 40 -ErrorAction SilentlyContinue)
+            Write-Output '--- aoe4_spotify.log ---'
+            Write-Output ($tail -join "`n")
+        }
+        $script:oneOk = $false
+        return
     }
-    exit 1
-}
-finally {
-    foreach ($p in @($sw, $dummy)) {
-        if ($p -gt 0) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+    finally {
+        foreach ($p in @($sw, $dummy)) {
+            if ($p -gt 0) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+        }
     }
 }
+
+$pass = $true
+foreach ($mode in @('1', 'slow')) {
+    Write-Output "=== AOE4S_FAKESP=$mode ==="
+    $script:oneOk = $false
+    Run-One $mode
+    if (-not $script:oneOk) { $pass = $false; break }
+    Start-Sleep -Milliseconds 400
+}
+if (-not $pass) { exit 1 }
 exit 0

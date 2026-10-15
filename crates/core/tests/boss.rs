@@ -114,9 +114,9 @@ fn pause_during_an_intro_does_not_release() {
     assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:other", 0, 20_000, false))), IntroPoll::Release);
 
     let mut lat = Latch::playing("spotify:track:intro");
-    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000 - INTRO_LEAD_MS, 10_000, false))), IntroPoll::Hold);
-    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000, 10_000, false))), IntroPoll::Hold);
-    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 0, 0, false))), IntroPoll::Stay { paused: true });
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000 - INTRO_LEAD_MS, 10_000, false))), IntroPoll::Release);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000, 10_000, false))), IntroPoll::Release);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 0, 0, false))), IntroPoll::Release);
 
     let mut lat = Latch::playing("spotify:track:intro");
     assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000 - INTRO_LEAD_MS, 10_000, true))), IntroPoll::Release);
@@ -128,4 +128,20 @@ fn pause_during_an_intro_does_not_release() {
     assert_eq!(intro_nap(Some(&near)), Duration::from_millis(400));
     assert_eq!(intro_nap(Some(&at("spotify:track:intro", 1_000, 20_000, false))), Duration::from_millis(500));
     assert_eq!(intro_nap(None), Duration::from_millis(500));
+}
+
+#[test]
+fn missed_handover_natural_end_releases() {
+    let mut lat = Latch::expect("spotify:track:intro");
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 1_500, 10_000, true))), IntroPoll::Stay { paused: false });
+    assert!(lat.seen);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 0, 10_000, false))), IntroPoll::Release);
+
+    let mut lat = Latch::playing("spotify:track:intro");
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 0, 0, false))), IntroPoll::Release);
+
+    let mut lat = Latch::playing("spotify:track:intro");
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 1_500, 10_000, false))), IntroPoll::Stay { paused: true });
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 0, 10_000, false))), IntroPoll::Hold);
+    assert_eq!(intro_poll(&mut lat, Some(&at("spotify:track:intro", 10_000 - INTRO_LEAD_MS, 10_000, false))), IntroPoll::Hold);
 }

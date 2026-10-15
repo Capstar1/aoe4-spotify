@@ -38,6 +38,8 @@ pub struct Spotify {
     repeat_restore: Option<String>,
     /// Player stand-in for `AOE4S_TEST=1` + `AOE4S_FAKESP`. Never used against the live API.
     fake_player: Option<Value>,
+    /// Wall-clock start of the current intro when `AOE4S_FAKESP=slow`.
+    fake_from: Option<Instant>,
 }
 
 /// One Web API request with the 1.1 retry rules: network errors and 5xx are retried with backoff (0.3 s, 0.9 s),
@@ -97,7 +99,7 @@ impl Spotify {
     pub fn with_base(cid: String, path: PathBuf, api: &str, accounts: &str) -> Self {
         let tok = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok());
         let agent = ureq::AgentBuilder::new().timeout(CALL_T).build();
-        Spotify { cid, api_base: api.to_string(), accounts_base: accounts.to_string(), path, tok, agent, device: None, saved: None, saved_volume: None, repeat_restore: None, fake_player: None }
+        Spotify { cid, api_base: api.to_string(), accounts_base: accounts.to_string(), path, tok, agent, device: None, saved: None, saved_volume: None, repeat_restore: None, fake_player: None, fake_from: None }
     }
     /// Read handle for use outside the lock (see `Web`).
     pub fn web(&mut self) -> Result<Web, String> { let tok = self.access()?; Ok(Web { agent: self.agent.clone(), api_base: self.api_base.clone(), tok }) }
@@ -363,7 +365,7 @@ impl Spotify {
         let (route, q) = path.split_once('?').unwrap_or((path, ""));
         match (method, route) {
             ("GET", "/me/player/devices") => Ok((200, json!({ "devices": [{ "id": "fake", "is_active": true, "type": "Computer" }] }))),
-            ("GET", "/me/player") => Ok((200, self.fake_player.clone().unwrap_or(Value::Null))),
+            ("GET", "/me/player") => { self.fake_tick(); Ok((200, self.fake_player.clone().unwrap_or(Value::Null))) }
             ("PUT", "/me/player/repeat") => {
                 let state = query(q, "state").unwrap_or_else(|| "off".into());
                 self.fake_note(&format!("repeat {state}"));
@@ -376,8 +378,10 @@ impl Spotify {
                 }).unwrap_or("").to_string();
                 self.fake_note(&format!("play {uri}"));
                 let track = uri.starts_with("spotify:track:");
-                let dur = if track { 10_000i64 } else { 180_000 };
-                let pos = if track { dur - crate::boss::INTRO_LEAD_MS } else { 0 };
+                let slow = track && fake_slow();
+                let dur = if !track { 180_000 } else if slow { 3_000 } else { 10_000 };
+                let pos = if slow || !track { 0 } else { dur - crate::boss::INTRO_LEAD_MS };
+                self.fake_from = if slow { Some(Instant::now()) } else { None };
                 if let Some(p) = self.fake_player.as_mut() {
                     p["is_playing"] = json!(true);
                     p["progress_ms"] = json!(pos);
@@ -386,6 +390,26 @@ impl Spotify {
                 Ok((204, Value::Null))
             }
             _ => Ok((204, Value::Null)),
+        }
+    }
+
+    /// `AOE4S_FAKESP=slow`: an intro starts at position 0 and is about 3 s. Progress follows the
+    /// wall clock. Past the end, Spotify's repeat-off report: same track, not playing, position 0.
+    fn fake_tick(&mut self) {
+        if !fake_slow() { return; }
+        let Some(t0) = self.fake_from else { return; };
+        let Some(p) = self.fake_player.as_mut() else { return; };
+        let uri = p["item"]["uri"].as_str().unwrap_or("");
+        if !uri.starts_with("spotify:track:") { return; }
+        let dur = p["item"]["duration_ms"].as_i64().unwrap_or(0);
+        if dur <= 0 { return; }
+        let elapsed = t0.elapsed().as_millis() as i64;
+        if elapsed >= dur {
+            p["is_playing"] = json!(false);
+            p["progress_ms"] = json!(0);
+        } else {
+            p["is_playing"] = json!(true);
+            p["progress_ms"] = json!(elapsed);
         }
     }
 
@@ -398,6 +422,10 @@ impl Spotify {
 }
 
 /// Sandbox playback. Both switches are required so a stray `AOE4S_FAKESP` cannot stand in for Spotify.
-fn fake_on() -> bool {
-    std::env::var("AOE4S_TEST").ok().as_deref() == Some("1") && std::env::var_os("AOE4S_FAKESP").is_some()
+fn fake_on() -> bool { fake_mode().is_some() }
+/// `1` parks an intro inside the handoff. `slow` plays it from the start for about 3 s.
+fn fake_slow() -> bool { fake_mode().as_deref() == Some("slow") }
+fn fake_mode() -> Option<String> {
+    if std::env::var("AOE4S_TEST").ok().as_deref() != Some("1") { return None; }
+    std::env::var("AOE4S_FAKESP").ok().filter(|s| !s.is_empty())
 }

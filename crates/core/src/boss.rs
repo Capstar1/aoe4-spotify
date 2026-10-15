@@ -121,28 +121,32 @@ fn start(seq: &mut Seq, mut cue: Cue) -> Vec<Step> {
 pub enum IntroPoll {
     /// Keep waiting. `paused` freezes the intro clock (poll again shortly; do not treat the nap as elapsed).
     Stay { paused: bool },
-    /// The intro finished while playing, or the listener skipped it. Start the playlist now.
+    /// The intro finished, Spotify stopped it at position 0 after a missed handoff, or the listener skipped it.
     Release,
-    /// The intro reached the handoff while paused. Hold the playlist until playback resumes.
+    /// The listener paused with time left, or inside the handoff. The playlist waits until playback resumes.
     Hold,
 }
 
-/// Pause does not release. A skip does, once this intro has been seen. The end is `INTRO_LEAD_MS`
-/// before the track's duration, and only counts once Spotify has reported the intro (`latch.seen`).
+/// Pause does not release. A skip does, once this intro has been seen. The handoff is `INTRO_LEAD_MS`
+/// before the track's duration. Once the intro has been seen, a stop at position 0 (repeat off, the
+/// track ended) or inside that handoff releases, unless a pause at a position past 0 was already
+/// seen for this intro: that one holds until playback resumes (1.0.9 `progress_ms == 0` break).
 pub fn intro_poll(latch: &mut Latch, now: Option<&Heard>) -> IntroPoll {
     let Some(now) = now else { return IntroPoll::Stay { paused: false }; };
     if now.uri != latch.uri {
         return if latch.seen { IntroPoll::Release } else { IntroPoll::Stay { paused: false } };
     }
     latch.seen = true;
-    let ending = now.dur_ms > 0 && now.dur_ms - now.pos_ms <= INTRO_LEAD_MS;
+    let ending = now.dur_ms > 0 && now.pos_ms >= now.dur_ms - INTRO_LEAD_MS;
     if !now.playing {
-        if ending { IntroPoll::Hold } else { IntroPoll::Stay { paused: true } }
-    } else if ending {
-        IntroPoll::Release
-    } else {
-        IntroPoll::Stay { paused: false }
+        // Position 0 is Spotify after a track ends with repeat off. The handoff window is the
+        // same end. Either one releases, unless this intro was already paused past 0.
+        if (now.pos_ms == 0 || ending) && !latch.user_paused { return IntroPoll::Release; }
+        if now.pos_ms > 0 { latch.user_paused = true; }
+        if now.pos_ms == 0 || ending { return IntroPoll::Hold; }
+        return IntroPoll::Stay { paused: true };
     }
+    if ending { IntroPoll::Release } else { IntroPoll::Stay { paused: false } }
 }
 
 /// How long to sleep before the next intro poll. While it is playing, sleep until the handoff,
