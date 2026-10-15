@@ -1,4 +1,7 @@
-; AoE4 Spotify 1.1 (Rust) installer. Build: ISCC.exe installer\setup11.iss  (after cargo build --release)
+; AoE4 Spotify 1.1 (Rust, Slint UI) installer. Build: ISCC.exe installer\setup11.iss  (after cargo build --release -p aoe4spotify-slint)
+; No WebView2: the Slint build draws its own windows (software renderer), so no runtime bootstrapper is shipped or run.
+; Upgrades in place from 1.0.9 (PyInstaller) and from the Tauri 1.1 build: same AppId, name, folder, exe name and
+; data folder (%APPDATA%\AoE4Spotify-1.1, untouched); the Tauri build's WebView2 profile is removed.
 ; Same AppId, name and folder as 1.0.x, so 1.0.9's own auto-updater (GitHub release asset, run with
 ; /VERYSILENT /SUPPRESSMSGBOXES /NORESTART [/RELAUNCH=1 | /FROMSWITCHER=1] /LOG=...) upgrades in place:
 ; the 1.0.9 files (PyInstaller _internal\, source\) are removed, the Steam launch option keeps pointing at
@@ -39,11 +42,10 @@ WizardStyle=modern
 CloseApplications=no
 
 [Files]
-Source: "{#Root}\target\release\aoe4spotify.exe"; DestDir: "{app}"; DestName: "AoE4 Spotify.exe"; Flags: ignoreversion
+Source: "{#Root}\target\release\aoe4spotify-slint.exe"; DestDir: "{app}"; DestName: "AoE4 Spotify.exe"; Flags: ignoreversion
 Source: "{#Root}\installer\config.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\app\icons\icon.ico"; DestDir: "{app}"; DestName: "app.ico"; Flags: ignoreversion
 Source: "{#Root}\installer\LICENSE"; DestDir: "{app}"
-Source: "{#Root}\installer\MicrosoftEdgeWebview2Setup.exe"; Flags: dontcopy
 
 [Icons]
 Name: "{userdesktop}\{#AppName}"; Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"
@@ -54,6 +56,8 @@ Name: "{userprograms}\{#AppName}"; Filename: "{app}\AoE4 Spotify.exe"; Parameter
 Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{app}\source"
 Type: files; Name: "{userstartup}\{#AppName}.lnk"
+; Tauri 1.1 -> Slint: the WebView2 profile of the Tauri build (Tauri identifier folder; settings live in AoE4Spotify-1.1)
+Type: filesandordirs; Name: "{localappdata}\com.capstar1.aoe4spotify"
 
 [Run]
 Filename: "{app}\AoE4 Spotify.exe"; Parameters: "--panel"; WorkingDir: "{app}"; Description: "Open AoE4 Spotify"; Flags: postinstall nowait skipifsilent
@@ -67,6 +71,7 @@ Type: filesandordirs; Name: "{userappdata}\AoE4Spotify-1.1"
 Type: filesandordirs; Name: "{userappdata}\AoE4Spotify"
 #endif
 Type: files; Name: "{app}\launch_option_backup.json"
+Type: filesandordirs; Name: "{localappdata}\com.capstar1.aoe4spotify"
 Type: files; Name: "{localappdata}\Temp\AoE4.Spotify.Setup-*.exe"
 Type: files; Name: "{localappdata}\Temp\AoE4 Spotify Setup *.exe"
 Type: dirifempty; Name: "{app}"
@@ -209,26 +214,6 @@ begin
   end;
 end;
 
-{ WebView2 runtime (per-machine or per-user); Windows 11 has it, Windows 10 may not. }
-function WebView2Installed(): Boolean;
-var V: String; K: String;
-begin
-  K := '\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
-  Result := (RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node' + K, 'pv', V) and (V <> '') and (V <> '0.0.0.0'))
-         or (RegQueryStringValue(HKLM, 'SOFTWARE' + K, 'pv', V) and (V <> '') and (V <> '0.0.0.0'))
-         or (RegQueryStringValue(HKCU, 'Software' + K, 'pv', V) and (V <> '') and (V <> '0.0.0.0'));
-  if TestEnv('AOE4S_TEST_WV2_MISSING') = '1' then Result := False;
-end;
-procedure EnsureWebView2();
-var R: Integer;
-begin
-  if WebView2Installed() then begin Log('WebView2 runtime present'); Exit; end;
-  Log('WebView2 runtime missing - running the Microsoft bootstrapper');
-  ExtractTemporaryFile('MicrosoftEdgeWebview2Setup.exe');
-  if Exec(ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe'), '/silent /install', '', SW_HIDE, ewWaitUntilTerminated, R) then
-    Log('WebView2 bootstrapper exit code ' + IntToStr(R)) else Log('WebView2 bootstrapper could not start');
-end;
-
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var I: Integer;
 begin
@@ -249,7 +234,6 @@ begin
   end;
   KillApp(True);                                        { panel (setup reopens it afterwards) }
   KillApp(False);                                       { switcher / login window of 1.0.x or 1.1 }
-  EnsureWebView2();
   LaunchOptionAlreadySet := LaunchOptionOK();
   if LaunchOptionAlreadySet then begin Log('Launch option already set - Steam left alone'); Exit; end;
   if not CloseSteam() then Result := 'Setup was cancelled because Steam must be closed while it finishes.';
