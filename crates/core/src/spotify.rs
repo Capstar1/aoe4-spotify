@@ -1,5 +1,8 @@
 //! Spotify Web API client for 1.1: PKCE login with its OWN token file (separate from 1.0.9), playback,
 //! volume fades through the API, and putting your previous music back after the match. Tokens are never logged.
+/// Self-contained pages shown in the browser after the Spotify redirect (approved mockups).
+const LOGIN_OK_HTML: &str = include_str!("../assets/login_ok.html");
+const LOGIN_FAIL_HTML: &str = include_str!("../assets/login_fail.html");
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -163,8 +166,8 @@ impl Spotify {
                     let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
                     let Some(q) = path.strip_prefix("/callback?") else { let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"); continue };
                     let ok = query(q, "state").as_deref() == Some(state.as_str()) && query(q, "code").is_some();
-                    let body = if ok { "AoE4 Spotify 1.1: logged in. You can close this tab." } else { "AoE4 Spotify 1.1: login was cancelled." };
-                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}", body.len(), body).as_bytes());
+                    let body = if ok { LOGIN_OK_HTML } else { LOGIN_FAIL_HTML };
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}", body.len(), body).as_bytes());
                     if !ok { return Err("Login cancelled".into()); }
                     break query(q, "code").unwrap();
                 }
