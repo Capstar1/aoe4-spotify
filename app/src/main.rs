@@ -2,6 +2,7 @@
 //! M1 shell: one fixed-size window; the core follows the game log. Real playback is OFF by default (dry run)
 //! so 1.1 never fights the 1.0.9 app over Spotify; the toggle is saved in %APPDATA%\AoE4Spotify-1.1.
 mod shadow;
+mod launcher;
 use aoe4core::aoe4::Aoe4;
 use aoe4core::game::{GameAdapter, GameEvent};
 use aoe4core::logtail::{Poll, Tail};
@@ -181,6 +182,10 @@ fn get_state(app: tauri::State<Arc<AppState>>) -> serde_json::Value {
 }
 
 mod win {
+    #[link(name = "user32")] extern "system" { fn FindWindowW(c: *const u16, t: *const u16) -> isize; fn ShowWindow(h: isize, c: i32) -> i32; fn SetForegroundWindow(h: isize) -> i32; fn IsWindowVisible(h: isize) -> i32; }
+    /// Panel opened while a game-launched 1.1 runs hidden: show that one instead of starting a second switcher.
+    pub fn show_existing() { let t: Vec<u16> = "AoE4 Spotify".encode_utf16().chain(Some(0)).collect(); unsafe { let h = FindWindowW(std::ptr::null(), t.as_ptr()); if h != 0 { ShowWindow(h, 5); ShowWindow(h, 9); SetForegroundWindow(h); } } }
+    pub fn visible(h: isize) -> bool { unsafe { IsWindowVisible(h) != 0 } }
     #[repr(C)] #[derive(Default, Clone, Copy)] pub struct Rect { pub l: i32, pub t: i32, pub r: i32, pub b: i32 }
     #[link(name = "user32")] extern "system" {
         pub fn GetWindowRect(h: isize, r: *mut Rect) -> i32;
@@ -420,6 +425,17 @@ fn main() {
     let dir = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AoE4Spotify-1.1");
     import_109(&dir);
     let settings = settings::load_own(&dir);
+    // 1.0.9 start-up modes: Steam launch (%command%), --set/--remove-launch-option, panel (one instance)
+    let mut hidden = false;
+    match launcher::mode(settings.enabled) {
+        launcher::Mode::Done => return,
+        launcher::Mode::Game(args) => {
+            if !launcher::start_game(&args, settings.enabled) { return; }
+            hidden = true;     // the switcher runs with its window hidden; opening the panel shows it
+            for (k, _) in std::env::vars() { let l = k.to_lowercase(); if l.starts_with("steam") || l.starts_with("enable_vk_layer_valve") { std::env::remove_var(k); } }   // only the game gets Steam's variables
+        }
+        launcher::Mode::Panel => if !launcher::single_instance() { win::show_existing(); return; },
+    }
     let probe = Aoe4::new(Box::new(|_, _| None));
     let path = settings.log_path.clone().map(PathBuf::from).or_else(|| probe.default_log_path()).unwrap_or_default();
     let ages = probe.ages().iter().map(|(k, l)| (k.to_string(), l.to_string())).collect();
@@ -433,7 +449,11 @@ fn main() {
     let a3 = app.clone(); std::thread::spawn(move || player(a3, rx));
     tauri::Builder::default()
         .manage(app)
-        .setup(|a| { use tauri::Manager; if let Some(h) = a.get_webview_window("main").and_then(|w| w.hwnd().ok()) { shadow::init(h.0 as isize); } if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
+        .setup(move |a| { use tauri::Manager; if let Some(h) = a.get_webview_window("main").and_then(|w| w.hwnd().ok()) { shadow::init(h.0 as isize); } if zoom() != 1.0 { let w = a.get_webview_window("main").unwrap(); let _ = w.set_zoom(zoom()); let _ = w.set_size(tauri::LogicalSize::new(554.0 * zoom(), 880.0 * zoom())); }
+            { let w = a.get_webview_window("main").unwrap();
+              if hidden { let h = w.hwnd().map(|h| h.0 as isize).unwrap_or(0); let ah = a.handle().clone();
+                  std::thread::spawn(move || launcher::follow_game(move || if !win::visible(h) { ah.exit(0) })); }
+              else { let _ = w.show(); let _ = w.set_focus(); } }
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
         .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, sp, cache_covers, open_add, dbg, menu, check_update])
         .run(tauri::generate_context!())
