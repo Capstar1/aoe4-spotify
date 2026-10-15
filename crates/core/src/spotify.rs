@@ -80,6 +80,11 @@ impl Spotify {
     /// Browser login (PKCE). Blocks until Spotify redirects back or 3 minutes pass.
     pub fn login(&mut self) -> Result<(), String> { let (c, v) = Self::login_code(&self.cid.clone())?; self.login_finish(&c, &v) }
     pub fn client_id(&self) -> String { self.cid.clone() }
+    /// Switch Spotify app (Your Spotify app / shared): a different id drops the old login (1.0.9 save_own_client).
+    pub fn set_client(&mut self, cid: &str) -> bool {
+        if self.cid == cid { return false; }
+        self.cid = cid.to_string(); self.tok = None; let _ = std::fs::remove_file(&self.path); true
+    }
     /// Browser part of the login: needs no &self, so callers can wait for it WITHOUT holding the Spotify lock
     /// (holding it froze the panel for up to 3 minutes while the auth tab was open). Returns (code, verifier).
     pub fn login_code(cid: &str) -> Result<(String, String), String> {

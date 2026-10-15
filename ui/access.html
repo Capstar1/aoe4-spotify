@@ -48,6 +48,8 @@ function draw() {
   const add = (html) => { r.insertAdjacentHTML("beforeend", html); return r.lastElementChild; };
   add(`<div class="t" style="left:28px;top:38px;font:700 26px 'Segoe UI';color:${p.tx}">Not invited yet</div>`);
   add(`<div class="t" style="left:28px;top:70px;font:400 15px 'Segoe UI';color:${p.mu}">Ask for access in 3 easy steps.</div>`);
+  const byo = add(`<div class="t" style="left:28px;top:92px;font:400 13px 'Segoe UI';color:${p.g};cursor:pointer">Or use your own Spotify app</div>`);
+  byo.onmouseenter = () => byo.style.color = p.gact; byo.onmouseleave = () => byo.style.color = p.g; byo.onclick = () => invoke("open_own");
   if (st.done) { em.style.display = "none";
     add(`<div class="a" id="done" style="left:28px;top:114px"><div style="margin-top:14px;font:700 30px 'Segoe UI';color:${p.g}">\u2714  Done!</div><div style="margin:8px 0 6px;font:700 20px 'Segoe UI';color:${p.tx}">You'll get access in about a minute.</div><div style="margin-bottom:30px;font:400 15px 'Segoe UI';color:${p.mu}">Keep this window open or reopen the app later.\nIt continues by itself when it works.</div></div>`);
     return size(Y[2] + H[2] - 24 + M); }
@@ -63,7 +65,7 @@ function draw() {
   r.appendChild(illustration(p));
   add(`<div class="t" style="left:${CX}px;top:${Y[1] + 52 + IH + 16}px;font:400 14px 'Segoe UI';color:${p.mu}">Click \u201cEdit personal info\u201d (the row with the pencil).</div>`);
   add(`<div class="t" style="left:${CX}px;top:${Y[1] + 52 + IH + 36}px;font:400 14px 'Segoe UI';color:${p.mu}">Then select your Email and press Ctrl + C.</div>`);
-  const by = Y[2] + 52; add(`<div class="a" style="left:${CX}px;top:${by}px;width:${BOXW}px;height:${BOXH}px;box-sizing:border-box;border-radius:8px;background:${p.ent};border:1.5px solid ${st.focus ? p.g : p.b2};cursor:text" onclick="em.focus()"></div>`);
+  const by = Y[2] + 52; add(`<div class="a" id="ebox" style="left:${CX}px;top:${by}px;width:${BOXW}px;height:${BOXH}px;box-sizing:border-box;border-radius:8px;background:${p.ent};border:1.5px solid ${st.focus ? p.g : p.b2};cursor:text" onclick="em.focus()"></div>`);
   em.style.display = "block"; em.style.top = (by + BOXH / 2 - 13) + "px"; em.style.color = p.enttx; em.style.caretColor = p.enttx; document.documentElement.style.setProperty("--ph", p.dis);
   if (valid()) add(`<svg class="a" style="left:${CX + BOXW + 14}px;top:${by + BOXH / 2 - 13}px" width="26" height="26"><circle cx="13" cy="13" r="13" fill="${p.g}"/><polyline points="7.5,13.5 11.2,17.2 18.5,9.3" fill="none" stroke="${p.gtx}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`);
   pill(by + BOXH + 14, st.b3t, "g", send, valid() && !st.sent && st.b3t === "Send request");
@@ -74,7 +76,8 @@ function size(hh) { document.body.style.height = hh + "px"; if (hh !== st.hh) { 
 async function send() { if (!valid() || st.sent || st.b3t !== "Send request") return; st.b3t = "Sending\u2026"; draw();
   let r = "error"; try { r = await invoke("access_send", { email: em.value.trim() }); } catch (e) {}
   st.b3t = "Send request"; if (r === "sent" || r === "wait") { st.sent = st.done = true; } else st.note = [MSG[r] || MSG.error, "err"]; draw(); }
-em.addEventListener("input", () => draw()); em.onfocus = () => { st.focus = true; draw(); }; em.onblur = () => { st.focus = false; draw(); };
+em.addEventListener("input", () => draw()); const fb = (v) => { st.focus = v; const b = $("ebox"); if (b) b.style.borderColor = v ? TH[st.light ? "light" : "dark"].g : TH[st.light ? "light" : "dark"].b2; };   // no redraw: a click on Send must survive the blur
+em.onfocus = () => fb(true); em.onblur = () => fb(false);
 em.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") Wn.close(); });
 let tick = 0;

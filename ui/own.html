@@ -1,0 +1,67 @@
+<!doctype html><html><head><meta charset="utf-8"><title>AoE4 Spotify</title>
+<style>
+/* Your Spotify app (approved v3): the not-invited guide's grid, cards and buttons; Windows light / dark theme */
+html,body{margin:0;width:500px;overflow:hidden;font-family:"Segoe UI",sans-serif;user-select:none;cursor:default}
+.a{position:absolute}.t{position:absolute;white-space:pre;transform:translateY(-50%)}
+.card{left:20px;width:460px;border-radius:12px}
+.badge{width:36px;height:36px;border-radius:50%;left:38px;display:flex;align-items:center;justify-content:center;font:700 17px "Segoe UI"}
+.title{left:92px;font:700 17px "Segoe UI"}.body{left:92px;font:400 14px "Segoe UI"}
+.pill{height:44px;border-radius:22px;display:flex;align-items:center;justify-content:center;font:700 15px "Segoe UI";cursor:pointer}
+.box{height:44px;box-sizing:border-box;border-radius:8px;font:400 15px "Segoe UI";display:flex;align-items:center;padding-left:14px}
+#cid{position:absolute;left:106px;width:272px;height:26px;border:0;outline:0;background:transparent;font:400 15px "Segoe UI";padding:0}
+#cid::placeholder{color:var(--ph)}.lk{cursor:pointer}
+</style></head><body>
+<div id="r"></div><input id="cid" spellcheck="false" maxlength="64" placeholder="paste the Client ID">
+<script>
+const { invoke } = window.__TAURI__.core, Wn = window.__TAURI__.window.getCurrentWindow();
+const TH = { dark: { bg: "#171717", card: "#222222", tx: "#e6e6e3", mu: "#a3a29f", g: "#1db954", gtx: "#0e1a12", gact: "#2fcf68", b2: "#303030", b2a: "#3a3a3a", b2tx: "#e6e6e3", dis: "#6c6c6c", ent: "#2c2c2c", enttx: "#ececea", err: "#e8958c" },
+  light: { bg: "#efeeea", card: "#e3e1dc", tx: "#2b2b2a", mu: "#62615d", g: "#1a9f4a", gtx: "#f4f3ef", gact: "#178c41", b2: "#d4d2cc", b2a: "#c9c7c1", b2tx: "#2b2b2a", dis: "#9a9893", ent: "#f6f5f1", enttx: "#262625", err: "#b4473c" } };
+const REDIRECT = "http://127.0.0.1:8888/callback", HEX = /^[0-9a-fA-F]{32}$/;
+const STEPS = [
+  ["Create an app", ["Open the dashboard and log in. Click Create app,", "name it AoE4 Spotify, tick Web API, and save."]],
+  ["Add this redirect", ["Add this address under Redirect URIs and click Add.", "It has to match exactly."]],
+  ["Add yourself", ["Settings \u2192 User Management \u2192 Add user.", "Use the email on your Spotify account."]],
+  ["Paste the Client ID", ["Copy the Client ID (not the Client Secret).", "Copying it fills this box."]] ];
+const st = { light: false, copied: false, note: "", focus: false, clip: null, hh: 0, busy: false }, $ = (id) => document.getElementById(id), cid = $("cid");
+function draw() {
+  const p = TH[st.light ? "light" : "dark"], r = $("r"); document.body.style.background = p.bg; r.innerHTML = "";
+  const add = (h) => { r.insertAdjacentHTML("beforeend", h); return r.lastElementChild; };
+  const pill = (x, y, w, label, green, act) => { const e = add(`<div class="a pill" style="left:${x}px;top:${y}px;width:${w}px"></div>`); e.textContent = label;
+    const set = (hv) => { e.style.background = green ? (hv ? p.gact : p.g) : (hv ? p.b2a : p.b2); e.style.color = green ? p.gtx : p.b2tx; }; set(false);
+    e.onmouseenter = () => set(true); e.onmouseleave = () => set(false); e.onclick = act; return e; };
+  add(`<div class="t" style="left:28px;top:38px;font:700 26px 'Segoe UI';color:${p.tx}">Your Spotify app</div>`);
+  add(`<div class="t" style="left:28px;top:70px;font:400 15px 'Segoe UI';color:${p.mu}">Use your own Spotify app in 4 steps.</div>`);
+  let y = 114;
+  STEPS.forEach(([t, b], i) => { const h = i === 3 ? 224 + (st.note ? 24 : 0) : 166;
+    add(`<div class="a card" style="top:${y}px;height:${h}px;background:${p.card}"></div><div class="a badge" style="top:${y + 12}px;background:${p.g};color:${p.gtx}">${i + 1}</div><div class="t title" style="top:${y + 30}px;color:${p.tx}">${t}</div>`);
+    b.forEach((s, k) => add(`<div class="t body" style="top:${y + 62 + k * 20}px;color:${p.mu}">${s}</div>`));
+    const cy = y + 104;
+    if (i === 0) pill(92, cy, 240, "Open Spotify Dashboard", false, () => invoke("menu", { kind: "dashboard" }));
+    if (i === 1) { add(`<div class="a box" style="left:92px;top:${cy}px;width:260px;background:${p.ent};border:1.5px solid ${p.b2};color:${p.enttx};user-select:text;cursor:text">${REDIRECT}</div>`);
+      pill(364, cy, 98, st.copied ? "Copied" : "Copy", false, copy); }
+    if (i === 2) pill(92, cy, 240, "Open your Spotify email", false, () => invoke("menu", { kind: "account" }));
+    if (i === 3) { add(`<div class="a box" id="cbox" style="left:92px;top:${cy}px;width:300px;background:${p.ent};border:1.5px solid ${st.focus ? p.g : p.b2};cursor:text" onclick="cid.focus()"></div>`);
+      cid.style.top = (cy + 9) + "px"; cid.style.color = cid.style.caretColor = p.enttx; document.documentElement.style.setProperty("--ph", p.dis);
+      if (HEX.test(cid.value.trim())) add(`<svg class="a" style="left:406px;top:${cy + 9}px" width="26" height="26"><circle cx="13" cy="13" r="13" fill="${p.g}"/><polyline points="7.5,13.5 11.2,17.2 18.5,9.3" fill="none" stroke="${p.gtx}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`);
+      pill(92, cy + 58, 200, st.busy ? "Saving\u2026" : "Save and log in", true, save);
+      if (st.note) add(`<div class="t" style="left:92px;top:${cy + 58 + 44 + 16}px;font:400 13px 'Segoe UI';color:${p.err}">${st.note}</div>`); }
+    y += h + 12; });
+  const lk = add(`<div class="t lk" style="left:28px;top:${y + 12}px;font:400 13px 'Segoe UI';color:${p.g}">Use the shared app instead</div>`);
+  lk.onmouseenter = () => lk.style.color = p.gact; lk.onmouseleave = () => lk.style.color = p.g; lk.onclick = () => invoke("own_shared");
+  const hh = y + 38; document.body.style.height = hh + "px"; if (hh !== st.hh) { st.hh = hh; invoke("resize", { w: 500, h: hh }); }
+}
+async function copy() { try { await navigator.clipboard.writeText(REDIRECT); } catch (e) {} st.copied = true; draw(); setTimeout(() => { st.copied = false; draw(); }, 1200); }
+async function save() { if (st.busy) return; if (!HEX.test(cid.value.trim())) { st.note = "That isn't a Client ID. Copy the 32-character Client ID, not the Client Secret."; return draw(); }
+  st.busy = true; st.note = ""; draw(); let r = "bad"; try { r = await invoke("own_save", { cid: cid.value.trim() }); } catch (e) {} st.busy = false;
+  if (r !== "saved") { st.note = "That isn't a Client ID. Copy the 32-character Client ID, not the Client Secret."; draw(); } }
+cid.addEventListener("input", () => { st.note = ""; draw(); }); const fb = (v) => { st.focus = v; const b = $("cbox"); if (b) b.style.borderColor = v ? TH[st.light ? "light" : "dark"].g : TH[st.light ? "light" : "dark"].b2; };   // no redraw: a click on Save must survive the blur
+cid.onfocus = () => fb(true); cid.onblur = () => fb(false);
+cid.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") Wn.close(); });
+let tick = 0;
+setInterval(async () => {   // copying the Client ID fills the box (only while it's empty, like 1.0.9); follows the Windows theme (~2 s)
+  try { const c = (await invoke("clip_text")).trim(); if (c !== st.clip) { st.clip = c; if (HEX.test(c) && !cid.value) { cid.value = c; draw(); } } } catch (e) {}
+  if (++tick % 8 === 0) { try { const i = await invoke("own_info"); if (!!i.light !== st.light) { st.light = !!i.light; draw(); } } catch (e) {} }
+}, 250);
+(async () => { let i = {}; try { i = await invoke("own_info"); } catch (e) {} st.light = !!i.light; draw(); await Wn.show(); await Wn.setFocus(); cid.focus(); })();
+</script></body></html>

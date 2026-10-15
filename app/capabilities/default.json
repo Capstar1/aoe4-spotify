@@ -1,1 +1,1 @@
-{ "identifier": "default", "windows": ["main", "add", "pick", "gtg", "access"], "permissions": ["core:default", "core:window:allow-show", "core:window:allow-set-focus", "core:window:allow-start-dragging", "core:window:allow-minimize", "core:window:allow-close"] }
+{ "identifier": "default", "windows": ["main", "add", "pick", "gtg", "access", "own"], "permissions": ["core:default", "core:window:allow-show", "core:window:allow-set-focus", "core:window:allow-start-dragging", "core:window:allow-minimize", "core:window:allow-close"] }

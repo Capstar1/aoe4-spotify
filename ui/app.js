@@ -289,7 +289,7 @@ let doneT0 = 0; function doneGone() { if (!doneT0) doneT0 = performance.now(); r
 function drawMenu(H, sp, set) {
   hit(rr(0, 0, W, H, 0, "rgba(0,0,0,0.353)"), () => { ui.menu = false; redraw(); }).style.cursor = "default";
   const gx = R_ - 32; hit(rr(gx, 14, R_, 46, 10, "#2a2a2a"), closeMenu); sprite("gear", gx + 6, 20, gx + 26, 40, G0).style.pointerEvents = "none";   // green when open: 1.0.9 gear_img[True]
-  const mx0 = R_ - 190; let my0 = 52; const XTRA = 32;                       // 1.1: one extra row (Real playback)
+  const mx0 = R_ - 190; let my0 = 52; const XTRA = 64;                       // 1.1: extra rows (Your Spotify app, Real playback)
   rr(mx0, my0, R_, my0 + 180 + 38 - 32 + XTRA, 10, "#262626", "#3a3a3a");
   const gw = measure("\u2630  ", 12);
   let rowN = 0; const item = (y0, h, fn) => { const r = hit(rr(mx0 + 6, y0, R_ - 6, y0 + h, 7, "#262626"), fn); hov(r, () => r.style.background = "#303030", () => r.style.background = "#262626"); r.dataset.row = rowN++; return r; };
@@ -301,9 +301,10 @@ function drawMenu(H, sp, set) {
   item(my0 + 38, 32, () => { closeMenu(); invoke("menu", { kind: "log" }); }); text(mx0 + 20, my0 + 54, "\u2630  Open log", 12, C.tx);
   item(my0 + 70, 32, () => { closeMenu(); invoke("menu", { kind: "github" }); }); sprite("m_gh", mx0 + 20 + (gw - 8) / 2 - 9, my0 + 77, mx0 + 20 + (gw - 8) / 2 + 9, my0 + 95).style.pointerEvents = "none";
   text(mx0 + 20 + gw, my0 + 86, "GitHub", 12, C.tx);
+  item(my0 + 102, 32, () => { closeMenu(); invoke("open_own"); }); text(mx0 + 20, my0 + 118, "\u266b  Your Spotify app", 12, C.tx); my0 += 32;
   item(my0 + 102, 32, () => { const on = !S.spotify.real; S.spotify.real = on; redraw(); invoke("set_real", { on }); });   // flip at once, like replays (no stale state between polls)
   text(mx0 + 20, my0 + 118, "\u25b6  Real playback", 12, C.tx); toggle(R_ - 14 - 30, my0 + 118 - 8, sp.real, 30, 16).style.pointerEvents = "none";
-  const dy = -32 + XTRA;
+  const dy = -32 + XTRA - 32;   // (my0 already moved down one row for Your Spotify app)
   hline(mx0 + 10, my0 + 140 + dy, R_ - 10, "#3a3a3a");
   item(my0 + 144 + dy, 30, () => { closeMenu(); invoke("menu", { kind: "uninstall" }); }); text(mx0 + 20, my0 + 159 + dy, "\u2715  Uninstall", 12, C.red, true);
 }
@@ -409,7 +410,7 @@ async function menuTest() {   // AOE4S_MENUTEST: click every cog row like a user
   row(1).click(); out.push("check: pill " + JSON.stringify(upd.msg) + ", menu open " + ui.menu);
   for (let k = 0; k < 40 && upd.msg.startsWith("Checking"); k++) await sleep(250); out.push("check result pill " + JSON.stringify(upd.msg));
   await sleep(2300); out.push("pill after 2.3s " + JSON.stringify(upd.msg));
-  for (const [i, n] of [[2, "log"], [3, "github"], [4, "real"], [5, "uninstall"]]) {
+  for (const [i, n] of [[2, "log"], [3, "github"], [5, "real"], [6, "uninstall"]]) {
     gear().click(); await sleep(150); const before = (await st()).real; row(i).click(); await sleep(300);
     out.push(`${n}: clicked, menu open ${ui.menu}` + (n === "real" ? `, real ${before} -> ${(await st()).real}` : ""));
     if (n === "real") { row(i).click(); await sleep(300); out.push("real back -> " + (await st()).real); if (ui.menu) gear().click(); await sleep(100); }

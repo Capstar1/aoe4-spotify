@@ -14,6 +14,10 @@ pub struct Settings {
     /// public PKCE app id from the install config (not shown in the UI)
     #[serde(skip)]
     pub client_id: String,
+    /// The shared app that ships with the installer (Your Spotify app: "Use the shared app instead").
+    pub shared_client_id: String,
+    /// Using your own Spotify app (own_app + a valid client_id in your settings).
+    pub own_app: bool,
     /// Age Intros: install boss_intro (default pools) + your per-age pools; after-match choice; intros master switch
     #[serde(skip)]
     pub base_boss: Value,
@@ -55,9 +59,17 @@ pub fn load(install_cfg: &Path, user_cfg: &Path, names: &Path) -> Settings {
         boss_on: user["boss_intro_enabled"].as_bool().or(base["boss_intro"]["enabled"].as_bool()).unwrap_or(true),
         custom_songs: user["custom_songs"].clone(),
         music_in_replays: get("music_in_replays").as_bool().unwrap_or(false),
-        client_id: base["client_id"].as_str().unwrap_or_default().to_string(),
+        client_id: own_cid(&user).unwrap_or_else(|| base["client_id"].as_str().unwrap_or_default().to_string()),
+        shared_client_id: base["client_id"].as_str().unwrap_or_default().to_string(),
+        own_app: own_cid(&user).is_some(),
         log_path: get("log_path").as_str().filter(|s| !s.is_empty()).map(|s| s.to_string()),
     }
+}
+
+/// 1.0.9 client_id_ok: a Spotify Client ID is 32 hex characters (the Client Secret has the same shape; the guide says which).
+pub fn client_id_ok(v: &str) -> bool { v.len() == 32 && v.chars().all(|c| c.is_ascii_hexdigit()) }
+fn own_cid(user: &serde_json::Value) -> Option<String> {
+    let c = user["client_id"].as_str()?.trim(); if user["own_app"].as_bool() == Some(true) && client_id_ok(c) { Some(c.to_lowercase()) } else { None }
 }
 
 /// 1.1's own copies (imported once from 1.0.9 into %APPDATA%\AoE4Spotify-1.1).

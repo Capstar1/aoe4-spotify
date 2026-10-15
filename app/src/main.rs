@@ -635,6 +635,30 @@ fn clip_text() -> String {
     }
     #[allow(unreachable_code)] String::new()
 }
+
+// ---- Your Spotify app (1.0.9 byo.py, approved v3 guide): your own Client ID instead of the shared app
+fn show_own(h: &tauri::AppHandle) { let h2 = h.clone(); let _ = h.run_on_main_thread(move || small_window(&h2, "own", "own.html", 500.0, 922.0)); }
+#[tauri::command]
+fn open_own(h: tauri::AppHandle) { show_own(&h); }
+#[tauri::command]
+fn own_info(app: tauri::State<Arc<AppState>>) -> serde_json::Value { serde_json::json!({ "own": app.settings.lock().unwrap().own_app, "light": windows_light() }) }
+fn close_guides(h: &tauri::AppHandle) { use tauri::Manager; for l in ["own", "access"] { if let Some(w) = h.get_webview_window(l) { let _ = w.close(); } } }
+/// Save and log in: a valid Client ID (32 hex, not the secret) -> settings, switch the client (drops the old login), log in (PKCE).
+#[tauri::command]
+fn own_save(h: tauri::AppHandle, app: tauri::State<Arc<AppState>>, cid: String) -> String {
+    let c = cid.trim().to_lowercase(); if !settings::client_id_ok(&c) { return "bad".into(); }
+    set_user_(&app, "client_id", serde_json::json!(c)); set_user_(&app, "own_app", serde_json::json!(true));
+    if app.spotify.lock().unwrap().set_client(&c) { launcher::log("Using your own Spotify app"); }
+    close_guides(&h); do_login(h.clone(), app.inner().clone()); "saved".into()
+}
+/// Use the shared app instead: back to the installer's client (drops the login only when it changes).
+#[tauri::command]
+fn own_shared(h: tauri::AppHandle, app: tauri::State<Arc<AppState>>) {
+    set_user_(&app, "client_id", serde_json::Value::Null); set_user_(&app, "own_app", serde_json::Value::Null);
+    let shared = app.settings.lock().unwrap().shared_client_id.clone();
+    let changed = app.spotify.lock().unwrap().set_client(&shared);
+    close_guides(&h); if changed { launcher::log("Using the shared Spotify app"); do_login(h.clone(), app.inner().clone()); }
+}
 #[tauri::command]
 fn show_panel(app: tauri::AppHandle) { use tauri::Manager; if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.unminimize(); let _ = w.set_focus(); } }
 
@@ -690,6 +714,7 @@ fn menu(app: tauri::State<Arc<AppState>>, kind: String) -> String {
     match kind.as_str() {
         k if k.starts_with("pl:") => { let id: String = k[3..].chars().filter(|c| c.is_ascii_alphanumeric()).collect(); if id.len() == 22 { open_path(&format!("spotify:playlist:{id}")); } String::new() }
         "github" => { open_path("https://github.com/Capstar1/aoe4-spotify"); String::new() }
+        "dashboard" => { open_path("https://developer.spotify.com/dashboard"); String::new() }
         "account" => { open_path("https://www.spotify.com/account/overview/"); String::new() }
         "log" => { let p = app.dir.join("aoe4_spotify.log"); let _ = std::fs::create_dir_all(&app.dir);   // 1.0.9: the app's own log file
                    if !p.exists() { let _ = std::fs::write(&p, ""); } open_path(&p.display().to_string()); String::new() }
@@ -852,9 +877,9 @@ fn main() {
                   if a7.spotify.lock().unwrap().logged_in() { std::thread::spawn(move || after_login(&h7, &a7)); } else { do_login(h7, a7); } }
               else if !hidden { let _ = w.show(); let _ = w.set_focus(); } }
             if let Some(d) = std::env::var_os("AOE4S_SWITCHTEST") { use tauri::Manager; let w = a.get_webview_window("main").unwrap(); std::thread::spawn(move || switch_test(w, PathBuf::from(d))); } Ok(()) })
-        .on_window_event(|w, e| { use tauri::Manager; if (w.label() == "gtg" || w.label() == "access") && matches!(e, tauri::WindowEvent::Destroyed) {
+        .on_window_event(|w, e| { use tauri::Manager; if (w.label() == "gtg" || w.label() == "access" || w.label() == "own") && matches!(e, tauri::WindowEvent::Destroyed) {
             let h = w.app_handle().clone(); if let Some(m) = h.get_webview_window("main") { if !m.is_visible().unwrap_or(true) && std::env::args().nth(1).is_none() { h.exit(0); } } } })
-        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, sp, cache_covers, open_add, dbg, menu, check_update, show_panel, set_user, set_enabled, start_update, open_pick, pick_done, pick_info, gtg_info, gtg_fix, save_list, delete_list, access_info, access_send, access_check, clip_text])
+        .invoke_handler(tauri::generate_handler![get_state, login, logout, set_real, resize, cfg, cover, region, shadow, preview, save_ed, encode_preset, decode_preset, sp, cache_covers, open_add, dbg, menu, check_update, show_panel, set_user, set_enabled, start_update, open_pick, pick_done, pick_info, gtg_info, gtg_fix, save_list, delete_list, access_info, access_send, access_check, clip_text, open_own, own_info, own_save, own_shared])
         .run(tauri::generate_context!())
         .expect("error while running AoE4 Spotify");
 }
