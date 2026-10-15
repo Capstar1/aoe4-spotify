@@ -67,10 +67,58 @@ pub fn music_sync(enabled: bool) -> bool {
     if enabled {
         if v > 0.0 { let _ = std::fs::create_dir_all(data_dir()); let _ = std::fs::write(music_state(), serde_json::json!({ "level": v }).to_string()); music_write(0.0); log(&format!("Game music muted (your level {v:.2} saved)")); }
     } else {
-        let lv = std::fs::read_to_string(music_state()).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|j| j["level"].as_f64());
-        if let Some(l) = lv { if l > 0.0 && v == 0.0 { music_write(l); log(&format!("Game music restored to {l:.2}")); } let _ = std::fs::remove_file(music_state()); }
+        // your saved level; none saved (the music was already 0 when we took over) -> AoE4's own default (sysconfig.lua)
+        let lv = std::fs::read_to_string(music_state()).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|j| j["level"].as_f64()).filter(|l| *l > 0.0);
+        let (l, what) = match lv { Some(l) => (l, "your level"), None => (default_music(), "AoE4's default") };
+        if v == 0.0 { music_write(l); log(&format!("Game music restored to {l:.2} ({what})")); }
+        let _ = std::fs::remove_file(music_state());
     }
     true
+}
+
+/// AoE4's default music volume: `setting = "musicVolume", variantFloat = 1.0` in the game's sysconfig.lua (read only); 1.0 if not found.
+pub fn default_music() -> f64 {
+    if let Some(v) = test_env("AOE4S_MUSIC_DEFAULT").and_then(|s| s.parse().ok()) { return v; }
+    let libs = steam_path().map(|r| { let mut v = vec![PathBuf::from(&r)];
+        if let Ok(t) = std::fs::read_to_string(Path::new(&r).join(r"steamapps\libraryfolders.vdf")) { let toks = vdf_tokens(&t);
+            for k in 0..toks.len().saturating_sub(1) { if toks[k].kind == 's' && toks[k].val.eq_ignore_ascii_case("path") && toks[k + 1].kind == 's' { v.push(PathBuf::from(vunesc(&toks[k + 1].val))); } } } v }).unwrap_or_default();
+    for l in libs { if let Ok(t) = std::fs::read_to_string(l.join(r"steamapps\common\Age of Empires IV\sysconfig.lua")) {
+        let low = t.to_lowercase(); if let Some(i) = low.find("\"musicvolume\"") { if let Some(j) = low[i..].find("variantfloat") {
+            let r = &t[i + j + 12..]; let r = r.trim_start().trim_start_matches('=').trim_start(); let n: String = r.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            if let Ok(v) = n.parse::<f64>() { if v > 0.0 && v <= 1.0 { return v; } } } } } }
+    1.0
+}
+
+// ---- uninstall (1.0.9 setup.iss: "Removes the app, its shortcuts and settings, and puts the game's launch options and music volume back.")
+fn arp_key() -> String { test_env("AOE4S_ARP").unwrap_or_else(|| r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\AoE4Spotify11".into()) }
+pub fn installed() -> bool { install_dir().file_name().map_or(false, |n| n.to_string_lossy().eq_ignore_ascii_case("AoE4 Spotify 1.1")) || test_env("AOE4S_INSTALLED").is_some() }
+/// Apps & features entry for the installed copy (idempotent).
+pub fn register_uninstall() {
+    use std::os::windows::process::CommandExt;
+    if !installed() { return; } let exe = install_dir().join("AoE4 Spotify.exe"); let k = arp_key();
+    for (n, t, v) in [("DisplayName", "REG_SZ", "AoE4 Spotify".to_string()), ("DisplayVersion", "REG_SZ", env!("CARGO_PKG_VERSION").to_string()), ("Publisher", "REG_SZ", "Capstar1".into()),
+        ("DisplayIcon", "REG_SZ", install_dir().join("app.ico").display().to_string()), ("InstallLocation", "REG_SZ", install_dir().display().to_string()),
+        ("UninstallString", "REG_SZ", format!("\"{}\" --uninstall", exe.display())), ("NoModify", "REG_DWORD", "1".into()), ("NoRepair", "REG_DWORD", "1".into())] {
+        let _ = std::process::Command::new("reg").args(["add", &k, "/v", n, "/t", t, "/d", &v, "/f"]).creation_flags(NO_WINDOW).output(); }
+}
+fn desktop() -> PathBuf { test_env("AOE4S_DESKTOP").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Desktop")) }
+#[link(name = "user32")] extern "system" { fn MessageBoxW(h: isize, t: *const u16, c: *const u16, f: u32) -> i32; }
+fn msgbox(text: &str, title: &str, flags: u32) -> i32 { let w = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>(); unsafe { MessageBoxW(0, w(text).as_ptr(), w(title).as_ptr(), flags | 0x40000) } }
+pub fn uninstall(yes: bool) {
+    use std::os::windows::process::CommandExt;
+    if !yes && msgbox("Removes the app, its shortcuts and settings, and puts the game's launch options and music volume back.\n\nSteam will be closed briefly if it is running.", "Uninstall AoE4 Spotify?", 0x4 | 0x20) != 6 { return; }
+    if aoe_running() { msgbox("Close Age of Empires IV first, then uninstall again.", "Uninstall", 0x30); return; }
+    let t0 = Instant::now(); while !single_instance() && t0.elapsed().as_secs() < 15 { std::thread::sleep(Duration::from_millis(500)); }   // the panel is closing
+    log("Uninstall: removing launch option, restoring game music");
+    with_steam_closed(remove_launch_option); music_sync(false);
+    let lnk = desktop().join("AoE4 Spotify.lnk"); if lnk.exists() { let _ = std::fs::remove_file(&lnk); }
+    let ad = PathBuf::from(std::env::var("APPDATA").unwrap_or_default());
+    for d in [ad.join("AoE4Spotify-1.1"), ad.join("AoE4Spotify")] { let _ = std::fs::remove_dir_all(&d); }   // settings (+ the 1.0.9 leftover)
+    let _ = std::process::Command::new("reg").args(["delete", &arp_key(), "/f"]).creation_flags(NO_WINDOW).output();
+    // the running exe can't delete itself: a detached cmd removes the install folder once we have exited
+    let dir = install_dir();
+    if installed() { let _ = std::process::Command::new("cmd").raw_arg(format!("/c ping -n 3 127.0.0.1 >nul & rmdir /s /q \"{}\"", dir.display())).current_dir(std::env::temp_dir()).creation_flags(NO_WINDOW | 0x8).spawn(); }
+    if !yes { msgbox("AoE4 Spotify was removed.", "Uninstall", 0x40); }
 }
 
 // ---- single instance: one switcher (panel or game-launched) per user, like 1.0.9's SwitcherMutex
@@ -89,6 +137,7 @@ pub fn mode(enabled: bool) -> Mode {
     match args.first().map(|s| s.as_str()) {
         None | Some("--panel") => Mode::Panel,
         Some("--set-launch-option") => { with_steam_closed(set_launch_option); music_sync(enabled); Mode::Done }
+        Some("--uninstall") => { uninstall(args.iter().any(|a| a == "--yes")); Mode::Done }
         Some("--remove-launch-option") => { remove_launch_option(); music_sync(false); Mode::Done }
         Some(a) if a.starts_with("--") => Mode::Panel,
         _ => Mode::Game(args),

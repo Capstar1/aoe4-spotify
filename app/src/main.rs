@@ -383,7 +383,11 @@ fn menu(app: tauri::State<Arc<AppState>>, kind: String) -> String {
         "log" => { let p = app.dir.join("aoe4_spotify_1.1.log"); let _ = std::fs::create_dir_all(&app.dir);
                    let _ = std::fs::write(&p, app.status.lock().unwrap().log.join("\r\n")); open_path(&p.display().to_string()); String::new() }
         "replays" => { let v = !app.replays.load(Ordering::SeqCst); app.replays.store(v, Ordering::SeqCst); save_prefs(&app); String::new() }
-        "uninstall" => {   // the 1.1 preview runs from its folder: same message box as 1.0.9 when no uninstaller exists
+        "uninstall" => {   // installed copy: hand over to "<exe> --uninstall" (asks, then removes everything) and close the panel
+            if launcher::installed() && std::env::var_os("AOE4S_DRYOPEN").is_none() {
+                if let Ok(exe) = std::env::current_exe() { let _ = std::process::Command::new(exe).arg("--uninstall").spawn(); std::thread::spawn(|| { std::thread::sleep(Duration::from_millis(300)); std::process::exit(0) }); }
+                return String::new();
+            }
             let msg = "Uninstaller not found (not installed?).";
             if std::env::var_os("AOE4S_DRYOPEN").is_none() {
                 std::thread::spawn(move || {
@@ -434,7 +438,7 @@ fn main() {
             hidden = true;     // the switcher runs with its window hidden; opening the panel shows it
             for (k, _) in std::env::vars() { let l = k.to_lowercase(); if l.starts_with("steam") || l.starts_with("enable_vk_layer_valve") { std::env::remove_var(k); } }   // only the game gets Steam's variables
         }
-        launcher::Mode::Panel => if !launcher::single_instance() { win::show_existing(); return; },
+        launcher::Mode::Panel => { if !launcher::single_instance() { win::show_existing(); return; } launcher::register_uninstall(); }
     }
     let probe = Aoe4::new(Box::new(|_, _| None));
     let path = settings.log_path.clone().map(PathBuf::from).or_else(|| probe.default_log_path()).unwrap_or_default();
