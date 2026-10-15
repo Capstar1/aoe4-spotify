@@ -15,6 +15,7 @@ component GreenBtn inherits Rectangle {
 export component PickWin inherits Window {
     in property <string> head: "Playlist";
     in property <string> state: "load";          // load | login | off | ok
+    in property <image> liked;                    // baked rounded gradient
     in property <[Tile]> tiles;                  // already filtered by the search
     in-out property <length> sc;
     in property <length> max-sc;
@@ -53,8 +54,8 @@ export component PickWin inherits Window {
             property <length> tx: 4px + mod(i, 4) * (GT + 10px);
             property <length> ty: 4px + floor(i / 4) * GR - root.sc;
             x: tx; y: ty; width: GT; height: GR;
-            Rectangle { x: 0; y: 0; width: GT; height: GT; border-radius: 8px; background: t.liked ? #6a6ad8 : #2c2c2c;
-                if t.liked: Rectangle { border-radius: 8px; background: @linear-gradient(135deg, #4527d6 0%, #9cc3e6 100%);
+            Rectangle { x: 0; y: 0; width: GT; height: GT; border-radius: 8px; background: t.liked ? transparent : #2c2c2c;
+                if t.liked: Rectangle { Image { x: 0; y: 0; width: GT; height: GT; source: root.liked; }
                     Path { x: (GT - 40px) / 2; y: (GT - 40px) / 2 - 2.4px; width: 40px; height: 40px; viewbox-width: 100; viewbox-height: 100; fill: white;
                         commands: "M 50 69 L 31.2 50 A 10.5 10.5 0 1 1 50 40 A 10.5 10.5 0 1 1 68.8 50 Z"; } }
                 if !t.liked && t.has-img: Image { width: GT; height: GT; source: t.img; }

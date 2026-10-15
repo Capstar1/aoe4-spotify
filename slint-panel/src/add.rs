@@ -30,6 +30,11 @@ pub fn open(eng: &Arc<Engine>) {
     w.on_open_menu(|| { if with(|a| a.lists.is_some()).unwrap_or(false) { show_menu(); return; } say("Loading your playlists\u{2026}", false);
         api("playlists", String::new(), |v| { with(|a| a.lists = Some(v.as_array().cloned().unwrap_or_default())); say("Click a song to add it", false); show_menu(); }); });
     w.on_pick(|i| { let Some(p) = with(|a| a.lists.as_ref().and_then(|l| l.get(i as usize).cloned())).flatten() else { return }; pick(p); });
+    let ww = w.as_weak();
+    w.on_drag(move |i, k, x, y| { let Some(w) = ww.upgrade() else { return };
+        let drop = k == "drop"; let over = crate::panel_point(w.window(), x, y).is_some();
+        intros::drag_over(over && !drop);
+        if drop && over { if let Some(it) = with(|a| a.items.get(i as usize).cloned()).flatten() { intros::drop_on_page_items(vec![it]); } } });
     w.on_add(|i| { if let Some(it) = with(|a| a.items.get(i as usize).cloned()).flatten() { intros::add_songs(vec![it]); } });
     let tick = Timer::default();
     tick.start(TimerMode::Repeated, Duration::from_millis(250), || { let v = netimg::VER.load(std::sync::atomic::Ordering::SeqCst); if with(|a| { let c = a.ver != v; a.ver = v; c }).unwrap_or(false) { paint(); } });

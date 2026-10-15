@@ -239,3 +239,15 @@ fn sub_shot() -> Result<(), slint::PlatformError> {
     slint::Timer::single_shot(Duration::from_millis(600), move || { add::snapshot(&out); pick::snapshot(&out); access::snapshot(&out); let _ = slint::quit_event_loop(); });
     slint::run_event_loop()
 }
+
+/// Pointer at (x, y) logical in window `w`: inside the shown panel? -> panel logical point (screen positions, both windows' scale).
+pub fn panel_point(w: &slint::Window, x: f32, y: f32) -> Option<(f32, f32)> {
+    let u = PANEL.with(|p| p.borrow().as_ref().and_then(|w| w.upgrade()))?; if !windows::panel_visible() { return None; }
+    let pw = u.window(); let (sa, sp) = (w.scale_factor(), pw.scale_factor());
+    let (gx, gy) = (w.position().x as f32 + x * sa, w.position().y as f32 + y * sa);
+    let (lx, ly) = ((gx - pw.position().x as f32) / sp, (gy - pw.position().y as f32) / sp);
+    let s = pw.size(); inside(lx, ly, s.width as f32 / sp, s.height as f32 / sp).then_some((lx, ly))
+}
+fn inside(x: f32, y: f32, w: f32, h: f32) -> bool { x >= 0.0 && y >= 0.0 && x < w && y < h }
+#[cfg(test)]
+mod pt_tests { #[test] fn inside() { assert!(super::inside(1.0, 1.0, 10.0, 10.0) && !super::inside(-1.0, 1.0, 10.0, 10.0) && !super::inside(1.0, 10.0, 10.0, 10.0)); } }

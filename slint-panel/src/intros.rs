@@ -364,4 +364,6 @@ pub fn drop_text(t: String) {
 }
 /// Something is dragged over the panel window: on the age page YOURS lights up ("DROP TO ADD").
 pub fn drag_over(on: bool) { if let Some(ui) = ui_of() { let g = ui.global::<IntroUi>(); let on = on && g.get_page() == "age"; if g.get_drop_over() != on { crate::tips_hide(&ui); g.set_drop_over(on); } } }
+/// Songs dragged out of the Add a song list (same process: no OLE drag source needed).
+pub fn drop_on_page_items(items: Vec<Value>) { if page() == "age" { add_songs(items); } else { tell("Open an age to drop songs on it", true); } }
 pub fn drop_on_page(t: String) { if page() == "age" { drop_text(t); } }

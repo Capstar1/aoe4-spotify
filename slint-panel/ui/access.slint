@@ -42,7 +42,7 @@ component Entry inherits Rectangle {
     callback edited(); callback accepted(); callback escape();
     height: 44px; border-radius: 8px; background: p.ent; border-width: 1.5px; border-color: ti.has-focus ? p.g : p.b2;
     if root.text == "": Text { x: 14px; width: parent.width - 28px; text: root.placeholder; font-size: 15px; color: p.dis; vertical-alignment: center; }
-    FocusScope { x: 14px; width: parent.width - 28px; height: 26px;
+    FocusScope { x: 12px; width: parent.width - 26px; height: 26px;
         key-pressed(e) => { if (e.text == Key.Escape) { root.escape(); return accept; } reject }
         ti := TextInput { text <=> root.text; font-size: 15px; color: p.enttx; enabled: root.enabled; single-line: true;
             vertical-alignment: center; edited => { root.edited(); } accepted => { root.accepted(); } } }
@@ -63,13 +63,13 @@ component Illus inherits Rectangle {
     width: 370px; height: 118px;
     Rectangle { x: 0; width: pw; border-radius: 10px; background: p.pg; }
     Rectangle { x: rx0; width: pw; border-radius: 10px; background: p.pg; }
-    Text { x: 12px; y: 10px; height: 16px; vertical-alignment: center; text: "Account"; font-size: 11.5px; font-weight: 700; color: p.pglab; }
+    Text { x: 11px; y: 8px; height: 16px; vertical-alignment: center; text: "Account"; font-size: 11.5px; font-weight: 700; color: p.pglab; }
     Rectangle { x: 8px; y: 34px; width: pw - 16px; height: 28px; border-radius: 8px; background: p.hl; border-width: 1.8px; border-color: p.hlo; }
     Rectangle { x: 14px; y: cy - 8px; width: 16px; height: 16px; border-radius: 4px; background: p.pgline; }
     Path { x: 0; y: 0; width: 370px; height: 118px; viewbox-width: 370; viewbox-height: 118; stroke: p.hltx; stroke-width: 2.2px; stroke-line-cap: round; fill: transparent;
         commands: "M 18.8 51.2 L 25.6 44.4"; }
     Path { x: 0; y: 0; width: 370px; height: 118px; viewbox-width: 370; viewbox-height: 118; fill: p.hltx; commands: "M 16.8 53.2 L 17.4 50.4 L 19.6 52.6 Z"; }
-    Text { x: 37px; y: cy - 8px; height: 16px; vertical-alignment: center; text: "Edit personal info"; font-size: 10.5px; font-weight: 700; color: p.hltx; }
+    Text { x: 36px; y: cy - 9px; height: 16px; vertical-alignment: center; text: "Edit personal info"; font-size: 10.5px; font-weight: 700; color: p.hltx; }
     Path { x: 0; y: 0; width: 370px; height: 118px; viewbox-width: 370; viewbox-height: 118; stroke: p.hltx; stroke-width: 1.8px; stroke-line-cap: round; fill: transparent;
         commands: "M 153 44 L 157 48 L 153 52"; }
     Rectangle { x: 12px; y: 78px; width: 149px * 0.62; height: 6px; border-radius: 3px; background: p.pgline; }
@@ -80,9 +80,9 @@ component Illus inherits Rectangle {
     Path { x: 0; y: 0; width: 370px; height: 118px; viewbox-width: 370; viewbox-height: 118; stroke: p.hlo; stroke-width: 2px; stroke-line-cap: round; fill: transparent;
         commands: "M 179 59 L 191 59 M 186.5 54.5 L 191 59 L 186.5 63.5"; }
     Rectangle { x: rx0 + 12px; y: 15px; width: 149px * 0.55; height: 6px; border-radius: 3px; background: p.pgline; }
-    Text { x: rx0 + 12px; y: 34px; height: 16px; vertical-alignment: center; text: "Email"; font-size: 10.5px; font-weight: 700; color: p.pglab; }
+    Text { x: rx0 + 11px; y: 33px; height: 16px; vertical-alignment: center; text: "Email"; font-size: 10.5px; font-weight: 700; color: p.pglab; }
     Rectangle { x: rx0 + 8px; y: 52px; width: pw - 16px; height: 26px; border-radius: 8px; background: p.hl; border-width: 1.8px; border-color: p.hlo; }
-    Text { x: rx0 + 16px; y: 57px; height: 16px; vertical-alignment: center; text: "you@example.com"; font-size: 10px; color: p.hltx; }
+    Text { x: rx0 + 15px; y: 56px; height: 16px; vertical-alignment: center; text: "you@example.com"; font-size: 10px; color: p.hltx; }
     Rectangle { x: rx0 + 12px; y: 92px; width: 149px * 0.7; height: 6px; border-radius: 3px; background: p.pgline; }
 }
 
@@ -100,7 +100,7 @@ export component AccessWin inherits Window {
     T { x: 28px; cy: 70px; text: "Ask for access in 3 easy steps."; font-size: 15px; color: p.mu; }
     Link { x: 28px; cy: 92px; p: p; text: "Or use your own Spotify app"; clicked => { root.open-own(); } }
     if root.done: VerticalLayout { x: 28px; y: 128px; width: 450px; height: 160px; alignment: start;
-        Text { text: "✔  Done!"; font-size: 30px; font-weight: 700; color: p.g; }
+        Text { text: "✔ Done!"; font-size: 30px; font-weight: 700; color: p.g; }
         Rectangle { height: 8px; }
         Text { text: "You'll get access in about a minute."; font-size: 20px; font-weight: 700; color: p.tx; }
         Rectangle { height: 6px; }

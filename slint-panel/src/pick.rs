@@ -25,6 +25,7 @@ pub fn open(eng: &Arc<Engine>) {
     close();   // like 1.1 small_window: one picker, re-read for its new target
     let Ok(w) = PickWin::new() else { return };
     w.set_drop_path(paths::dashed_rect(364.0, 46.0, 10.0, 1.4, 5.0, 4.0).into());
+    w.set_liked(liked_tile(79.5));
     w.on_dismiss(close); w.window().on_close_requested(|| { close(); slint::CloseRequestResponse::HideWindow });
     w.on_select(|i| { with(|p| { let f = shown(p); if let Some(it) = f.get(i as usize) { p.sel = it["uri"].as_str().map(String::from); p.err.clear(); } }); draw(); });
     w.on_use_it(use_sel);
@@ -130,3 +131,13 @@ mod tests {
 }
 /// Test switch: save the window as a PNG.
 pub fn snapshot(path: &str) { with(|a| if let Ok(b) = a.w.window().take_snapshot() { let _ = crate::save_png(path, b.as_bytes(), b.width(), b.height()); }); }
+
+/// Liked Songs tile: 135deg #4527d6 -> #9cc3e6 with r = 8 corners, baked at the screen scale (the software renderer leaves gradients square).
+pub fn liked_tile(d: f32) -> slint::Image {
+    let k = crate::assets::scale(); let n = (d * k).round().max(1.0) as u32;
+    let (a, b) = ([0x45, 0x27, 0xd6], [0x9c, 0xc3, 0xe6]);
+    let i = image::RgbaImage::from_fn(n, n, |x, y| { let t = (x + y) as f32 / (2 * n - 2).max(1) as f32;
+        let c = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8; image::Rgba([c(0), c(1), c(2), 255]) });
+    let i = crate::netimg::corners(i, (8.0 * k).round() as u32);
+    slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(i.as_raw(), n, n))
+}

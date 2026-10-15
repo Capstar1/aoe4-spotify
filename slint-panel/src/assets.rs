@@ -7,6 +7,7 @@ include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 thread_local! { static CACHE: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new()); static SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) }; }
 /// Window scale factor: picks @1 / @1.5 renders and the pixel size of resampled portraits.
 pub fn set_scale(f: f32) { SCALE.with(|s| s.set(f)); }
+pub fn scale() -> f32 { SCALE.with(|s| s.get()) }
 fn hi() -> bool { SCALE.with(|s| s.get()) > 1.25 }
 
 fn bytes(path: &str) -> Option<&'static [u8]> { ASSETS.iter().find(|(n, _)| *n == path).map(|(_, b)| *b) }
