@@ -20,11 +20,13 @@ Spotify music that follows your ages in **Age of Empires IV**.
 - **Your playlists:** pick from your Liked Songs and Spotify playlists, or make your own in the app with drag and drop.
 - **Stays out of your way:** pausing Spotify holds the switching, works in AI games, and your shuffle and repeat settings come back afterwards.
 
+Version 1.1, measured on one PC against 1.0.9: about 41 MB while idle (was 74 MB), the window opens in about 50 ms (was about 300 ms), and the installer is 8 MB (was 26 MB).
+
 ## Requirements
 
 - Windows 10/11 and Age of Empires IV on **Steam**.
 - **Spotify Premium** and the Spotify desktop app.
-- Access to the app's Spotify login. New users can request a seat from the app (approved by hand), or use their own Spotify app from the gear menu.
+- Access to the app's Spotify login. New users can request a seat from the app (approved by hand).
 
 ## Install
 
