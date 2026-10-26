@@ -1,6 +1,6 @@
 [package]
 name = "aoe4engine"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "UI-independent AoE4 Spotify app logic: state, game watcher, Spotify worker, settings, 1.0.9 import, updates, presets, picker data, guides. Used by the Slint front end (and usable by any other)."
 
