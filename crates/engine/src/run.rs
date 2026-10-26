@@ -273,8 +273,8 @@ pub fn push(st: &Mutex<Status>, line: String) {
 pub struct WatchOpts { pub skip_older_than: Option<SystemTime> }
 
 pub fn watch(app: Arc<Engine>, path: PathBuf, opts: WatchOpts) {
-    let la = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default();
-    let crc = crate::sys::test_env("AOE4S_LOGFILES").map(PathBuf::from).unwrap_or_else(|| la.join(r"Documents\My Games\Age of Empires IV\LogFiles"));
+    let docs = aoe4core::os::documents_dir().unwrap_or_default();
+    let crc = crate::sys::test_env("AOE4S_LOGFILES").map(PathBuf::from).unwrap_or_else(|| docs.join(r"My Games\Age of Empires IV\LogFiles"));
     let mut game = Aoe4::new(Aoe4::datacrc_resolver(crc));
     let mut sw = { let s = app.settings.lock().unwrap(); let mut w = Switcher::new(s.enabled, s.fade_seconds, resolve(&s)); w.after = after_cfg(&s); w.start_delay = 3.0; w };
     let mut seen = app.ver.load(Ordering::SeqCst);
@@ -287,6 +287,7 @@ pub fn watch(app: Arc<Engine>, path: PathBuf, opts: WatchOpts) {
     // catch-up: read what is already there silently (learn who you are), act only on new lines
     let mut catching = true;
     let mut published: Option<(bool, Option<String>, Option<String>)> = None;
+    let mut missing = false;
     loop {
         if app.stop.load(Ordering::Relaxed) { break; }
         apply_cfg(&app, &mut sw, &mut cfg_stamp, &mut was_enabled, &cfg_path);
@@ -318,11 +319,13 @@ pub fn watch(app: Arc<Engine>, path: PathBuf, opts: WatchOpts) {
         let (lines, restarted) = match tail.poll() {
             Poll::Lines(v) => (v, false), Poll::Restarted(v) => (v, true),
             Poll::Missing => {
+                if !missing { missing = true; push(&app.status, format!("Game log not found at {}", path.display())); }
                 app.status.lock().unwrap().watching = false;
                 for _ in 0..8 { if app.stop.load(Ordering::Relaxed) { return; } std::thread::sleep(Duration::from_millis(250)); }
                 continue;
             }
         };
+        if missing { missing = false; push(&app.status, format!("Game log found at {}", path.display())); }
         if restarted {
             game.reset_session();
             { let mut s = app.status.lock().unwrap(); s.in_match = false; s.age = None; s.playing = None; }

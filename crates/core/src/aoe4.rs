@@ -151,7 +151,7 @@ impl GameAdapter for Aoe4 {
     fn label(&self) -> &'static str { "Age of Empires IV" }
     fn process_names(&self) -> &'static [&'static str] { &["RelicCardinal.exe"] }
     fn default_log_path(&self) -> Option<PathBuf> {
-        std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(r"Documents\My Games\Age of Empires IV\warnings.log"))
+        crate::os::documents_dir().map(|d| d.join(r"My Games\Age of Empires IV\warnings.log"))
     }
     fn ages(&self) -> &'static [(&'static str, &'static str)] { AGES }
     fn reset_session(&mut self) { self.reset_match(); }
