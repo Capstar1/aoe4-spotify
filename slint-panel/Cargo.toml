@@ -1,6 +1,6 @@
 [package]
 name = "aoe4spotify-slint"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2021"
 description = "AoE4 Spotify with a Slint UI (no WebView2): views in ui/*.slint, logic in aoe4engine"
 

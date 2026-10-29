@@ -8,7 +8,7 @@
 ; "<this folder>\AoE4 Spotify.exe" %command% (your other options stay), and the 1.1 exe imports the 1.0.9
 ; settings, intros, presets, covers, Spotify login and saved game-music level (verified), then deletes the 1.0.9 data.
 #ifndef AppVer
-#define AppVer "1.1.1"
+#define AppVer "1.1.2"
 #endif
 #ifdef TEST
 ; test build (ISCC /DTEST): the 1.0.9 TEST build's AppId/name/folder, so upgrade tests never touch a real install

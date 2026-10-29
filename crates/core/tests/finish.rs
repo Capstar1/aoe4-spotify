@@ -77,3 +77,18 @@ fn an_empty_civ_pool_is_no_intro() {
     assert_eq!(intro_track(&s, "imperial", "english", Some("spotify:track:zzz"), 0).as_deref(), Some("spotify:track:aaa"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn scots_and_vikings_are_in_the_catalog_and_get_the_default_intro() {
+    let cat: serde_json::Value = serde_json::from_str(aoe4core::intros::CATALOG).unwrap();
+    let ids: Vec<&str> = cat["factions"].as_array().unwrap().iter().map(|f| f[0].as_str().unwrap()).collect();
+    assert!(ids.contains(&"scots") && ids.contains(&"vikings"));
+    let d = std::env::temp_dir().join(format!("aoe4s_newciv_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d); std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("base.json"), r#"{"boss_intro":{"enabled":true,"pools":{"english":["spotify:track:aaa"]},"default":["spotify:track:zzz"]},"default_playlists":{}}"#).unwrap();
+    std::fs::write(d.join("user.json"), r#"{"boss_intro_enabled":true}"#).unwrap();
+    std::fs::write(d.join("names.json"), "{}").unwrap();
+    let s = settings::load(&d.join("base.json"), &d.join("user.json"), &d.join("names.json"));
+    for civ in ["scots", "vikings"] { assert_eq!(intro_track(&s, "imperial", civ, None, 0).as_deref(), Some("spotify:track:zzz"), "{civ}"); }
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -245,3 +245,11 @@ fn after_match_stop_and_winloss() {
     let pl = run_am(AfterMatch { mode: "playlist".into(), playlist: "spotify:playlist:x".into(), ..Default::default() });
     assert!(matches!(pl.last(), Some(Action::AfterMatch { mode, playlist, .. }) if mode == "playlist" && playlist == "spotify:playlist:x"));
 }
+#[test]
+fn scots_and_vikings_are_picked_up_from_the_lobby_line() {
+    for civ in ["scots", "vikings"] {
+        let l = format!("GAME -- Human Player: 0 Capstar 111 0 {civ}");
+        let (evs, _) = run(&["GAME -- Current Steam name is [Capstar]", "[Match Flow] GameApp::RequestGameBegin()", &l, "GAME -- Human Player: 1 Enemy 222 1 english", "GAME -- Starting mission"]);
+        assert!(evs.iter().any(|e| matches!(e, GameEvent::MatchStart { civ: Some(c) } if c == civ)), "{civ}");
+    }
+}
